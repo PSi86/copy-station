@@ -7,7 +7,9 @@ After=multi-user.target
 Type=simple
 # Code lives under /opt/copystation (see scripts/install.sh).
 WorkingDirectory=/opt/copystation
-ExecStart=/usr/bin/python3 -m copystation.daemon --config /etc/copystation/config.yaml
+# Use the venv interpreter created by install.sh (has fastapi/uvicorn and, via
+# --system-site-packages, the apt-installed pyudev/libgpiod).
+ExecStart=/opt/copystation/venv/bin/python -m copystation.daemon --config /etc/copystation/config.yaml
 # Root needed for mount/umount and GPIO access.
 User=root
 # Restart on crash, but do not hammer in a tight loop.

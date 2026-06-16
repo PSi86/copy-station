@@ -23,17 +23,16 @@ _BEEPS: dict[State, list[tuple[float, float]]] = {
 
 class BuzzerBackend(StatusIndicator):
     def __init__(self, cfg: dict) -> None:
-        import gpiod  # lazy: only present on the Cubie
+        from .gpio import open_output_lines
 
         offset = cfg.get("line")
         if offset is None:
             raise ValueError("buzzer.line is not configured")
 
-        chip_name = cfg.get("gpiochip", "gpiochip0")
-        self._chip = gpiod.Chip(chip_name)
-        self._line = self._chip.get_line(int(offset))
-        self._line.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
-        self._line.set_value(0)
+        chip = cfg.get("gpiochip", "gpiochip0")
+        self._offset = int(offset)
+        self._gpio = open_output_lines(chip, [self._offset], "copystation")
+        self._gpio.set(self._offset, False)
 
         self._last: State | None = None
         self._lock = threading.Lock()
@@ -51,15 +50,11 @@ class BuzzerBackend(StatusIndicator):
 
         with self._lock:
             for on, pause in pattern:
-                self._line.set_value(1)
+                self._gpio.set(self._offset, True)
                 time.sleep(on)
-                self._line.set_value(0)
+                self._gpio.set(self._offset, False)
                 if pause:
                     time.sleep(pause)
 
     def close(self) -> None:
-        try:
-            self._line.set_value(0)
-            self._line.release()
-        except Exception:  # pragma: no cover
-            pass
+        self._gpio.release()

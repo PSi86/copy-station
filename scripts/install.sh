@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Installer for the Copy_Station on the Radxa Cubie A7S (Bullseye CLI).
-# Idempotent: can be run multiple times.
+# Installer for the Copy_Station. Works on the Radxa Cubie A7S (Debian Bullseye)
+# and on Raspberry Pi 4/5 (Raspberry Pi OS Bookworm). Idempotent.
 #
 #   sudo ./scripts/install.sh
 #
@@ -10,24 +10,39 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="/opt/copystation"
 CONFIG_DIR="/etc/copystation"
+VENV_DIR="${INSTALL_DIR}/venv"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root (sudo)." >&2
   exit 1
 fi
 
+# Detect the Debian/Raspbian codename to pick the right exFAT package.
+CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
+
 echo ">> Installing system dependencies ..."
 apt-get update
-apt-get install -y rsync python3 python3-pip python3-pyudev python3-libgpiod python3-yaml
+apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-yaml
 
-# Web interface (FastAPI/uvicorn) -- only required if the web UI is enabled,
-# but installed unconditionally so toggling web.enabled needs no extra steps.
-echo ">> Installing web interface dependencies (pip) ..."
-pip3 install --upgrade "fastapi>=0.100" "uvicorn>=0.20"
+# exFAT support so camera/SD cards mount (package name differs by release).
+echo ">> Installing exFAT support ..."
+if [[ "${CODENAME}" == "bullseye" ]]; then
+  apt-get install -y exfat-fuse exfat-utils || true
+else
+  apt-get install -y exfatprogs || apt-get install -y exfat-fuse || true
+fi
 
 echo ">> Copying code to ${INSTALL_DIR} ..."
 mkdir -p "${INSTALL_DIR}"
 cp -r "${REPO_DIR}/copystation" "${INSTALL_DIR}/"
+
+# Web interface (FastAPI/uvicorn) in a venv with access to the system packages
+# (pyudev/libgpiod). This is PEP 668-safe, so it works on Bookworm where a plain
+# "pip install" into the system Python is blocked.
+echo ">> Setting up Python venv and web dependencies ..."
+python3 -m venv --system-site-packages "${VENV_DIR}"
+"${VENV_DIR}/bin/pip" install --upgrade pip
+"${VENV_DIR}/bin/pip" install "fastapi>=0.100" "uvicorn>=0.20"
 
 echo ">> Configuration in ${CONFIG_DIR} ..."
 mkdir -p "${CONFIG_DIR}"

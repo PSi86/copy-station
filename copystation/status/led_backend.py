@@ -28,21 +28,20 @@ _PATTERN: dict[State, tuple[bool, bool, bool, bool]] = {
 
 class LedBackend(StatusIndicator):
     def __init__(self, cfg: dict) -> None:
-        import gpiod  # lazy: only present on the Cubie
+        from .gpio import open_output_lines
 
-        self._gpiod = gpiod
-        chip_name = cfg.get("gpiochip", "gpiochip0")
+        chip = cfg.get("gpiochip", "gpiochip0")
         lines = cfg.get("lines", {})
 
-        self._chip = gpiod.Chip(chip_name)
-        self._lines: dict[str, object] = {}
-        for role in ("ready", "busy", "error"):
-            offset = lines.get(role)
-            if offset is None:
-                continue
-            line = self._chip.get_line(int(offset))
-            line.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
-            self._lines[role] = line
+        # role -> line offset, for the roles that are actually configured.
+        self._role_offset: dict[str, int] = {
+            role: int(lines[role])
+            for role in ("ready", "busy", "error")
+            if lines.get(role) is not None
+        }
+        self._gpio = open_output_lines(
+            chip, list(self._role_offset.values()), "copystation"
+        )
 
         self._lock = threading.Lock()
         self._current = State.READY
@@ -56,8 +55,8 @@ class LedBackend(StatusIndicator):
 
     def _apply(self, ready: bool, busy: bool, error: bool) -> None:
         mapping = {"ready": ready, "busy": busy, "error": error}
-        for role, line in self._lines.items():
-            line.set_value(1 if mapping[role] else 0)
+        for role, offset in self._role_offset.items():
+            self._gpio.set(offset, mapping[role])
 
     def _run(self) -> None:
         phase = True
@@ -76,9 +75,4 @@ class LedBackend(StatusIndicator):
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1.0)
-        for line in self._lines.values():
-            try:
-                line.set_value(0)
-                line.release()
-            except Exception:  # pragma: no cover
-                pass
+        self._gpio.release()

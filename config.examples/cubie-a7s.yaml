@@ -1,0 +1,47 @@
+# Copy_Station example configuration -- Radxa Cubie A7S (Allwinner A733)
+#
+# Copy to /etc/copystation/config.yaml and adjust the GPIO line offsets.
+#
+# GPIO notes for the Cubie:
+# * Determine the chip and line offsets with `gpiodetect` / `gpioinfo`. The
+#   Allwinner mapping is not BCM-like, so the offsets below are placeholders --
+#   read them off `gpioinfo` for the header pins you wire to.
+
+mount_base: /run/copystation/mnt
+media_dirname: DCIM
+
+identify:
+  source_usb_vendor_ids: []
+  source_usb_product_ids: []
+  min_partition_gb: 6
+  require_source_smaller_than_target: true
+
+cleanup:
+  keep_dcim_folder: true
+
+status:
+  backends: [log, grove_led_bar]
+
+  grove_led_bar:
+    gpiochip: gpiochip0   # confirm with `gpiodetect`
+    clock_line: null      # set from `gpioinfo`
+    data_line: null       # set from `gpioinfo`
+    reverse: false
+
+  led:
+    gpiochip: gpiochip0
+    lines:
+      ready: null
+      busy: null
+      error: null
+
+  buzzer:
+    gpiochip: gpiochip0
+    line: null
+
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+
+settle_seconds: 2.0

@@ -31,7 +31,13 @@ status:
   # Any combination of: log, led, buzzer, ws2812, grove_led_bar
   backends: [log]
 
-  # Fill in GPIO pins only after running `gpiodetect` / `gpioinfo` on the Cubie.
+  # GPIO notes:
+  # * Cubie A7S: find chip/offsets with `gpiodetect` / `gpioinfo`.
+  # * Raspberry Pi 4/5: chip is `gpiochip0` (older Pi 5 images: `gpiochip4`),
+  #   and the line offset equals the BCM GPIO number.
+  # Ready-made starting points: config.examples/raspberry-pi.yaml and
+  # config.examples/cubie-a7s.yaml.
+  # Fill in GPIO pins only after confirming them on the target board.
   led:
     gpiochip: gpiochip0
     lines:

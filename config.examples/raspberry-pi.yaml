@@ -1,0 +1,50 @@
+# Copy_Station example configuration -- Raspberry Pi 4 / 5
+#
+# Copy to /etc/copystation/config.yaml and adjust the GPIO line offsets.
+#
+# GPIO notes for the Pi:
+# * The 40-pin header is on `gpiochip0` (Pi 4, and Pi 5 with recent kernels).
+#   On older Pi 5 images the header is on `gpiochip4` (kept as an alias) -- set
+#   `gpiochip: gpiochip4` then. Check with `gpiodetect` / `gpioinfo`.
+# * The libgpiod line offset == the BCM GPIO number. So `data_line: 17` means
+#   BCM GPIO17 (physical pin 11). Pick free BCM pins for your wiring.
+
+mount_base: /run/copystation/mnt
+media_dirname: DCIM
+
+identify:
+  source_usb_vendor_ids: []
+  source_usb_product_ids: []
+  min_partition_gb: 6
+  require_source_smaller_than_target: true
+
+cleanup:
+  keep_dcim_folder: true
+
+status:
+  backends: [log, grove_led_bar]
+
+  grove_led_bar:
+    gpiochip: gpiochip0   # gpiochip4 on older Pi 5 images
+    clock_line: 18        # BCM GPIO18 (example -- set to your wiring)
+    data_line: 17         # BCM GPIO17 (example -- set to your wiring)
+    reverse: false
+
+  # Alternative single LEDs instead of the bar (BCM numbers):
+  led:
+    gpiochip: gpiochip0
+    lines:
+      ready: 27           # BCM GPIO27 (green)
+      busy: 22            # BCM GPIO22 (yellow)
+      error: 23           # BCM GPIO23 (red)
+
+  buzzer:
+    gpiochip: gpiochip0
+    line: 24              # BCM GPIO24
+
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+
+settle_seconds: 2.0

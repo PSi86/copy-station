@@ -53,9 +53,9 @@ def segments_for(progress: float) -> int:
 
 class GroveLedBarBackend(StatusIndicator):
     def __init__(self, cfg: dict) -> None:
-        import gpiod  # lazy: only present on the Cubie
+        from .gpio import open_output_lines
 
-        chip_name = cfg.get("gpiochip", "gpiochip0")
+        chip = cfg.get("gpiochip", "gpiochip0")
         clock_off = cfg.get("clock_line")
         data_off = cfg.get("data_line")
         if clock_off is None or data_off is None:
@@ -64,11 +64,11 @@ class GroveLedBarBackend(StatusIndicator):
         # If True, segment 1 is the opposite physical end (orientation fix).
         self._reverse = bool(cfg.get("reverse", False))
 
-        self._chip = gpiod.Chip(chip_name)
-        self._clock = self._chip.get_line(int(clock_off))
-        self._data = self._chip.get_line(int(data_off))
-        self._clock.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
-        self._data.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
+        self._clock_off = int(clock_off)
+        self._data_off = int(data_off)
+        self._gpio = open_output_lines(
+            chip, [self._clock_off, self._data_off], "copystation"
+        )
 
         self._lock = threading.Lock()
         self._phase = State.READY
@@ -95,10 +95,9 @@ class GroveLedBarBackend(StatusIndicator):
         self._thread.join(timeout=1.0)
         try:
             self._render([_OFF] * SEGMENT_COUNT)
-            self._clock.release()
-            self._data.release()
         except Exception:  # pragma: no cover
             pass
+        self._gpio.release()
 
     # ----- render loop ---------------------------------------------------------
 
@@ -153,14 +152,14 @@ class GroveLedBarBackend(StatusIndicator):
 
     def _send16(self, value: int) -> None:
         for i in range(15, -1, -1):
-            self._data.set_value((value >> i) & 1)
+            self._gpio.set(self._data_off, bool((value >> i) & 1))
             self._clock_state ^= 1
-            self._clock.set_value(self._clock_state)
+            self._gpio.set(self._clock_off, bool(self._clock_state))
 
     def _latch(self) -> None:
         # Internal-latch sequence: pull data low, then toggle it four times.
-        self._data.set_value(0)
+        self._gpio.set(self._data_off, False)
         time.sleep(0.0000002)  # ~200 ns
         for _ in range(4):
-            self._data.set_value(1)
-            self._data.set_value(0)
+            self._gpio.set(self._data_off, True)
+            self._gpio.set(self._data_off, False)

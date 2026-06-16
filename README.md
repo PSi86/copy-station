@@ -62,25 +62,41 @@ pip install -r requirements.txt pytest
 pytest
 ```
 
-## Deployment (Cubie)
+## Deployment
+
+Runs on the **Radxa Cubie A7S** (Debian Bullseye) and on **Raspberry Pi 4 / 5**
+(Raspberry Pi OS Bookworm 64-bit).
 
 ```
 sudo ./scripts/install.sh
 ```
 
-Installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`), copies the
-code to `/opt/copystation`, creates `/etc/copystation/config.yaml` and enables
-the service.
+Installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`, exFAT
+support), copies the code to `/opt/copystation`, creates a venv with FastAPI/
+uvicorn (PEP 668-safe via `--system-site-packages`), writes
+`/etc/copystation/config.yaml` and enables the service.
 
-Determine the GPIO pins for LEDs/buzzer before the first hardware test:
+Determine the GPIO pins for the status hardware before the first hardware test:
 
 ```
 gpiodetect
 gpioinfo
 ```
 
-and enter them in `/etc/copystation/config.yaml` under `status.led` /
-`status.buzzer`, then set `status.backends` accordingly.
+and enter them in `/etc/copystation/config.yaml`, then set `status.backends`.
+
+### Platform notes (GPIO)
+
+The GPIO layer auto-detects libgpiod **v1 and v2**, so the same code runs on the
+Cubie (Bullseye, v1) and on Raspberry Pi OS (Bookworm).
+
+* **Raspberry Pi 4 / 5:** the 40-pin header is on `gpiochip0` (older Pi 5 images:
+  `gpiochip4`, an alias). The libgpiod **line offset equals the BCM GPIO number**.
+* **Cubie A7S:** read chip and offsets off `gpioinfo` (the Allwinner mapping is
+  not BCM-like).
+
+Ready-made starting points: [config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml)
+and [config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml).
 
 ## Source/target detection
 
