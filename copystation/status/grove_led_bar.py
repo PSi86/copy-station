@@ -1,0 +1,166 @@
+"""Status on a Seeed Grove LED Bar v2.0 (MY9221 driver).
+
+The MY9221 is NOT an I2C device -- it uses a proprietary 2-wire serial protocol
+(DI = data, DCKI = clock). We bit-bang it over two GPIO lines via libgpiod. The
+protocol is timing-uncritical (no minimum clock, edge-based latch), so Python
+scheduler jitter delays but never corrupts a frame.
+
+Behaviour:
+* During a copy (``COPYING``): light segments ``1..segments_for(progress)`` and
+  blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to signal activity.
+* Idle: a single steady segment by phase -- Ready = green (segment 3),
+  Detecting = yellow (segment 2), Error = red (segment 1). Success = short green
+  blink on segment 3.
+
+The exact latch timing and the segment-to-channel orientation must be validated
+on the hardware (see the plan's open points).
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+from . import State, StatusIndicator
+
+# Number of segments on the bar.
+SEGMENT_COUNT = 10
+
+# Per-segment "on" / "off" 16-bit grayscale values. 0xFFFF is full-on in both
+# the 8-bit and 16-bit grayscale modes, 0x0000 is off -- safe for plain on/off.
+_ON = 0xFFFF
+_OFF = 0x0000
+
+# MY9221 command word: 0x0000 selects the default mode.
+_CMD = 0x0000
+
+# Idle phase -> which single segment (1-based) is lit steady.
+_IDLE_SEGMENT = {
+    State.READY: 3,      # green
+    State.DETECTING: 2,  # yellow
+    State.ERROR: 1,      # red
+}
+
+
+def segments_for(progress: float) -> int:
+    """Map a progress fraction (0.0..1.0) to a number of lit segments (0..10)."""
+    if progress <= 0.0:
+        return 0
+    if progress >= 1.0:
+        return SEGMENT_COUNT
+    return max(0, min(SEGMENT_COUNT, int(progress * SEGMENT_COUNT + 0.5)))
+
+
+class GroveLedBarBackend(StatusIndicator):
+    def __init__(self, cfg: dict) -> None:
+        import gpiod  # lazy: only present on the Cubie
+
+        chip_name = cfg.get("gpiochip", "gpiochip0")
+        clock_off = cfg.get("clock_line")
+        data_off = cfg.get("data_line")
+        if clock_off is None or data_off is None:
+            raise ValueError("grove_led_bar.clock_line and data_line must be set")
+
+        # If True, segment 1 is the opposite physical end (orientation fix).
+        self._reverse = bool(cfg.get("reverse", False))
+
+        self._chip = gpiod.Chip(chip_name)
+        self._clock = self._chip.get_line(int(clock_off))
+        self._data = self._chip.get_line(int(data_off))
+        self._clock.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
+        self._data.request(consumer="copystation", type=gpiod.LINE_REQ_DIR_OUT)
+
+        self._lock = threading.Lock()
+        self._phase = State.READY
+        self._progress = 0.0
+        self._last_levels: list[int] | None = None
+        self._clock_state = 0
+
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    # ----- StatusIndicator interface -------------------------------------------
+
+    def set_state(self, state: State) -> None:
+        with self._lock:
+            self._phase = state
+
+    def set_progress(self, fraction: float) -> None:
+        with self._lock:
+            self._progress = fraction
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        try:
+            self._render([_OFF] * SEGMENT_COUNT)
+            self._clock.release()
+            self._data.release()
+        except Exception:  # pragma: no cover
+            pass
+
+    # ----- render loop ---------------------------------------------------------
+
+    def _run(self) -> None:
+        blink_on = True
+        while not self._stop.is_set():
+            with self._lock:
+                phase = self._phase
+                progress = self._progress
+
+            if phase is State.COPYING:
+                count = segments_for(progress)
+                levels = self._first_n(count) if blink_on else [_OFF] * SEGMENT_COUNT
+                self._render(levels)
+                blink_on = not blink_on
+                time.sleep(0.05)  # 10 Hz toggle
+            elif phase is State.SUCCESS:
+                levels = self._single(3) if blink_on else [_OFF] * SEGMENT_COUNT
+                self._render(levels)
+                blink_on = not blink_on
+                time.sleep(0.1)
+            else:
+                segment = _IDLE_SEGMENT.get(phase)
+                self._render(self._single(segment) if segment else [_OFF] * SEGMENT_COUNT)
+                blink_on = True
+                time.sleep(0.05)
+
+    def _first_n(self, n: int) -> list[int]:
+        return [_ON if i < n else _OFF for i in range(SEGMENT_COUNT)]
+
+    def _single(self, segment_1based: int) -> list[int]:
+        levels = [_OFF] * SEGMENT_COUNT
+        if 1 <= segment_1based <= SEGMENT_COUNT:
+            levels[segment_1based - 1] = _ON
+        return levels
+
+    # ----- MY9221 bit-bang -----------------------------------------------------
+
+    def _render(self, levels: list[int]) -> None:
+        if levels == self._last_levels:
+            return
+        self._last_levels = list(levels)
+
+        ordered = list(reversed(levels)) if self._reverse else levels
+        # MY9221 has 12 channels; the bar uses the first 10, the rest stay off.
+        channels = ordered + [_OFF, _OFF]
+
+        self._send16(_CMD)
+        for value in channels:
+            self._send16(value)
+        self._latch()
+
+    def _send16(self, value: int) -> None:
+        for i in range(15, -1, -1):
+            self._data.set_value((value >> i) & 1)
+            self._clock_state ^= 1
+            self._clock.set_value(self._clock_state)
+
+    def _latch(self) -> None:
+        # Internal-latch sequence: pull data low, then toggle it four times.
+        self._data.set_value(0)
+        time.sleep(0.0000002)  # ~200 ns
+        for _ in range(4):
+            self._data.set_value(1)
+            self._data.set_value(0)

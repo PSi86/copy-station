@@ -1,0 +1,88 @@
+:root {
+  --bg: #14171c;
+  --card: #1d2129;
+  --fg: #e6e9ef;
+  --muted: #8b93a3;
+  --accent: #3aa0ff;
+  --ready: #36c46f;
+  --detecting: #e6b800;
+  --copying: #3aa0ff;
+  --error: #e0533d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+h1 { font-size: 1.4rem; margin: 0; }
+h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
+     color: var(--muted); margin: 0 0 0.75rem; }
+
+.badge {
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #2a2f3a;
+  text-transform: capitalize;
+}
+.badge.ready { background: var(--ready); color: #06210f; }
+.badge.detecting { background: var(--detecting); color: #2a2300; }
+.badge.copying { background: var(--copying); color: #042036; }
+.badge.error { background: var(--error); color: #2a0a05; }
+.badge.success { background: var(--ready); color: #06210f; }
+
+.card {
+  background: var(--card);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.progress-track {
+  height: 18px;
+  background: #2a2f3a;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--copying);
+  transition: width 0.4s ease;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+.muted { color: var(--muted); font-size: 0.85rem; }
+
+.storage { margin-bottom: 0.9rem; }
+.storage:last-child { margin-bottom: 0; }
+.storage .label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; }
+.storage-track { height: 12px; background: #2a2f3a; border-radius: 999px; overflow: hidden; }
+.storage-used { height: 100%; background: var(--accent); }
+
+footer { text-align: center; margin-top: 1rem; }

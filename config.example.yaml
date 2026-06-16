@@ -1,0 +1,66 @@
+# Copy_Station example configuration
+#
+# All values are optional -- if the file or a key is missing, the defaults from
+# copystation/config.py apply (status only via log, source detection purely by
+# the DCIM folder). On the Cubie, place it at /etc/copystation/config.yaml.
+
+# Base directory for the per-device mountpoints (one subfolder per partition).
+mount_base: /run/copystation/mnt
+
+# Name of the media subfolder on the source.
+media_dirname: DCIM
+
+identify:
+  # Optional hardening: only accept these USB VIDs/PIDs as the source.
+  # Leave empty = the source is detected by its DCIM folder alone.
+  # Read the DJI VID on the device with `lsusb` and enter it here (lowercase).
+  source_usb_vendor_ids: []   # e.g. ["2ca3"]
+  source_usb_product_ids: []
+  # Partitions smaller than this are ignored (e.g. boot/EFI partitions).
+  min_partition_gb: 6
+  # Require the source to be smaller than the target, so the larger device is
+  # never used as source even if it also carries a DCIM folder.
+  require_source_smaller_than_target: true
+
+cleanup:
+  # true: delete DCIM contents, keep the DCIM folder.
+  # false: remove the whole DCIM folder (the camera recreates it).
+  keep_dcim_folder: true
+
+status:
+  # Any combination of: log, led, buzzer, ws2812, grove_led_bar
+  backends: [log]
+
+  # Fill in GPIO pins only after running `gpiodetect` / `gpioinfo` on the Cubie.
+  led:
+    gpiochip: gpiochip0
+    lines:
+      ready: null    # line offset of the green LED
+      busy: null     # line offset of the yellow LED
+      error: null    # line offset of the red LED
+
+  buzzer:
+    gpiochip: gpiochip0
+    line: null       # line offset of the buzzer
+
+  ws2812:
+    device: /dev/spidev0.0
+    led_count: 1
+
+  # Seeed Grove LED Bar v2.0 (MY9221), bit-banged over two GPIO lines.
+  # During a copy: proportional fill blinking at 10 Hz. Idle: single steady LED
+  # (Ready=green/3, Detecting=yellow/2, Error=red/1).
+  grove_led_bar:
+    gpiochip: gpiochip0
+    clock_line: null   # line offset of the Grove clock pin (DCKI)
+    data_line: null    # line offset of the Grove data pin (DI)
+    reverse: false     # flip if segment 1 is the wrong physical end
+
+# Optional local web interface (status + progress + storage, future settings).
+web:
+  enabled: false
+  host: 0.0.0.0        # all interfaces; robust to interfaces going up/down
+  port: 8080
+
+# Settle time (seconds) after device detection before mounting.
+settle_seconds: 2.0

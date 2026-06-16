@@ -1,0 +1,18 @@
+# Runtime dependencies of Copy_Station
+#
+# Hardware dependencies (only needed on the Cubie / Linux) are installed via
+# system packages, NOT via pip:
+#   apt install rsync python3-pyudev python3-libgpiod
+#
+# This list only covers the pure-Python dependencies that also run on the
+# Windows dev machine.
+
+PyYAML>=5.3
+
+# Web interface (only needed when status.web.enabled = true):
+fastapi>=0.100
+uvicorn>=0.20
+
+# Development/tests only:
+#   pytest>=6.0
+#   httpx>=0.24   (FastAPI TestClient)

@@ -1,0 +1,8 @@
+# Normalize line endings: store everything as LF in the repository.
+* text=auto eol=lf
+
+# Files that MUST stay LF (they run on the Linux target).
+*.sh text eol=lf
+*.service text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf

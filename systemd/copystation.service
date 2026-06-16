@@ -1,0 +1,21 @@
+[Unit]
+Description=Copy_Station - automatic camera-to-SD copy station
+# Start only once the system userspace is ready.
+After=multi-user.target
+
+[Service]
+Type=simple
+# Code lives under /opt/copystation (see scripts/install.sh).
+WorkingDirectory=/opt/copystation
+ExecStart=/usr/bin/python3 -m copystation.daemon --config /etc/copystation/config.yaml
+# Root needed for mount/umount and GPIO access.
+User=root
+# Restart on crash, but do not hammer in a tight loop.
+Restart=on-failure
+RestartSec=3
+# PYTHONPATH points at the install directory so the package is found.
+Environment=PYTHONPATH=/opt/copystation
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

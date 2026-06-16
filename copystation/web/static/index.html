@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Copy_Station</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Copy_Station</h1>
+      <span id="phase" class="badge">--</span>
+    </header>
+
+    <section id="transfer" class="card">
+      <h2>Transfer</h2>
+      <div class="progress-track">
+        <div id="progress-bar" class="progress-fill"></div>
+      </div>
+      <div class="row">
+        <span id="percent">0%</span>
+        <span id="transfer-name"></span>
+      </div>
+      <div class="row muted">
+        <span>Elapsed: <span id="elapsed">--</span></span>
+        <span>ETA: <span id="eta">--</span></span>
+        <span><span id="bytes">--</span></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Storage</h2>
+      <div id="storage-source" class="storage"></div>
+      <div id="storage-target" class="storage"></div>
+    </section>
+
+    <footer class="muted" id="conn">connecting…</footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
