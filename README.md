@@ -45,6 +45,17 @@ and blinks at 10 Hz; when idle a single LED is steady (Ready = green / segment 3
 Detecting = yellow / segment 2, Error = red / segment 1). Set the `clock_line` /
 `data_line` offsets (from `gpioinfo`) in the config.
 
+## WS2812B / NeoPixel strip (optional)
+
+Add `ws2812` to `status.backends` to drive an addressable WS2812B / NeoPixel
+strip of **1-10 LEDs** over SPI (MOSI, each data bit encoded as three SPI bits).
+The first LED always shows the status colour (Ready = green, Detecting = yellow,
+Error = red, Success = a short green blink); during a copy the LEDs `1..N` form a
+proportional progress bar that blinks at 10 Hz, the same activity pattern as the
+Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
+the config. On the Raspberry Pi enable SPI (`dtparam=spi=on`) and wire DIN to
+MOSI (BCM GPIO10 / pin 19).
+
 ## Development (without hardware, e.g. Windows)
 
 The core logic runs hardware-free. Simulation run with two local folders:

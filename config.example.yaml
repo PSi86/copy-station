@@ -49,9 +49,12 @@ status:
     gpiochip: gpiochip0
     line: null       # line offset of the buzzer
 
+  # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
+  # First LED = status colour (Ready=green, Detecting=yellow, Error=red,
+  # Success=green blink). During a copy: LEDs 1..N form a blinking progress bar.
   ws2812:
     device: /dev/spidev0.0
-    led_count: 1
+    led_count: 1       # number of LEDs in the strip (1-10)
 
   # Seeed Grove LED Bar v2.0 (MY9221), bit-banged over two GPIO lines.
   # During a copy: proportional fill blinking at 10 Hz. Idle: single steady LED
