@@ -6,8 +6,10 @@ from copystation.state import StationState, StatusHub
 from copystation.status import StatusIndicator
 from copystation.transfer import (
     InsufficientSpaceError,
+    SourceVanishedError,
     TransferError,
     VerificationError,
+    _describe_rsync_failure,
     check_free_space,
     cleanup_source,
     copy_tree,
@@ -75,6 +77,58 @@ def test_check_free_space_raises_when_too_small(tmp_path):
     # Huge requirement -> guaranteed to exceed free space.
     with pytest.raises(InsufficientSpaceError):
         check_free_space(tmp_path, required_bytes=10**18)
+
+
+# ----- abort / friendly error handling -----------------------------------------
+
+
+def test_describe_rsync_failure_io_error_is_disconnect():
+    stderr = (
+        'rsync: [sender] read errors mapping "/run/.../DJI_0011.MP4": '
+        "Input/output error (5)\nrsync error: some files/attrs were not "
+        "transferred (code 23) at main.c(1347)"
+    )
+    err = _describe_rsync_failure(23, stderr)
+    assert isinstance(err, SourceVanishedError)
+    assert "disconnected" in str(err).lower()
+
+
+def test_describe_rsync_failure_no_space():
+    err = _describe_rsync_failure(11, "rsync: write failed: No space left on device (28)")
+    assert isinstance(err, InsufficientSpaceError)
+
+
+def test_describe_rsync_failure_vanished_code24():
+    assert isinstance(_describe_rsync_failure(24, ""), SourceVanishedError)
+
+
+def test_describe_rsync_failure_generic_includes_code():
+    err = _describe_rsync_failure(99, "something odd")
+    assert isinstance(err, TransferError)
+    assert "99" in str(err)
+
+
+def test_copy_tree_aborts_when_source_vanishes(tmp_path):
+    src = _make_dcim(tmp_path / "src", {"a.mp4": b"x" * 100, "b.mp4": b"y" * 100})
+    dst = tmp_path / "dst"
+    with pytest.raises(SourceVanishedError):
+        copy_tree(src, dst, abort_check=lambda: True)
+
+
+def test_perform_transfer_disconnect_keeps_source(tmp_path):
+    src = tmp_path / "camera"
+    _make_dcim(src, {"100MEDIA/clip.mp4": b"video-data"})
+    target = tmp_path / "sd"
+    target.mkdir()
+
+    # A device node that does not exist -> abort_check fires immediately.
+    with pytest.raises(SourceVanishedError):
+        perform_transfer(
+            src, target, "DJI_O4", _hub(), _config(), source_device="/dev/does-not-exist"
+        )
+
+    # Safety guarantee: the source media is untouched after a failed copy.
+    assert (src / "DCIM" / "100MEDIA" / "clip.mp4").read_bytes() == b"video-data"
 
 
 # ----- end-to-end via perform_transfer -----------------------------------------

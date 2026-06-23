@@ -86,9 +86,13 @@ DEFAULTS: dict[str, Any] = {
         "host": "0.0.0.0",  # all interfaces; robust to interfaces up/down
         "port": 8080,
     },
-    # Seconds to wait after a udev add event before partitions are
-    # detected/mounted (settle time).
+    # Hard upper bound (seconds) for how long detection waits after a udev add
+    # event before partitions are detected/mounted. The adaptive debounce
+    # (settle_quiet_seconds) usually proceeds sooner.
     "settle_seconds": 2.0,
+    # Adaptive debounce: proceed this many seconds after the last USB event,
+    # capped by settle_seconds.
+    "settle_quiet_seconds": 1.0,
 }
 
 

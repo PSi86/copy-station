@@ -85,4 +85,32 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .storage-track { height: 12px; background: #2a2f3a; border-radius: 999px; overflow: hidden; }
 .storage-used { height: 100%; background: var(--accent); }
 
+#devices .label { display: flex; justify-content: space-between; padding: 0.35rem 0; }
+#devices .label + .label { border-top: 1px solid #2a2f3a; }
+.role {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: #2a2f3a;
+  color: var(--muted);
+}
+.role.source { background: var(--detecting); color: #2a2300; }
+.role.target { background: var(--accent); color: #042036; }
+.role.candidate { background: #3a4250; color: var(--fg); }
+
+.log { list-style: none; margin: 0; padding: 0; max-height: 14rem; overflow-y: auto; }
+.log-entry {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+}
+.log-entry + .log-entry { border-top: 1px solid #2a2f3a; }
+.log-time { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.log-msg { flex: 1 1 auto; }
+.log-entry.error .log-msg { color: var(--error); }
+
 footer { text-align: center; margin-top: 1rem; }

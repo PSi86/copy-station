@@ -56,3 +56,27 @@ def test_station_state_reset():
     assert snap["phase"] == State.READY.value
     assert snap["percent"] == 0.0
     assert snap["bytes_total"] == 0
+
+
+def test_event_log_newest_first_and_survives_reset():
+    state = StationState()
+    state.log_event("first")
+    state.log_event("second")
+    snap = state.snapshot()
+    messages = [e["message"] for e in snap["events"]]
+    assert messages == ["second", "first"]  # newest first
+    assert all("time" in e and "seq" in e for e in snap["events"])
+
+    # The action log is history -- it persists across a ready reset.
+    state.reset_to_ready()
+    assert [e["message"] for e in state.snapshot()["events"]] == ["second", "first"]
+
+
+def test_snapshot_exposes_copy_speed():
+    state = StationState()
+    state.begin_transfer("x", 1000)
+    state.update_progress(500)
+    snap = state.snapshot()
+    # speed key always present; a positive value once some bytes are done.
+    assert "speed_bytes" in snap
+    assert snap["speed_bytes"] is None or snap["speed_bytes"] >= 0

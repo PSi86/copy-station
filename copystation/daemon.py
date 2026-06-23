@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 import time
@@ -56,12 +57,16 @@ def perform_transfer(
     source_name: str | None,
     hub: StatusHub,
     config: Config,
+    source_device: str | None = None,
 ) -> Path:
     """Perform a complete transfer.
 
     The order is safety critical: copy -> verify -> ONLY THEN clear the source.
     Any error before successful verification leaves the source untouched.
     Returns the created target folder.
+
+    ``source_device`` (e.g. ``/dev/sdc``) lets the copy abort promptly if the
+    source is unplugged mid-transfer, rather than waiting for the I/O timeout.
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
@@ -80,17 +85,25 @@ def perform_transfer(
 
     dest = next_transfer_dir(target_root, source_name)
     _LOG.info("Copying %s -> %s (%d bytes)", media_dir, dest, required)
+    hub.log_event(f"Copy started: {dest.name}")
     hub.begin_transfer(dest.name, required)
-    copy_tree(media_dir, dest, on_progress=hub.update_progress)
+    # Abort the copy quickly if the source device node disappears (unplugged).
+    abort_check = None
+    if source_device:
+        abort_check = lambda: not os.path.exists(source_device)  # noqa: E731
+    copy_tree(media_dir, dest, on_progress=hub.update_progress, abort_check=abort_check)
     hub.finish_transfer()
 
     _LOG.info("Verifying transfer ...")
+    hub.log_event("Verifying transferred data ...")
     verify(media_dir, dest)
 
     keep = config.get("cleanup", {}).get("keep_dcim_folder", True)
     _LOG.info("Verification ok -- clearing source (keep_folder=%s)", keep)
+    hub.log_event("Clearing source data ...")
     cleanup_source(media_dir, keep_folder=keep)
 
+    hub.log_event(f"Copy complete: {dest.name}")
     hub.set_phase(State.SUCCESS)
     # Refresh storage figures after the copy (free space changed).
     hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, "target"))

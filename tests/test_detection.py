@@ -3,10 +3,12 @@ from pathlib import Path
 import pytest
 
 from copystation.devices import (
+    DeviceWatcher,
     InvalidLayoutError,
     NoSourceError,
     NoTargetError,
     Probe,
+    device_views,
     select_roles,
 )
 
@@ -89,3 +91,140 @@ def test_vid_pid_mismatch_excludes_source():
     sd = _probe("sd", 256 * GB, has_dcim=False)
     with pytest.raises(NoSourceError):
         select_roles([cam, sd], MIN_BYTES)
+
+
+class _FakeDevice:
+    """Minimal stand-in for a pyudev device (only .get / .sys_name)."""
+
+    def __init__(self, sys_name, **props):
+        self.sys_name = sys_name
+        self._props = props
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+
+def _watcher(root_dev="mmcblk1"):
+    # Bypass __init__ (which imports pyudev) -- _is_candidate only needs _root_dev.
+    watcher = DeviceWatcher.__new__(DeviceWatcher)
+    watcher._root_dev = root_dev
+    return watcher
+
+
+def test_candidate_accepts_usb_partition():
+    w = _watcher()
+    dev = _FakeDevice("sda1", DEVTYPE="partition", ID_BUS="usb", ID_FS_TYPE="exfat")
+    assert w._is_candidate(dev) is True
+
+
+def test_candidate_accepts_partitionless_usb_disk():
+    # DJI O4 Air Unit: whole-disk filesystem, no partition table (sdc, no sdc1).
+    w = _watcher()
+    dev = _FakeDevice("sdc", DEVTYPE="disk", ID_BUS="usb", ID_FS_TYPE="vfat")
+    assert w._is_candidate(dev) is True
+
+
+def test_candidate_rejects_partitioned_disk_node():
+    # A disk that carries a partition table is handled via its partitions, not
+    # the whole-disk node.
+    w = _watcher()
+    dev = _FakeDevice("sdb", DEVTYPE="disk", ID_BUS="usb", ID_PART_TABLE_TYPE="dos")
+    assert w._is_candidate(dev) is False
+
+
+def test_candidate_rejects_disk_without_filesystem():
+    w = _watcher()
+    dev = _FakeDevice("sdd", DEVTYPE="disk", ID_BUS="usb")
+    assert w._is_candidate(dev) is False
+
+
+def test_candidate_rejects_non_usb():
+    w = _watcher()
+    dev = _FakeDevice("sdc", DEVTYPE="disk", ID_BUS="ata", ID_FS_TYPE="vfat")
+    assert w._is_candidate(dev) is False
+
+
+def test_candidate_rejects_root_disk():
+    w = _watcher(root_dev="sdc")
+    dev = _FakeDevice("sdc", DEVTYPE="disk", ID_BUS="usb", ID_FS_TYPE="vfat")
+    assert w._is_candidate(dev) is False
+
+
+def test_device_views_reflect_actual_decision():
+    cam = _probe("cam", 23 * GB, has_dcim=True)
+    sd = _probe("sd", 256 * GB, has_dcim=True)  # both carry DCIM
+    tiny = _probe("boot", 1 * GB, has_dcim=False)
+
+    # The roles come from select_roles, not from per-device guessing.
+    source, target = select_roles([cam, sd], MIN_BYTES)
+    views = {v["name"]: v for v in device_views([cam, sd, tiny], MIN_BYTES, source, target)}
+
+    assert views["cam"]["role"] == "source"  # smaller DCIM volume
+    assert views["sd"]["role"] == "target"   # larger, even though it has DCIM
+    assert views["boot"]["role"] == "ignored"
+    assert views["boot"]["eligible"] is False
+
+
+def test_device_views_without_decision_are_candidates():
+    # While only one volume is present no source/target split is known yet.
+    cam = _probe("cam", 23 * GB, has_dcim=True)
+    [view] = device_views([cam], MIN_BYTES)
+    assert view["role"] == "candidate"
+
+
+def test_device_views_extra_eligible_is_unused():
+    cam = _probe("cam", 23 * GB, has_dcim=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    other = _probe("other", 64 * GB, has_dcim=False)
+    source, target = select_roles([cam, sd, other], MIN_BYTES)
+    views = {v["name"]: v for v in device_views([cam, sd, other], MIN_BYTES, source, target)}
+    assert views["other"]["role"] == "unused"
+
+
+class _FakeMonitor:
+    """Returns queued events on poll(), then None (a quiet bus)."""
+
+    def __init__(self, events):
+        self._events = list(events)
+        self.polls = 0
+
+    def poll(self, timeout=None):
+        self.polls += 1
+        return self._events.pop(0) if self._events else None
+
+
+def test_settle_drains_burst_then_returns():
+    w = _watcher()
+    w._config = {"settle_seconds": 2.0, "settle_quiet_seconds": 0.3}
+    mon = _FakeMonitor([object(), object()])  # two follow-up events, then quiet
+    w._settle(mon)
+    # Two events consumed, plus one quiet poll that returned None.
+    assert mon.polls == 3
+
+
+def test_settle_returns_immediately_when_quiet():
+    w = _watcher()
+    w._config = {"settle_seconds": 2.0, "settle_quiet_seconds": 0.3}
+    mon = _FakeMonitor([])  # bus already quiet
+    w._settle(mon)
+    assert mon.polls == 1
+
+
+def test_configured_label_matches_vid_pid():
+    w = _watcher()
+    w._config = {
+        "identify": {
+            "device_labels": [
+                {"vid": "2ca3", "pid": "0020", "name": "O4 Lite"},
+                {"vid": "2ca3", "pid": "0021", "name": "O4 Pro"},
+            ]
+        }
+    }
+    lite = _FakeDevice("sdc", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020")
+    pro = _FakeDevice("sdc", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0021")
+    other = _FakeDevice("sdc", ID_VENDOR_ID="abcd", ID_MODEL_ID="1234", ID_FS_LABEL="MYCARD")
+
+    assert w._volume_name(lite) == "O4 Lite"
+    assert w._volume_name(pro) == "O4 Pro"
+    # No mapping match -> fall back to the filesystem label.
+    assert w._volume_name(other) == "MYCARD"
