@@ -31,23 +31,22 @@ status:
   # Any combination of: log, led, buzzer, ws2812, grove_led_bar
   backends: [log]
 
-  # GPIO notes:
-  # * Cubie A7S: find chip/offsets with `gpiodetect` / `gpioinfo`.
-  # * Raspberry Pi 4/5: chip is `gpiochip0` (older Pi 5 images: `gpiochip4`),
-  #   and the line offset equals the BCM GPIO number.
-  # Ready-made starting points: config.examples/raspberry-pi.yaml and
-  # config.examples/cubie-a7s.yaml.
-  # Fill in GPIO pins only after confirming them on the target board.
+  # GPIO pins below are concrete SUGGESTIONS for the Radxa Cubie A7S 30-pin
+  # header (Allwinner port -> line offset; see config.examples/cubie-a7s.yaml
+  # for how they are derived). Confirm them with `gpiodetect` / `gpioinfo`
+  # before the first hardware test. On a Raspberry Pi use the BCM numbers from
+  # config.examples/raspberry-pi.yaml instead (line offset == BCM number).
+  # The pins are inert until you add a hardware backend to `backends` above.
   led:
     gpiochip: gpiochip0
     lines:
-      ready: null    # line offset of the green LED
-      busy: null     # line offset of the yellow LED
-      error: null    # line offset of the red LED
+      ready: 32      # Cubie PB0 (pin 7)  | Pi: BCM27 (green)
+      busy: 33       # Cubie PB1 (pin 11) | Pi: BCM22 (yellow)
+      error: 34      # Cubie PB2 (pin 29) | Pi: BCM23 (red)
 
   buzzer:
     gpiochip: gpiochip0
-    line: null       # line offset of the buzzer
+    line: 37         # Cubie PB5 (pin 12) | Pi: BCM24
 
   # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
   # First LED = status colour (Ready=green, Detecting=yellow, Error=red,
@@ -61,8 +60,8 @@ status:
   # (Ready=green/3, Detecting=yellow/2, Error=red/1).
   grove_led_bar:
     gpiochip: gpiochip0
-    clock_line: null   # line offset of the Grove clock pin (DCKI)
-    data_line: null    # line offset of the Grove data pin (DI)
+    clock_line: 108    # Cubie PD12 (pin 19) | Pi: BCM18 (Grove DCKI)
+    data_line: 109     # Cubie PD13 (pin 21) | Pi: BCM17 (Grove DI)
     reverse: false     # flip if segment 1 is the wrong physical end
 
 # Optional local web interface (status + progress + storage, future settings).

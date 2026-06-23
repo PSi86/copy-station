@@ -75,39 +75,133 @@ pytest
 
 ## Deployment
 
-Runs on the **Radxa Cubie A7S** (Debian Bullseye) and on **Raspberry Pi 4 / 5**
-(Raspberry Pi OS Bookworm 64-bit).
+Runs on the **Radxa Cubie A7S** (Debian Bullseye through **Trixie**) and on
+**Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit). The GPIO layer handles
+both libgpiod **v1** (Bullseye) and **v2** (Trixie / newer images), so the same
+code and config run across these releases.
+
+### 1. Get the code onto the device
+
+Log in to the device (e.g. `ssh radxa@<device-ip>`) and place the project in
+your home directory, so it ends up at `~/copy-station` (i.e.
+`/home/radxa/copy-station` on the Cubie). Pick **one** of the two ways:
+
+**A) Clone with git (recommended)** -- keeps file permissions intact:
 
 ```
-sudo ./scripts/install.sh
+sudo apt-get install -y git          # if git is not installed yet
+cd ~
+git clone https://github.com/PSi86/copy-station.git
+cd ~/copy-station
 ```
 
-Installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`, exFAT
-support), copies the code to `/opt/copystation`, creates a venv with FastAPI/
-uvicorn (PEP 668-safe via `--system-site-packages`), writes
-`/etc/copystation/config.yaml` and enables the service.
-
-Determine the GPIO pins for the status hardware before the first hardware test:
+**B) ZIP download** -- if you cannot use git. Download the ZIP from GitHub
+("Code -> Download ZIP"), copy it to the device and unpack it. A ZIP **loses the
+executable bit** of the scripts, which is why the install command below uses
+`bash` explicitly.
 
 ```
-gpiodetect
-gpioinfo
+# from your PC, copy the downloaded ZIP to the device:
+scp copy-station-main.zip radxa@<device-ip>:~
+
+# then, on the device:
+cd ~
+unzip copy-station-main.zip       # creates ~/copy-station-main
+mv copy-station-main copy-station # rename to ~/copy-station (optional)
+cd ~/copy-station
 ```
 
-and enter them in `/etc/copystation/config.yaml`, then set `status.backends`.
+### 2. Run the installer
 
-### Platform notes (GPIO)
+From inside the project directory (`~/copy-station`):
 
-The GPIO layer auto-detects libgpiod **v1 and v2**, so the same code runs on the
-Cubie (Bullseye, v1) and on Raspberry Pi OS (Bookworm).
+```
+sudo bash scripts/install.sh
+```
 
-* **Raspberry Pi 4 / 5:** the 40-pin header is on `gpiochip0` (older Pi 5 images:
-  `gpiochip4`, an alias). The libgpiod **line offset equals the BCM GPIO number**.
-* **Cubie A7S:** read chip and offsets off `gpioinfo` (the Allwinner mapping is
-  not BCM-like).
+> **Why `bash` and not `./scripts/install.sh`?** A ZIP download (way B) drops the
+> executable bit, and `sudo ./scripts/install.sh` on a non-executable file fails
+> with the misleading `command not found`. `sudo bash scripts/install.sh` works
+> in **both** cases. (After a `git clone` the bit is preserved, so
+> `sudo ./scripts/install.sh` works there as well.)
 
-Ready-made starting points: [config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml)
-and [config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml).
+The installer:
+
+* installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`, the
+  `gpiod` CLI tools, exFAT support),
+* copies the code to `/opt/copystation` and creates a venv with FastAPI/uvicorn
+  (PEP 668-safe via `--system-site-packages`),
+* **detects the board** and writes `/etc/copystation/config.yaml` from the
+  matching example (Cubie / Raspberry Pi / generic) -- so it already contains
+  suggested GPIO pins instead of empty placeholders,
+* **asks whether to enable the web interface** (default: yes), and
+* enables and starts the `copystation` systemd service.
+
+The config file is created only if it does not exist yet; re-running the
+installer never overwrites your settings.
+
+### 3. Configure the station
+
+Everything is configured in **`/etc/copystation/config.yaml`**. Edit it with any
+editor, e.g.:
+
+```
+sudo nano /etc/copystation/config.yaml
+```
+
+**Apply changes by restarting the service.** The config is read once at startup;
+there is no live reload. You do **not** need to stop it first -- `restart` does
+both:
+
+```
+sudo systemctl restart copystation
+sudo systemctl status copystation     # should say "active (running)"
+journalctl -u copystation -f          # follow the live log / errors
+```
+
+If the service fails to start after an edit, the log above shows why (usually a
+YAML typo or a wrong GPIO line). Fix the file and restart again.
+
+#### Web interface
+
+The installer already asked about this; to change it later, set `web.enabled`
+in the config and restart. When enabled it serves on `http://<device-ip>:8080/`
+(all interfaces, port from `web.port`). Find the device IP with `ip a`.
+
+#### GPIO pins for the status hardware
+
+The shipped config already contains **suggested** pins, so the station works as
+a starting point. Confirm them once for your wiring before relying on the LEDs,
+then list the hardware you actually connected in `status.backends` (any
+combination of `log`, `led`, `buzzer`, `ws2812`, `grove_led_bar`).
+
+A pin is addressed by a **gpiochip name** plus a **line offset**. To find them:
+
+```
+gpiodetect      # lists the chips; the main header chip has the most lines
+gpioinfo        # lists every line: its offset ("line  N:") and its name
+```
+
+* **Raspberry Pi 4 / 5:** the 40-pin header is on `gpiochip0` (older Pi 5
+  images: `gpiochip4`, an alias). The **line offset equals the BCM GPIO
+  number** -- e.g. BCM17 -> offset `17`. Pick free BCM pins for your wiring.
+* **Cubie A7S:** the header uses Allwinner port names (e.g. `PB0`). In
+  `gpioinfo` each line is printed with that name, so to wire to header pin 7
+  (`PB0`), find the line shown as `"PB0"` and use the number in its
+  `line  N:` column. All main-PIO ports share one gpiochip, and the offset
+  follows `(bank_letter - 'A') * 32 + pin` (e.g. `PB0` -> `32`, `PD12` ->
+  `108`) -- the shipped offsets use exactly this. Confirm the chip name with
+  `gpiodetect`.
+
+The GPIO layer auto-detects libgpiod **v1 and v2**, so the same code/config runs
+on the Cubie (Bullseye = v1, **Trixie = v2**) and on Raspberry Pi OS
+(Bookworm = v2). The on-device `gpiod` package provides the matching v1/v2 CLI
+tools.
+
+Board-specific reference configs:
+[config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml) (with the pin
+derivation explained) and
+[config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml).
 
 ## Source/target detection
 

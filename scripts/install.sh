@@ -3,7 +3,11 @@
 # Installer for the Copy_Station. Works on the Radxa Cubie A7S (Debian Bullseye)
 # and on Raspberry Pi 4/5 (Raspberry Pi OS Bookworm). Idempotent.
 #
-#   sudo ./scripts/install.sh
+#   sudo bash scripts/install.sh
+#
+# Use "bash" explicitly: a GitHub ZIP download drops the executable bit, and
+# "sudo ./scripts/install.sh" on a non-executable file fails with the misleading
+# "command not found". Invoking via bash works regardless of file permissions.
 #
 set -euo pipefail
 
@@ -22,9 +26,10 @@ CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
 
 echo ">> Installing system dependencies ..."
 apt-get update
-apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-yaml
+apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-yaml gpiod
 
-# exFAT support so camera/SD cards mount (package name differs by release).
+# exFAT support so camera/SD cards mount (package name differs by release:
+# Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).
 echo ">> Installing exFAT support ..."
 if [[ "${CODENAME}" == "bullseye" ]]; then
   apt-get install -y exfat-fuse exfat-utils || true
@@ -47,8 +52,35 @@ python3 -m venv --system-site-packages "${VENV_DIR}"
 echo ">> Configuration in ${CONFIG_DIR} ..."
 mkdir -p "${CONFIG_DIR}"
 if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
-  cp "${REPO_DIR}/config.example.yaml" "${CONFIG_DIR}/config.yaml"
-  echo "   -> created ${CONFIG_DIR}/config.yaml (please enter GPIO pins)."
+  # Pick a board-specific example as the starting point, so the suggested GPIO
+  # pins match the real header instead of being empty placeholders.
+  MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
+  EXAMPLE="${REPO_DIR}/config.example.yaml"
+  if printf '%s' "${MODEL}" | grep -qi "raspberry pi"; then
+    [[ -f "${REPO_DIR}/config.examples/raspberry-pi.yaml" ]] &&
+      EXAMPLE="${REPO_DIR}/config.examples/raspberry-pi.yaml"
+  elif printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s"; then
+    [[ -f "${REPO_DIR}/config.examples/cubie-a7s.yaml" ]] &&
+      EXAMPLE="${REPO_DIR}/config.examples/cubie-a7s.yaml"
+  fi
+  cp "${EXAMPLE}" "${CONFIG_DIR}/config.yaml"
+  echo "   -> created ${CONFIG_DIR}/config.yaml from $(basename "${EXAMPLE}")"
+  echo "      (detected board: ${MODEL:-unknown})."
+
+  # Ask whether to enable the local web interface (default: yes). Skip the
+  # prompt when there is no terminal (e.g. a piped install) and keep the
+  # example's value in that case.
+  if [[ -t 0 ]]; then
+    read -r -p "   Enable the local web interface on http://<device-ip>:8080/ ? [Y/n] " WEB_ANS || WEB_ANS=""
+    case "${WEB_ANS}" in
+      [nN]*) WEB_ENABLED="false" ;;
+      *)     WEB_ENABLED="true" ;;
+    esac
+    # The config has exactly one 'enabled:' key (web.enabled); set it in place.
+    sed -i -E "s/^([[:space:]]*enabled:[[:space:]]*).*/\1${WEB_ENABLED}/" "${CONFIG_DIR}/config.yaml"
+    echo "   -> web interface set to enabled=${WEB_ENABLED}."
+  fi
+  echo "   -> review/confirm the GPIO pins in ${CONFIG_DIR}/config.yaml (see README)."
 else
   echo "   -> ${CONFIG_DIR}/config.yaml already exists, left unchanged."
 fi
