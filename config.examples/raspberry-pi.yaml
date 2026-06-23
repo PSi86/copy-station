@@ -54,4 +54,21 @@ web:
   host: 0.0.0.0
   port: 8080
 
+# Optional GPIO shutdown button for a clean poweroff.
+# Recommended pin: BCM GPIO3 (pin 5). Two independent functions on one button:
+#  * Power ON / wake from halt is a Pi FIRMWARE feature on GPIO3 -- it needs NO
+#    config and works even with enabled: false below.
+#  * Shutting down needs software: set enabled: true here (line: 3). Do NOT also
+#    use the OS overlay `dtoverlay=gpio-shutdown` on the same pin -- pick one.
+# Pin 5 has fixed on-board pull-ups, so `bias` is irrelevant there.
+power:
+  shutdown_button:
+    enabled: false        # set true to let this button trigger the shutdown
+    gpiochip: gpiochip0   # gpiochip4 on older Pi 5 images
+    line: 3               # BCM GPIO3 (pin 5) -- doubles as wake-from-halt
+    active_low: true
+    bias: pull_up
+    hold_seconds: 1.0
+    action: poweroff
+
 settle_seconds: 2.0

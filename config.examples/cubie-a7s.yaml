@@ -65,4 +65,15 @@ web:
   host: 0.0.0.0
   port: 8080
 
+# Optional GPIO shutdown button for a clean poweroff (set the line from `gpioinfo`).
+power:
+  shutdown_button:
+    enabled: false
+    gpiochip: gpiochip0
+    line: null            # line offset of the button (from `gpioinfo`)
+    active_low: true
+    bias: pull_up
+    hold_seconds: 1.0
+    action: poweroff      # reboot may hang on the A733 -- prefer poweroff
+
 settle_seconds: 2.0

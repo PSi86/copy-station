@@ -66,6 +66,57 @@ Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) i
 the config. On the Raspberry Pi enable SPI (`dtparam=spi=on`) and wire DIN to
 MOSI (BCM GPIO10 / pin 19).
 
+## Powering off safely
+
+Cutting the supply while the OS card is being written can corrupt it. Shut down
+cleanly instead:
+
+```
+sudo systemctl poweroff
+```
+
+This stops the service, flushes buffers and unmounts the filesystems; once the
+board has halted it is safe to remove power. Prefer `poweroff` over `reboot` (a
+warm `reboot` can hang on the A733 -- only a cold power-cycle recovers). The copy
+itself is safe against a sudden disconnect: the source is never cleared unless
+verification succeeded.
+
+### Shutdown button (optional)
+
+Wire a momentary button between a GPIO line and GND and enable
+`power.shutdown_button` in the config. Holding it for `hold_seconds` (default 1 s)
+runs a clean `systemctl poweroff` -- so the headless station can be shut down
+without SSH. Keep `active_low: true` with `bias: pull_up` for a button to GND.
+
+It uses the same libgpiod v1/v2 layer as the LED backends, so it works on the
+**Cubie A7S** and on **Raspberry Pi 4 / 5**. Set `line` to the GPIO offset
+(`gpioinfo` offset on the Cubie; the **BCM number** on a Pi) and `gpiochip`
+accordingly (Pi 4 and most Pi 5 images: `gpiochip0`; older Pi 5 images:
+`gpiochip4`).
+
+**Recommended pin -- Raspberry Pi:** wire the button to **GPIO3 (BCM 3, pin 5)**.
+It serves both directions with one button, but they are two independent
+mechanisms -- keep them apart:
+
+* **Power on / wake from halt** is a **firmware feature of the Pi** and needs **no
+  software and no copy-station config at all**: after a `poweroff` the Pi is
+  halted, and pulling GPIO3 low boots it. This works on GPIO3 regardless of what
+  is in `config.yaml`.
+* **Shutting down** while the Pi is running is **not** automatic -- some software
+  must react to the pin. Either:
+  * enable copy-station's `power.shutdown_button` with `line: 3` (what this
+    feature is for), **or**
+  * use the OS-native overlay `dtoverlay=gpio-shutdown` in
+    `/boot/firmware/config.txt` (defaults to GPIO3).
+
+  Use **only one** of the two for the shutdown side -- a GPIO line is exclusive,
+  so enabling both on the same pin makes the second one fail to claim it. If you
+  rely on the OS overlay, leave `power.shutdown_button.enabled: false`.
+
+**Recommended pin -- Cubie A7S:** there is no documented wake-from-halt GPIO, so
+pick any free line from `gpioinfo`; the button only triggers shutdown, and you
+power the board back on by re-applying power.
+
 ## Development (without hardware, e.g. Windows)
 
 The core logic runs hardware-free. Simulation run with two local folders:

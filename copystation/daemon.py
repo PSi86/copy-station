@@ -167,6 +167,21 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     return rc
 
 
+def _maybe_start_shutdown_button(config: Config):
+    """Start the optional GPIO shutdown button. Returns it, or None."""
+    try:
+        from .power import build_shutdown_button
+
+        button = build_shutdown_button(config)
+        if button is not None:
+            button.start()
+            _LOG.info("Shutdown button active")
+        return button
+    except Exception as exc:
+        _LOG.warning("Shutdown button could not be started: %s", exc)
+        return None
+
+
 def run_daemon(config: Config) -> int:
     """Event-driven daemon (Linux/Cubie only)."""
     # Lazy import: devices needs pyudev, which is not available on Windows.
@@ -176,6 +191,7 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config))
     hub.set_phase(State.READY)
     _maybe_start_web(state, config)
+    button = _maybe_start_shutdown_button(config)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
     try:
@@ -183,6 +199,8 @@ def run_daemon(config: Config) -> int:
     except KeyboardInterrupt:  # pragma: no cover
         _LOG.info("Shutting down on request ...")
     finally:
+        if button is not None:
+            button.close()
         hub.close()
     return 0
 

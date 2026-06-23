@@ -108,6 +108,111 @@ def _select_impl(mod) -> type[OutputLines]:
     raise RuntimeError("Unsupported gpiod: neither v1 nor v2 API detected")
 
 
+class InputLines:
+    """Uniform handle for a set of GPIO input lines."""
+
+    def get(self, offset: int) -> bool:  # pragma: no cover - interface
+        """True when the line reads as *active* (already honouring active_low)."""
+        raise NotImplementedError
+
+    def release(self) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+def _v1_input_flags(mod, active_low: bool, bias: str) -> int:
+    """Build the libgpiod-v1 request flags, skipping any the build lacks."""
+    flags = 0
+    if active_low and hasattr(mod, "LINE_REQ_FLAG_ACTIVE_LOW"):
+        flags |= mod.LINE_REQ_FLAG_ACTIVE_LOW
+    bias_attr = {
+        "pull_up": "LINE_REQ_FLAG_BIAS_PULL_UP",
+        "pull_down": "LINE_REQ_FLAG_BIAS_PULL_DOWN",
+        "disable": "LINE_REQ_FLAG_BIAS_DISABLE",
+    }.get(bias)
+    if bias_attr and hasattr(mod, bias_attr):
+        flags |= getattr(mod, bias_attr)
+    return flags
+
+
+class _V1InputLines(InputLines):
+    def __init__(self, mod, chip, offsets, consumer, active_low, bias) -> None:
+        self._chip = mod.Chip(_chip_name(chip))
+        self._lines: dict[int, object] = {}
+        flags = _v1_input_flags(mod, active_low, bias)
+        for off in offsets:
+            line = self._chip.get_line(int(off))
+            try:
+                line.request(
+                    consumer=consumer, type=mod.LINE_REQ_DIR_IN, flags=flags
+                )
+            except TypeError:  # pragma: no cover - very old v1 without 'flags'
+                line.request(consumer=consumer, type=mod.LINE_REQ_DIR_IN)
+            self._lines[int(off)] = line
+
+    def get(self, offset: int) -> bool:
+        return bool(self._lines[int(offset)].get_value())
+
+    def release(self) -> None:
+        for line in self._lines.values():
+            try:
+                line.release()
+            except Exception:  # pragma: no cover
+                pass
+        try:
+            self._chip.close()
+        except Exception:  # pragma: no cover
+            pass
+
+
+class _V2InputLines(InputLines):
+    def __init__(self, mod, chip, offsets, consumer, active_low, bias) -> None:
+        direction = mod.line.Direction
+        self._value = mod.line.Value
+        settings = {"direction": direction.INPUT, "active_low": bool(active_low)}
+        bias_enum = getattr(mod.line, "Bias", None)
+        bias_name = {
+            "pull_up": "PULL_UP",
+            "pull_down": "PULL_DOWN",
+            "disable": "DISABLED",
+            "as_is": "AS_IS",
+        }.get(bias)
+        if bias_enum is not None and bias_name and hasattr(bias_enum, bias_name):
+            settings["bias"] = getattr(bias_enum, bias_name)
+        config = {int(off): mod.LineSettings(**settings) for off in offsets}
+        self._req = mod.request_lines(_chip_path(chip), consumer=consumer, config=config)
+
+    def get(self, offset: int) -> bool:
+        return self._req.get_value(int(offset)) == self._value.ACTIVE
+
+    def release(self) -> None:
+        try:
+            self._req.release()
+        except Exception:  # pragma: no cover
+            pass
+
+
+def open_input_lines(
+    chip: str,
+    offsets: Iterable[int],
+    consumer: str,
+    active_low: bool = False,
+    bias: str = "as_is",
+    gpiod_module=None,
+) -> InputLines:
+    """Request the given GPIO line offsets as inputs, version-agnostically.
+
+    ``active_low`` makes ``get`` return True when the line is pulled low (typical
+    for a button to GND). ``bias`` is one of ``pull_up``/``pull_down``/``disable``
+    /``as_is`` and is applied best-effort (skipped if the libgpiod build lacks it).
+    """
+    mod = gpiod_module if gpiod_module is not None else _import_gpiod()
+    if hasattr(mod, "LineSettings") and hasattr(mod, "request_lines"):
+        return _V2InputLines(mod, chip, list(offsets), consumer, active_low, bias)
+    if hasattr(mod, "LINE_REQ_DIR_IN"):
+        return _V1InputLines(mod, chip, list(offsets), consumer, active_low, bias)
+    raise RuntimeError("Unsupported gpiod: neither v1 nor v2 API detected")
+
+
 def _import_gpiod():
     import gpiod
 
