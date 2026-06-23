@@ -86,6 +86,19 @@ DEFAULTS: dict[str, Any] = {
         "host": "0.0.0.0",  # all interfaces; robust to interfaces up/down
         "port": 8080,
     },
+    # Optional GPIO shutdown button (off by default). Held for hold_seconds it
+    # runs a clean `systemctl poweroff` -- the safe way to power the station down.
+    "power": {
+        "shutdown_button": {
+            "enabled": False,
+            "gpiochip": "gpiochip0",
+            "line": None,          # line offset of the button (BCM number on Pi)
+            "active_low": True,    # pressed = pulled to GND (button to GND)
+            "bias": "pull_up",     # pull_up | pull_down | disable | as_is
+            "hold_seconds": 1.0,   # must be held this long to trigger
+            "action": "poweroff",  # poweroff | reboot
+        },
+    },
     # Hard upper bound (seconds) for how long detection waits after a udev add
     # event before partitions are detected/mounted. The adaptive debounce
     # (settle_quiet_seconds) usually proceeds sooner.

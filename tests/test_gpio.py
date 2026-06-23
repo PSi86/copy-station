@@ -9,6 +9,7 @@ from copystation.status.gpio import (
     _chip_name,
     _chip_path,
     _select_impl,
+    open_input_lines,
     open_output_lines,
 )
 
@@ -20,13 +21,19 @@ class FakeV1Line:
     def __init__(self):
         self.values = []
         self.requested = None
+        self.flags = None
         self.released = False
+        self.value = 0  # current input reading for get_value
 
-    def request(self, consumer, type):
+    def request(self, consumer, type, flags=0):
         self.requested = (consumer, type)
+        self.flags = flags
 
     def set_value(self, value):
         self.values.append(value)
+
+    def get_value(self):
+        return self.value
 
     def release(self):
         self.released = True
@@ -49,6 +56,11 @@ class FakeV1Chip:
 
 class FakeV1Module:
     LINE_REQ_DIR_OUT = "out"
+    LINE_REQ_DIR_IN = "in"
+    LINE_REQ_FLAG_ACTIVE_LOW = 0x1
+    LINE_REQ_FLAG_BIAS_PULL_UP = 0x2
+    LINE_REQ_FLAG_BIAS_PULL_DOWN = 0x4
+    LINE_REQ_FLAG_BIAS_DISABLE = 0x8
 
     def __init__(self):
         self.chips = []
@@ -64,6 +76,7 @@ class FakeV1Module:
 
 class Direction(enum.Enum):
     OUTPUT = 1
+    INPUT = 2
 
 
 class Value(enum.Enum):
@@ -71,19 +84,32 @@ class Value(enum.Enum):
     ACTIVE = 1
 
 
+class Bias(enum.Enum):
+    AS_IS = 0
+    DISABLED = 1
+    PULL_UP = 2
+    PULL_DOWN = 3
+
+
 class FakeLineSettings:
-    def __init__(self, direction=None, output_value=None):
+    def __init__(self, direction=None, output_value=None, active_low=None, bias=None):
         self.direction = direction
         self.output_value = output_value
+        self.active_low = active_low
+        self.bias = bias
 
 
 class FakeV2Request:
     def __init__(self):
         self.sets = []
+        self.values = {}
         self.released = False
 
     def set_value(self, offset, value):
         self.sets.append((offset, value))
+
+    def get_value(self, offset):
+        return self.values.get(offset, Value.INACTIVE)
 
     def release(self):
         self.released = True
@@ -91,7 +117,7 @@ class FakeV2Request:
 
 class FakeV2Module:
     LineSettings = FakeLineSettings
-    line = SimpleNamespace(Direction=Direction, Value=Value)
+    line = SimpleNamespace(Direction=Direction, Value=Value, Bias=Bias)
 
     def __init__(self):
         self.request = None
@@ -167,6 +193,49 @@ def test_v2_open_set_release():
     lines.set(5, True)
     lines.set(5, False)
     assert mod.request.sets == [(5, Value.ACTIVE), (5, Value.INACTIVE)]
+
+    lines.release()
+    assert mod.request.released
+
+
+# ----- input lines -------------------------------------------------------------
+
+
+def test_v1_input_get_and_flags():
+    mod = FakeV1Module()
+    lines = open_input_lines(
+        "0", [17], "copystation-power", active_low=True, bias="pull_up", gpiod_module=mod
+    )
+    line = mod.chips[0].lines[17]
+    assert line.requested == ("copystation-power", "in")
+    assert line.flags == (
+        FakeV1Module.LINE_REQ_FLAG_ACTIVE_LOW | FakeV1Module.LINE_REQ_FLAG_BIAS_PULL_UP
+    )
+
+    line.value = 1
+    assert lines.get(17) is True
+    line.value = 0
+    assert lines.get(17) is False
+
+    lines.release()
+    assert line.released and mod.chips[0].closed
+
+
+def test_v2_input_get_and_settings():
+    mod = FakeV2Module()
+    lines = open_input_lines(
+        "gpiochip0", [5], "copystation-power", active_low=True, bias="pull_up", gpiod_module=mod
+    )
+    path, consumer, config = mod.request_args
+    assert path == "/dev/gpiochip0"
+    assert config[5].direction is Direction.INPUT
+    assert config[5].active_low is True
+    assert config[5].bias is Bias.PULL_UP
+
+    mod.request.values[5] = Value.ACTIVE
+    assert lines.get(5) is True
+    mod.request.values[5] = Value.INACTIVE
+    assert lines.get(5) is False
 
     lines.release()
     assert mod.request.released
