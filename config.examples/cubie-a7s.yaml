@@ -1,11 +1,31 @@
 # Copy_Station example configuration -- Radxa Cubie A7S (Allwinner A733)
 #
-# Copy to /etc/copystation/config.yaml and adjust the GPIO line offsets.
+# The installer copies this file to /etc/copystation/config.yaml automatically
+# when it detects a Cubie. The GPIO line offsets below are concrete SUGGESTIONS
+# for the 30-pin header -- confirm them once on the device (see below), then set
+# `status.backends` to the hardware you actually wired up.
 #
-# GPIO notes for the Cubie:
-# * Determine the chip and line offsets with `gpiodetect` / `gpioinfo`. The
-#   Allwinner mapping is not BCM-like, so the offsets below are placeholders --
-#   read them off `gpioinfo` for the header pins you wire to.
+# How the suggested offsets were derived
+# --------------------------------------
+# The 30-pin header uses Allwinner port names (e.g. "PB0"). On the sunxi kernel
+# the main-PIO ports all sit on ONE gpiochip and the libgpiod line offset is:
+#
+#       offset = (bank_letter - 'A') * 32 + pin_number
+#
+#   PB0  -> (1) * 32 +  0 =  32        PD12 -> (3) * 32 + 12 = 108
+#   PB1  -> (1) * 32 +  1 =  33        PD13 -> (3) * 32 + 13 = 109
+#   PB2  -> (1) * 32 +  2 =  34
+#   PB5  -> (1) * 32 +  5 =  37
+#
+# Confirm on the device: `gpioinfo` prints every line with its name -- find the
+# line named e.g. "PB0" and read the offset from its "line  N:" column. Use
+# `gpiodetect` to confirm the main-PIO chip name (it exposes the most lines).
+# Both tools come from the `gpiod` package the installer pulls in.
+#
+# Suggested wiring (all on the main PIO, so one gpiochip drives everything):
+#   LED ready  -> header pin  7  (PB0)      LED busy   -> header pin 11  (PB1)
+#   LED error  -> header pin 29  (PB2)      buzzer     -> header pin 12  (PB5)
+#   Grove DCKI -> header pin 19  (PD12)     Grove DI   -> header pin 21  (PD13)
 
 mount_base: /run/copystation/mnt
 media_dirname: DCIM
@@ -20,24 +40,25 @@ cleanup:
   keep_dcim_folder: true
 
 status:
+  # Drop the backends you do not use. `log` is always safe (journald only).
   backends: [log, grove_led_bar]
 
   grove_led_bar:
-    gpiochip: gpiochip0   # confirm with `gpiodetect`
-    clock_line: null      # set from `gpioinfo`
-    data_line: null       # set from `gpioinfo`
-    reverse: false
+    gpiochip: gpiochip0   # confirm main PIO with `gpiodetect`
+    clock_line: 108       # PD12 (pin 19) -- confirm with `gpioinfo`
+    data_line: 109        # PD13 (pin 21) -- confirm with `gpioinfo`
+    reverse: false        # flip if segment 1 is the wrong physical end
 
   led:
     gpiochip: gpiochip0
     lines:
-      ready: null
-      busy: null
-      error: null
+      ready: 32           # PB0 (pin 7)  -- green
+      busy: 33            # PB1 (pin 11) -- yellow
+      error: 34           # PB2 (pin 29) -- red
 
   buzzer:
     gpiochip: gpiochip0
-    line: null
+    line: 37              # PB5 (pin 12)
 
 web:
   enabled: true
