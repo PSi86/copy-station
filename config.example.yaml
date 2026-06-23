@@ -21,6 +21,13 @@ identify:
   # Require the source to be smaller than the target, so the larger device is
   # never used as source even if it also carries a DCIM folder.
   require_source_smaller_than_target: true
+  # Friendly display names matched by USB VID/PID (shown in the web UI instead of
+  # the raw FS label / USB model). The O4's USB product string is only a serial,
+  # so a readable "O4 Lite" / "O4 Pro" name comes from here. Find vid:pid with
+  # `lsusb` (e.g. 2ca3:0020). Match by both, or by vid only / pid only.
+  device_labels: []
+  #   - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
+  #   - { vid: "2ca3", pid: "0021", name: "O4 Pro" }
 
 cleanup:
   # true: delete DCIM contents, keep the DCIM folder.
@@ -68,5 +75,11 @@ web:
   host: 0.0.0.0        # all interfaces; robust to interfaces going up/down
   port: 8080
 
-# Settle time (seconds) after device detection before mounting.
+# Settle time (seconds) after device detection before mounting. This is the hard
+# upper bound for how long detection waits for a device's volumes to enumerate.
 settle_seconds: 2.0
+# Adaptive debounce: proceed this many seconds after the LAST USB event instead
+# of always waiting the full settle_seconds. Lower = faster detection; keep it at
+# or above the gap between a single device's volumes appearing. settle_seconds
+# remains the cap, so reliability is unchanged.
+settle_quiet_seconds: 1.0

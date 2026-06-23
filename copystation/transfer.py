@@ -15,11 +15,21 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
 # Callback invoked with the number of bytes copied so far.
 ProgressCallback = Callable[[int], None]
+
+# Callback returning True when the copy should be aborted (e.g. the source
+# device was unplugged). Polled during the copy so we don't wait for the USB/SCSI
+# I/O timeout (~7-10 s) before reacting.
+AbortCheck = Callable[[], bool]
+
+# How often the abort watcher polls while a copy is running.
+_ABORT_POLL_SECONDS = 0.5
 
 
 class TransferError(Exception):
@@ -94,12 +104,18 @@ def parse_rsync_progress(fragment: str) -> Optional[int]:
     return int(match.group(1).replace(",", ""))
 
 
-def copy_tree(src: Path, dst: Path, on_progress: Optional[ProgressCallback] = None) -> None:
+def copy_tree(
+    src: Path,
+    dst: Path,
+    on_progress: Optional[ProgressCallback] = None,
+    abort_check: Optional[AbortCheck] = None,
+) -> None:
     """Copy the contents of ``src`` into ``dst`` (target folder is created).
 
     Uses ``rsync`` if available, otherwise ``shutil``. ``src`` must exist. If
     ``on_progress`` is given it is called with the cumulative byte count as the
-    copy proceeds.
+    copy proceeds. If ``abort_check`` is given it is polled during the copy and,
+    when it returns True, the copy is stopped promptly with ``SourceVanishedError``.
     """
     src = Path(src)
     dst = Path(dst)
@@ -109,12 +125,47 @@ def copy_tree(src: Path, dst: Path, on_progress: Optional[ProgressCallback] = No
     dst.mkdir(parents=True, exist_ok=True)
 
     if _rsync_available():
-        _copy_with_rsync(src, dst, on_progress)
+        _copy_with_rsync(src, dst, on_progress, abort_check)
     else:
-        _copy_with_shutil(src, dst, on_progress)
+        _copy_with_shutil(src, dst, on_progress, abort_check)
 
 
-def _copy_with_rsync(src: Path, dst: Path, on_progress: Optional[ProgressCallback]) -> None:
+_SOURCE_DISCONNECTED_MSG = (
+    "Source device was disconnected during the copy. Nothing was deleted -- "
+    "reconnect it and start again."
+)
+
+
+def _describe_rsync_failure(code: int, stderr: str) -> TransferError:
+    """Translate an rsync exit code / stderr into a user-friendly error."""
+    low = stderr.lower()
+    if "input/output error" in low or "read errors" in low:
+        return SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
+    if "no space left" in low:
+        return InsufficientSpaceError(
+            "The target ran out of space during the copy. Nothing was deleted."
+        )
+    if code == 24:
+        return SourceVanishedError(
+            "Some source files disappeared during the copy. Nothing was deleted."
+        )
+    if code == 23:
+        return TransferError(
+            "Some files could not be copied (partial transfer). Nothing was "
+            "deleted -- check the source and target and try again."
+        )
+    detail = f" ({stderr.splitlines()[0]})" if stderr else ""
+    return TransferError(
+        f"Copy failed (rsync code {code}).{detail} Nothing was deleted."
+    )
+
+
+def _copy_with_rsync(
+    src: Path,
+    dst: Path,
+    on_progress: Optional[ProgressCallback],
+    abort_check: Optional[AbortCheck] = None,
+) -> None:
     # Trailing slash on the source => the CONTENTS of src end up in dst.
     src_arg = str(src).rstrip("/\\") + "/"
     cmd = [
@@ -137,6 +188,13 @@ def _copy_with_rsync(src: Path, dst: Path, on_progress: Optional[ProgressCallbac
         env={**_os_environ(), **env},
     )
     assert proc.stdout is not None
+
+    # Watch for a disconnected source in the background and kill rsync at once,
+    # instead of waiting for its I/O timeout. The reading loop below unblocks as
+    # soon as the killed process closes its stdout.
+    aborted = threading.Event()
+    watcher = _start_abort_watcher(proc, abort_check, aborted)
+
     buffer = b""
     while True:
         chunk = proc.stdout.read(64)
@@ -152,13 +210,42 @@ def _copy_with_rsync(src: Path, dst: Path, on_progress: Optional[ProgressCallbac
                 if done is not None:
                     on_progress(done)
     proc.wait()
+    if watcher is not None:
+        watcher.join(timeout=1.0)
     stderr = proc.stderr.read().decode("utf-8", "ignore").strip() if proc.stderr else ""
+
+    if aborted.is_set():
+        raise SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
     if proc.returncode != 0:
-        # rsync 24 = "some files vanished" -- the source was removed during the
-        # copy; treat it as a specific error.
-        if proc.returncode == 24:
-            raise SourceVanishedError(stderr or "rsync: source vanished")
-        raise TransferError(f"rsync failed (code {proc.returncode}): {stderr}")
+        raise _describe_rsync_failure(proc.returncode, stderr)
+
+
+def _start_abort_watcher(
+    proc: "subprocess.Popen", abort_check: Optional[AbortCheck], aborted: threading.Event
+) -> Optional[threading.Thread]:
+    """Poll ``abort_check`` while ``proc`` runs; terminate it on abort."""
+    if abort_check is None:
+        return None
+
+    def _watch() -> None:
+        while proc.poll() is None:
+            try:
+                stop = abort_check()
+            except Exception:  # pragma: no cover - defensive
+                stop = False
+            if stop:
+                aborted.set()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+                    proc.kill()
+                return
+            time.sleep(_ABORT_POLL_SECONDS)
+
+    thread = threading.Thread(target=_watch, daemon=True)
+    thread.start()
+    return thread
 
 
 def _os_environ() -> dict[str, str]:
@@ -167,9 +254,16 @@ def _os_environ() -> dict[str, str]:
     return dict(os.environ)
 
 
-def _copy_with_shutil(src: Path, dst: Path, on_progress: Optional[ProgressCallback]) -> None:
+def _copy_with_shutil(
+    src: Path,
+    dst: Path,
+    on_progress: Optional[ProgressCallback],
+    abort_check: Optional[AbortCheck] = None,
+) -> None:
     done = 0
     for path in sorted(src.rglob("*")):
+        if abort_check is not None and abort_check():
+            raise SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
         rel = path.relative_to(src)
         target = dst / rel
         if path.is_dir():

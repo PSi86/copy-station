@@ -101,6 +101,53 @@ def select_roles(
     return source, target
 
 
+def device_views(
+    probes: list[Probe],
+    min_bytes: int,
+    source: Optional[Probe] = None,
+    target: Optional[Probe] = None,
+) -> list[dict]:
+    """Per-device summary for the web UI.
+
+    When ``source``/``target`` are given (a decision was made by
+    ``select_roles``), each volume is labelled with its *actual* role. Without a
+    decision -- e.g. while only one volume is present -- eligible volumes are
+    shown as ``"candidate"`` rather than guessed, because the smaller/larger
+    split is only known once two volumes are present.
+
+    ``role``: ``"source"`` | ``"target"`` | ``"candidate"`` (eligible, undecided)
+    | ``"unused"`` (eligible but not chosen, e.g. a third volume) | ``"ignored"``
+    (below ``min_bytes``).
+    """
+    src_node = source.device_node if source else None
+    tgt_node = target.device_node if target else None
+    views: list[dict] = []
+    for p in probes:
+        eligible = p.capacity >= min_bytes
+        if not eligible:
+            role = "ignored"
+        elif p.device_node == src_node:
+            role = "source"
+        elif p.device_node == tgt_node:
+            role = "target"
+        elif src_node or tgt_node:
+            role = "unused"  # eligible, but a different volume was chosen
+        else:
+            role = "candidate"  # no decision yet (waiting for a second volume)
+        views.append(
+            {
+                "name": p.name,
+                "node": p.device_node,
+                "capacity": p.capacity,
+                "free": p.free,
+                "has_dcim": p.has_dcim,
+                "eligible": eligible,
+                "role": role,
+            }
+        )
+    return views
+
+
 def _root_source_device() -> Optional[str]:
     """Determine the kernel name (e.g. 'mmcblk0') of the device that holds '/'.
 
@@ -153,70 +200,97 @@ class DeviceWatcher:
         self._transfer = transfer
         self._context = pyudev.Context()
         self._root_dev = _root_source_device()
+        # ``_armed`` guards against re-running a transfer for a device set that
+        # was already handled. It is cleared when a transfer starts and re-armed
+        # once fewer than two eligible volumes remain (i.e. one was removed).
+        self._armed = True
+        # For the action log: which eligible volumes were present last time, and
+        # their names (kept so a removal can still be named after it is gone).
+        self._prev_nodes: set[str] = set()
+        self._node_names: dict[str, str] = {}
         if self._root_dev:
             _LOG.info("Root device (locked): %s", self._root_dev)
 
     # ----- public loop ---------------------------------------------------------
 
     def run(self) -> None:
-        """Main loop: wait for devices, run transfer, re-arm."""
+        """Event-driven main loop.
+
+        Reacts to USB add/remove events. It does NOT assume that source and
+        target are inserted at the same moment: it keeps re-evaluating the set of
+        present volumes and only starts a transfer once at least two eligible
+        volumes are available. While fewer are present it stays in DETECTING and
+        publishes the detected devices, so the web UI shows what was recognised.
+        """
         monitor = self._pyudev.Monitor.from_netlink(self._context)
         monitor.filter_by(subsystem="block")
 
+        self._armed = True
+        self._publish_ready()
+        _LOG.info("Ready -- waiting for devices ...")
+        # Devices may already be plugged in when the daemon starts.
+        self._evaluate()
+
         while True:
-            self._hub.reset_to_ready()
-            _LOG.info("Ready -- waiting for devices ...")
-
-            # Wait for the first relevant add event.
-            self._wait_for_add(monitor)
-            self._hub.set_phase(State.DETECTING)
-
-            # Settle time so all partitions appear.
-            time.sleep(float(self._config.get("settle_seconds", 2.0)))
-
-            try:
-                self._handle_cycle()
-            except TransferError as exc:
-                _LOG.error("Transfer failed: %s", exc)
-                self._hub.set_error(str(exc))
-            except Exception as exc:  # pragma: no cover - defensive
-                _LOG.exception("Unexpected error: %s", exc)
-                self._hub.set_error(str(exc))
-
-            # Re-arm: wait until the devices are physically removed.
-            self._wait_for_removal()
+            self._wait_for_change(monitor)
+            self._settle(monitor)
+            self._evaluate()
 
     # ----- internal helpers ----------------------------------------------------
 
-    def _wait_for_add(self, monitor) -> None:
+    def _wait_for_change(self, monitor) -> None:
+        """Block until any block add/remove event arrives."""
         for device in iter(monitor.poll, None):
-            if device.action == "add" and self._is_candidate(device):
+            if device.action in ("add", "remove"):
                 return
 
-    def _is_candidate(self, device) -> bool:
-        """True if the device is a mountable USB partition (not root)."""
-        if device.get("DEVTYPE") != "partition":
-            return False
-        if device.get("ID_BUS") != "usb":
-            return False
-        base = _strip_partition(device.sys_name)
-        if self._root_dev and base == self._root_dev:
-            return False
-        return True
+    def _settle(self, monitor) -> None:
+        """Adaptive debounce: return once the bus is quiet, capped at settle_seconds.
 
-    def _current_partitions(self) -> list:
-        """All currently present, eligible USB partitions."""
-        result = []
-        for device in self._context.list_devices(subsystem="block", DEVTYPE="partition"):
-            if self._is_candidate(device):
-                result.append(device)
-        return result
+        A freshly inserted device enumerates its volumes in a short burst. Rather
+        than always waiting the full ``settle_seconds``, we proceed as soon as no
+        further event has arrived for ``settle_quiet_seconds``. This is faster in
+        the common case without being less reliable: any volume that appears after
+        we proceed simply triggers another evaluation. ``settle_seconds`` stays the
+        hard upper bound for slow enumerations.
+        """
+        cap = float(self._config.get("settle_seconds", 2.0))
+        quiet = float(self._config.get("settle_quiet_seconds", 1.0))
+        start = time.monotonic()
+        while True:
+            remaining = cap - (time.monotonic() - start)
+            if remaining <= 0:
+                return
+            # poll() returns the next event, or None when the timeout elapses
+            # with the bus quiet -> settled.
+            if monitor.poll(timeout=min(quiet, remaining)) is None:
+                return
 
-    def _handle_cycle(self) -> None:
-        partitions = self._current_partitions()
-        if not partitions:
-            raise TransferError("No USB partitions found")
+    def _publish_ready(self) -> None:
+        """Back to the idle state: clear phase, devices and storage figures."""
+        self._hub.reset_to_ready()
+        self._hub.set_devices([])
 
+    def _log_device_changes(self, eligible: list[Probe]) -> tuple[bool, bool]:
+        """Emit 'detected'/'removed' events for the eligible-volume set.
+
+        Returns ``(any_added, any_removed)`` so the caller can decide whether to
+        log follow-up messages (e.g. 'waiting for another device').
+        """
+        names = {p.device_node: p.name for p in eligible}
+        current = set(names)
+        added = current - self._prev_nodes
+        removed = self._prev_nodes - current
+        self._node_names.update(names)
+        for node in sorted(added):
+            self._hub.log_event(f"Storage device detected: {names[node]}")
+        for node in sorted(removed):
+            self._hub.log_event(f"Device removed: {self._node_names.pop(node, node)}")
+        self._prev_nodes = current
+        return bool(added), bool(removed)
+
+    def _evaluate(self) -> None:
+        """Probe all present volumes; wait, or transfer once two are eligible."""
         ident = self._config.get("identify", {})
         min_bytes = int(ident.get("min_partition_gb", 6)) * 1024**3
         require_smaller = bool(ident.get("require_source_smaller_than_target", True))
@@ -224,31 +298,113 @@ class DeviceWatcher:
 
         probes: list[Probe] = []
         try:
-            # Mount every candidate at its own unique mountpoint and probe it.
-            # Order does not matter: roles are chosen afterwards by select_roles.
-            for dev in partitions:
+            for dev in self._current_partitions():
                 probe = self._probe_device(dev, mount_base)
                 if probe is not None:
                     probes.append(probe)
 
-            source, target = select_roles(probes, min_bytes, require_smaller)
+            eligible = [p for p in probes if p.capacity >= min_bytes]
+            added, removed = self._log_device_changes(eligible)
+
+            if not eligible:
+                self._armed = True
+                self._hub.set_devices(device_views(probes, min_bytes))
+                self._publish_ready()
+                if removed:
+                    self._hub.log_event("Ready -- waiting for devices")
+                _LOG.info("Ready -- waiting for devices ...")
+                return
+
+            if len(eligible) < 2:
+                # Not enough to decide yet -- keep waiting and re-arm.
+                self._armed = True
+                self._hub.set_devices(device_views(probes, min_bytes))
+                self._hub.set_phase(State.DETECTING)
+                if added:
+                    self._hub.log_event("Waiting for another device ...")
+                _LOG.info("Detecting -- %d eligible volume(s), need 2 ...", len(eligible))
+                return
+
+            # Two or more eligible volumes -- decide roles for real.
+            try:
+                source, target = select_roles(probes, min_bytes, require_smaller)
+            except TransferError:
+                self._hub.set_devices(device_views(probes, min_bytes))
+                raise
+            self._hub.set_devices(device_views(probes, min_bytes, source, target))
+
+            if not self._armed:
+                # This set was already handled; wait until a device is removed.
+                return
+
+            self._armed = False
             _LOG.info(
                 "Source = %s (%s, %d B), Target = %s (%d B)",
                 source.device_node, source.name, source.capacity,
                 target.device_node, target.capacity,
             )
-
+            self._hub.log_event(
+                f"Roles assigned: source = {source.name}, target = {target.name}"
+            )
             self._transfer(
                 source_root=source.mountpoint,
                 target_root=target.mountpoint,
                 source_name=source.name,
+                source_device=source.device_node,
                 hub=self._hub,
                 config=self._config,
             )
+            self._hub.log_event("Ready to remove devices")
+        except TransferError as exc:
+            self._armed = False
+            _LOG.error("Transfer failed: %s", exc)
+            self._hub.log_event(f"Copy failed: {exc}", level="error")
+            self._hub.set_error(str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            self._armed = False
+            _LOG.exception("Unexpected error: %s", exc)
+            self._hub.log_event(f"Unexpected error: {exc}", level="error")
+            self._hub.set_error(str(exc))
         finally:
             subprocess.run(["sync"], check=False)
             for probe in probes:
                 self._umount(probe.mountpoint)
+
+    def _is_candidate(self, device) -> bool:
+        """True if the device is a mountable USB volume (not root).
+
+        Accepts two shapes:
+        * a USB *partition* (``sda1``, ``sdc1`` ...), and
+        * a USB *whole disk* that carries a filesystem directly, with no
+          partition table (``sdc`` with no ``sdc1``). The DJI O4 Air Unit
+          exposes its storage this way ("superfloppy"), so without this it would
+          never be detected. Disks that DO have a partition table are skipped
+          here -- their partitions are handled individually.
+        """
+        if device.get("ID_BUS") != "usb":
+            return False
+        devtype = device.get("DEVTYPE")
+        if devtype == "partition":
+            pass
+        elif devtype == "disk":
+            if device.get("ID_PART_TABLE_TYPE"):
+                return False  # partitioned -> its partitions are the candidates
+            if not device.get("ID_FS_TYPE"):
+                return False  # no directly-mountable filesystem
+        else:
+            return False
+        base = _strip_partition(device.sys_name)
+        if self._root_dev and base == self._root_dev:
+            return False
+        return True
+
+    def _current_partitions(self) -> list:
+        """All currently present, eligible USB volumes (partitions or disks)."""
+        result = []
+        for device in self._context.list_devices(subsystem="block"):
+            if self._is_candidate(device):
+                result.append(device)
+        return result
 
     def _probe_device(self, dev, mount_base: Path) -> Optional[Probe]:
         """Mount one candidate and measure it. Returns None if it cannot mount."""
@@ -277,7 +433,7 @@ class DeviceWatcher:
             matched_source=self._matches_source(dev),
             capacity=capacity,
             free=free,
-            name=self._source_name(dev, mountpoint),
+            name=self._volume_name(dev),
         )
 
     def _matches_source(self, device) -> bool:
@@ -295,14 +451,42 @@ class DeviceWatcher:
             return False
         return True
 
-    @staticmethod
-    def _source_name(device, mountpoint: Path) -> str:
-        """Plain-text source name (volume label, else USB model/vendor)."""
+    def _volume_name(self, device) -> str:
+        """Human-friendly volume name.
+
+        Resolution order (best first):
+        1. a user-configured name matched by USB VID/PID (``identify
+           .device_labels``) -- this is how an O4 becomes "O4 Lite"/"O4 Pro"
+           without hardcoding, since the USB product string is only a serial,
+        2. the filesystem label (e.g. a card the user named),
+        3. the USB model / vendor string,
+        4. a generic fallback.
+        """
+        configured = self._configured_label(device)
+        if configured:
+            return configured
         for key in ("ID_FS_LABEL", "ID_MODEL", "ID_VENDOR"):
             value = device.get(key)
             if value:
                 return value
         return "camera"
+
+    def _configured_label(self, device) -> Optional[str]:
+        """Look up a friendly name from ``identify.device_labels`` by VID/PID."""
+        mapping = self._config.get("identify", {}).get("device_labels", [])
+        vid = (device.get("ID_VENDOR_ID") or "").lower()
+        pid = (device.get("ID_MODEL_ID") or "").lower()
+        for entry in mapping:
+            evid = str(entry.get("vid", "")).lower()
+            epid = str(entry.get("pid", "")).lower()
+            if not (evid or epid):
+                continue
+            if evid and evid != vid:
+                continue
+            if epid and epid != pid:
+                continue
+            return entry.get("name")
+        return None
 
     def _mount(self, device_node: str, mountpoint: Path) -> Path:
         mountpoint.mkdir(parents=True, exist_ok=True)
@@ -317,9 +501,3 @@ class DeviceWatcher:
     @staticmethod
     def _umount(mountpoint: Path) -> None:
         subprocess.run(["umount", str(mountpoint)], capture_output=True, check=False)
-
-    def _wait_for_removal(self) -> None:
-        """Block until no eligible USB partitions remain."""
-        _LOG.info("Waiting for devices to be removed ...")
-        while self._current_partitions():
-            time.sleep(1.0)

@@ -25,6 +25,7 @@
       <div class="row muted">
         <span>Elapsed: <span id="elapsed">--</span></span>
         <span>ETA: <span id="eta">--</span></span>
+        <span>Speed: <span id="speed">--</span></span>
         <span><span id="bytes">--</span></span>
       </div>
     </section>
@@ -33,6 +34,16 @@
       <h2>Storage</h2>
       <div id="storage-source" class="storage"></div>
       <div id="storage-target" class="storage"></div>
+    </section>
+
+    <section class="card">
+      <h2>Detected devices</h2>
+      <div id="devices"></div>
+    </section>
+
+    <section class="card">
+      <h2>Activity log</h2>
+      <ul id="log" class="log"></ul>
     </section>
 
     <footer class="muted" id="conn">connecting…</footer>

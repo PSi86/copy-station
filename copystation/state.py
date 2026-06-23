@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .status import State, StatusIndicator
+
+# How many recent action-log entries to keep for the web UI.
+MAX_EVENTS = 200
 
 
 @dataclass
@@ -53,6 +57,9 @@ class StationState:
         self._error: str = ""
         self._source = StorageInfo()
         self._target = StorageInfo()
+        self._devices: list[dict[str, Any]] = []
+        self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+        self._event_seq = 0
 
     # ----- mutators (single writer) --------------------------------------------
 
@@ -93,6 +100,24 @@ class StationState:
             self._source = source
             self._target = target
 
+    def set_devices(self, devices: list[dict[str, Any]]) -> None:
+        """Replace the list of currently detected volumes (web UI display)."""
+        with self._lock:
+            self._devices = list(devices)
+
+    def log_event(self, message: str, level: str = "info") -> None:
+        """Append a timestamped entry to the action log (kept across cycles)."""
+        with self._lock:
+            self._event_seq += 1
+            self._events.append(
+                {
+                    "seq": self._event_seq,
+                    "time": time.time(),
+                    "level": level,
+                    "message": message,
+                }
+            )
+
     def reset_to_ready(self) -> None:
         with self._lock:
             self._phase = State.READY
@@ -102,6 +127,10 @@ class StationState:
             self._started_monotonic = None
             self._finished_monotonic = None
             self._transfer_name = ""
+            self._error = ""
+            self._source = StorageInfo()
+            self._target = StorageInfo()
+            self._devices = []
 
     # ----- read access ---------------------------------------------------------
 
@@ -126,15 +155,15 @@ class StationState:
         with self._lock:
             elapsed = self._elapsed_locked()
             eta: Optional[float] = None
+            speed: Optional[float] = None
             if (
                 self._phase is State.COPYING
                 and elapsed
                 and self._bytes_done > 0
-                and self._bytes_total > 0
             ):
-                rate = self._bytes_done / elapsed
-                if rate > 0:
-                    eta = max(0.0, (self._bytes_total - self._bytes_done) / rate)
+                speed = self._bytes_done / elapsed
+                if speed > 0 and self._bytes_total > 0:
+                    eta = max(0.0, (self._bytes_total - self._bytes_done) / speed)
             return {
                 "phase": self._phase.value,
                 "percent": round(self._progress * 100, 1),
@@ -142,10 +171,13 @@ class StationState:
                 "bytes_total": self._bytes_total,
                 "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
                 "eta_seconds": round(eta, 1) if eta is not None else None,
+                "speed_bytes": round(speed) if speed is not None else None,
                 "transfer_name": self._transfer_name,
-                "error": self._error,
+                "error": self._error if self._phase is State.ERROR else "",
                 "source": self._source.as_dict(),
                 "target": self._target.as_dict(),
+                "devices": list(self._devices),
+                "events": list(reversed(self._events)),  # newest first
             }
 
 
@@ -188,6 +220,12 @@ class StatusHub:
 
     def set_storage(self, source: StorageInfo, target: StorageInfo) -> None:
         self._state.set_storage(source, target)
+
+    def set_devices(self, devices: list[dict]) -> None:
+        self._state.set_devices(devices)
+
+    def log_event(self, message: str, level: str = "info") -> None:
+        self._state.log_event(message, level)
 
     def reset_to_ready(self) -> None:
         self._state.reset_to_ready()

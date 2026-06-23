@@ -17,11 +17,19 @@ Ready ──device detected──► Detecting ──source+target ok──► C
                               (error ⇒ Error, source left untouched)
 ```
 
+* **Detection:** event-driven -- source and target may be plugged in **in any
+  order and at different times**. The set of attached volumes is re-evaluated on
+  every USB add/remove event; a transfer starts as soon as two eligible volumes
+  are present. Works with whole-disk devices that carry a filesystem directly
+  (no partition table) -- the O4 Air Unit exposes its storage this way.
 * **Copy:** into a new folder `transfer_<NNNN>_<source_name>` -- nothing is ever
   overwritten. The running number is persisted on the SD card.
 * **Verification:** fast comparison of file count and file sizes.
 * **Cleanup:** only on success; only the `DCIM` contents are deleted, never
   formatted.
+* **Resilience:** if the source is unplugged mid-copy it is detected within
+  ~1 s (rather than after the USB I/O timeout) and reported in plain language;
+  the source media is never deleted unless verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
   (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable).
 
@@ -29,8 +37,10 @@ Ready ──device detected──► Detecting ──source+target ok──► C
 
 Set `web.enabled: true` in the config to host a local status page on **all
 network interfaces** (`0.0.0.0:8080` by default). It shows live phase, copy
-progress (percent, elapsed, ETA), and the capacity/used/free space of both mass
-storages; it is prepared for future settings. Binding to `0.0.0.0` makes it
+progress (percent, elapsed, ETA, **speed**), the capacity/used/free space of both
+mass storages, the **detected devices with their assigned role**
+(source/target/candidate), and a scrolling **activity log** of recent actions
+(newest first); it is prepared for future settings. Binding to `0.0.0.0` makes it
 robust to interfaces going down/up at runtime -- no per-interface rebinding.
 
 The frontend is a single static page (vanilla JS, no build step) that polls
@@ -100,19 +110,32 @@ and [config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml).
 
 ## Source/target detection
 
-Detection is independent of the order the devices are enumerated. Among the USB
-partitions (the Cubie's own OS card is excluded, and partitions smaller than
-`identify.min_partition_gb`, default 6 GB, are ignored):
+Detection is independent of the order the devices are enumerated **and of whether
+they are inserted at the same time**. A candidate is any USB *volume* -- either a
+partition (`sdb1`) or a whole disk that carries a filesystem directly with no
+partition table (`sdc`, as the O4 Air Unit presents it). The Cubie's own OS card
+is excluded, and volumes smaller than `identify.min_partition_gb` (default 6 GB)
+are ignored. Once two eligible volumes are present:
 
-* **Source** = the smallest partition that contains a `DCIM` folder (and, if
+* **Source** = the smallest volume that contains a `DCIM` folder (and, if
   configured, matches the USB VID/PID allowlist).
-* **Target** = the largest of the remaining partitions.
+* **Target** = the largest of the remaining volumes.
 * By default the source must be **smaller** than the target, so the larger
   device is never used as source even if it also carries a `DCIM` folder
   (`identify.require_source_smaller_than_target`).
 
 Before copying, the target's free space is checked against the source's media
 size; if it does not fit, the cycle ends in `Error` and the source is untouched.
+
+**Friendly names:** volumes are labelled in the web UI by their filesystem label
+or USB model. Because the O4's USB product string is only a serial, you can map a
+readable name by USB VID/PID via `identify.device_labels`
+(e.g. `2ca3:0020 -> "O4 Lite"`) -- find the VID/PID with `lsusb`.
+
+**Detection speed:** after a USB event the station waits only until the bus is
+quiet for `settle_quiet_seconds` (default 1 s) before mounting, capped by
+`settle_seconds` (default 2 s). Reliability is unaffected -- a volume that appears
+later simply triggers another evaluation.
 
 ## Configuration
 
