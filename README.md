@@ -27,9 +27,11 @@ Ready ──device detected──► Detecting ──source+target ok──► C
 * **Verification:** fast comparison of file count and file sizes.
 * **Cleanup:** only on success; only the `DCIM` contents are deleted, never
   formatted.
-* **Resilience:** if the source is unplugged mid-copy it is detected within
-  ~1 s (rather than after the USB I/O timeout) and reported in plain language;
-  the source media is never deleted unless verification succeeded.
+* **Resilience:** if the source or target is unplugged mid-copy the copy aborts
+  and reports which side dropped out -- promptly (~1 s) when the whole USB device
+  is removed, or once the kernel hits the I/O error when only a card is pulled
+  from a still-connected reader. Either way the source is never deleted unless
+  verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
   (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable).
 
@@ -37,11 +39,11 @@ Ready ──device detected──► Detecting ──source+target ok──► C
 
 Set `web.enabled: true` in the config to host a local status page on **all
 network interfaces** (`0.0.0.0:8080` by default). It shows live phase, copy
-progress (percent, elapsed, ETA, **speed**), the capacity/used/free space of both
-mass storages, the **detected devices with their assigned role**
-(source/target/candidate), and a scrolling **activity log** of recent actions
-(newest first); it is prepared for future settings. Binding to `0.0.0.0` makes it
-robust to interfaces going down/up at runtime -- no per-interface rebinding.
+progress (percent, elapsed, ETA, **speed**), the **detected devices** with their
+assigned role (source/target/candidate) and used/total storage, and a scrolling
+**activity log** of recent actions (newest first); it is prepared for future
+settings. Binding to `0.0.0.0` makes it robust to interfaces going down/up at
+runtime -- no per-interface rebinding.
 
 The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API

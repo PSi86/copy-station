@@ -71,6 +71,10 @@ class StationState:
         with self._lock:
             self._error = message
             self._phase = State.ERROR
+            # Freeze the elapsed clock at the failure point: without this the
+            # snapshot keeps counting (end = now) as if the copy were still live.
+            if self._started_monotonic is not None and self._finished_monotonic is None:
+                self._finished_monotonic = time.monotonic()
 
     def begin_transfer(self, name: str, bytes_total: int) -> None:
         with self._lock:
