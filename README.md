@@ -3,8 +3,8 @@
 Autonomous copy station: automatically transfers the footage of a camera
 connected via USB as mass storage (e.g. **DJI O4 Air Unit**, `DCIM` folder) onto
 a **(micro) SD card**, verifies the transfer and then clears the source. Runs as
-a systemd service on a **Radxa Cubie A7S** (`radxa-a733-bullseye-cli-r6`,
-headless).
+a headless systemd service on a **Radxa Cubie A7S** (`radxa-a733-bullseye-cli-r6`)
+or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 
 ## Flow
 
@@ -65,8 +65,11 @@ The first LED always shows the status colour (Ready = green, Detecting = yellow,
 Error = red, Success = a short green blink); during a copy the LEDs `1..N` form a
 proportional progress bar that blinks at 10 Hz, the same activity pattern as the
 Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
-the config. On the Raspberry Pi enable SPI (`dtparam=spi=on`) and wire DIN to
-MOSI (BCM GPIO10 / pin 19).
+the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
+MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable its SPI controller in
+the device tree and wire DIN to that controller's **MOSI** header pin; the MOSI
+offset is fixed by the controller (not a `config.yaml` line), so point `device` at
+the matching `/dev/spidevX.Y`.
 
 ## Powering off safely
 
@@ -120,7 +123,10 @@ mechanisms -- keep them apart:
 
 **Recommended pin -- Cubie A7S:** there is no documented wake-from-halt GPIO, so
 pick any free line from `gpioinfo`; the button only triggers shutdown, and you
-power the board back on by re-applying power.
+power the board back on by re-applying power. For a concrete example, **PB5
+(header pin 12, offset 37)** works when you are not also wiring a buzzer there --
+set `line: 37`. The offset follows the same `(bank_letter - 'A') * 32 + pin` rule
+as the LED/Grove pins (see *GPIO pins for the status hardware* below).
 
 ## Development (without hardware, e.g. Windows)
 
@@ -149,8 +155,9 @@ code and config run across these releases.
 ### 1. Get the code onto the device
 
 Log in to the device (e.g. `ssh radxa@<device-ip>`) and place the project in
-your home directory, so it ends up at `~/copy-station` (i.e.
-`/home/radxa/copy-station` on the Cubie). Pick **one** of the two ways:
+your home directory, so it ends up at `~/copy-station` (e.g.
+`/home/radxa/copy-station` on the Cubie, `/home/<user>/copy-station` on a Pi).
+Pick **one** of the two ways:
 
 **A) Clone with git (recommended)** -- keeps file permissions intact:
 
@@ -289,7 +296,7 @@ place -- remove them by hand if nothing else needs them.
 Detection is independent of the order the devices are enumerated **and of whether
 they are inserted at the same time**. A candidate is any USB *volume* -- either a
 partition (`sdb1`) or a whole disk that carries a filesystem directly with no
-partition table (`sdc`, as the O4 Air Unit presents it). The Cubie's own OS card
+partition table (`sdc`, as the O4 Air Unit presents it). The board's own OS card
 is excluded, and volumes smaller than `identify.min_partition_gb` (default 6 GB)
 are ignored. Once two eligible volumes are present:
 
