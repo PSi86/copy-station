@@ -76,10 +76,13 @@ sudo systemctl poweroff
 ```
 
 This stops the service, flushes buffers and unmounts the filesystems; once the
-board has halted it is safe to remove power. Prefer `poweroff` over `reboot` (a
-warm `reboot` can hang on the A733 -- only a cold power-cycle recovers). The copy
-itself is safe against a sudden disconnect: the source is never cleared unless
-verification succeeded.
+board has halted it is safe to remove power. **Always use `poweroff`, never
+`reboot`:** on the A733 (tested on `radxa-a733_trixie_cli_t4`) a warm `reboot`
+never comes back up -- recovery always needs a full power-cycle (remove power,
+then reapply). A normal cold boot is reliable (an earlier "random boot failure"
+turned out to be a marginal microSD card -- if cold boot ever flakes, suspect the
+card first). The copy itself is safe against a sudden disconnect: the source is
+never cleared unless verification succeeded.
 
 ### Shutdown button (optional)
 
