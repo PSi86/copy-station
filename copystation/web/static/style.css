@@ -85,8 +85,10 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .storage-track { height: 12px; background: #2a2f3a; border-radius: 999px; overflow: hidden; }
 .storage-used { height: 100%; background: var(--accent); }
 
-#devices .label { display: flex; justify-content: space-between; padding: 0.35rem 0; }
-#devices .label + .label { border-top: 1px solid #2a2f3a; }
+.device { padding: 0.45rem 0; }
+.device + .device { border-top: 1px solid #2a2f3a; }
+.device .label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; }
+.device .storage-track { height: 8px; }
 .role {
   display: inline-block;
   margin-left: 0.4rem;
