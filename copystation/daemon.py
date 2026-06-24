@@ -225,23 +225,27 @@ def _maybe_start_shutdown_button(config: Config):
         return None
 
 
-def _install_sigterm_handler() -> None:
-    """Turn SIGTERM into a clean shutdown.
+def _install_stop_handlers(watcher) -> None:
+    """Stop the watcher cleanly on SIGTERM/SIGINT so the cleanup runs.
 
     systemd stops the service with SIGTERM, whose default action kills the
     process outright -- so the ``finally`` cleanup (which switches the LEDs off)
-    would never run. Re-raise it as KeyboardInterrupt so the normal shutdown path
-    handles it. No-op if not on the main thread (e.g. under the tests).
+    would never run. The handler just sets the watcher's stop flag; its
+    timeout-polled loop notices it and exits (the flag is checked in the main
+    thread, which is why the loop must not block indefinitely). No-op off the
+    main thread (e.g. under the tests).
     """
     import signal
 
     def _handler(signum, frame):  # pragma: no cover - exercised only via a signal
-        raise KeyboardInterrupt
+        _LOG.info("Signal %s received -- shutting down ...", signum)
+        watcher.request_stop()
 
-    try:
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError:  # pragma: no cover - not the main thread
-        pass
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover - not the main thread
+            pass
 
 
 def run_daemon(config: Config) -> int:
@@ -255,9 +259,9 @@ def run_daemon(config: Config) -> int:
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     _maybe_start_web(state, config)
     button = _maybe_start_shutdown_button(config)
-    _install_sigterm_handler()
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
+    _install_stop_handlers(watcher)
     try:
         watcher.run()
     except KeyboardInterrupt:  # pragma: no cover
