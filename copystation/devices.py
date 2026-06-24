@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from .config import Config
 from .state import StatusHub
 from .status import Event, State
+from .status.effects import FILL_GAUGE_SECONDS
 from .transfer import TransferError
 
 _LOG = logging.getLogger("copystation.devices")
@@ -431,6 +432,15 @@ class DeviceWatcher:
                 f"Roles assigned: source = {source.name}, target = {target.name}"
             )
 
+            # Let the source's fill gauge have its moment before the copy bar takes
+            # over: hold in DETECTING for the gauge duration, then start the copy.
+            self._hub.set_phase(State.DETECTING)
+            if not self._hold_before_copy(source, target):
+                self._armed = True
+                self._hub.log_event("A device was removed before the copy started")
+                _LOG.info("A device disappeared during the pre-copy hold.")
+                return
+
             def _refresh_devices() -> None:
                 # Re-measure the mounts and republish, so the web view tracks the
                 # filling target during the copy and the emptied source afterwards.
@@ -462,6 +472,24 @@ class DeviceWatcher:
             subprocess.run(["sync"], check=False)
             for probe in probes:
                 self._umount(probe.mountpoint)
+
+    def _hold_before_copy(self, source: Probe, target: Probe) -> bool:
+        """Stay in DETECTING for the fill-gauge duration before copying.
+
+        The render thread shows the source's fill gauge during this hold, so the
+        user sees how full the source is before the copy bar takes over. Polls
+        for device removal so a card pulled in this window does not start a copy
+        that is doomed to abort. Returns False if a device disappeared.
+        """
+        deadline = time.monotonic() + FILL_GAUGE_SECONDS
+        while time.monotonic() < deadline:
+            if not (
+                os.path.exists(source.device_node)
+                and os.path.exists(target.device_node)
+            ):
+                return False
+            time.sleep(0.1)
+        return True
 
     def _is_candidate(self, device) -> bool:
         """True if the device is a mountable USB volume (not root).

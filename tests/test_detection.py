@@ -152,6 +152,37 @@ def test_fill_fraction_clamps_and_handles_zero_capacity():
     assert fill_fraction_for_display([zero]) == 0.0
 
 
+def _probe_with_node(name, node):
+    return Probe(
+        sys_name=name, device_node=str(node), mountpoint=Path("/x"),
+        has_dcim=True, matched_source=True, capacity=GB, free=0, name=name, has_media=True,
+    )
+
+
+def test_hold_before_copy_proceeds_when_devices_present(tmp_path, monkeypatch):
+    import copystation.devices as dev
+
+    monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 0.05)  # keep the test quick
+    src = tmp_path / "sdc"; src.write_bytes(b"")
+    tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
+    w = _watcher()
+    assert w._hold_before_copy(
+        _probe_with_node("cam", src), _probe_with_node("sd", tgt)
+    ) is True
+
+
+def test_hold_before_copy_bails_when_a_device_is_gone(tmp_path, monkeypatch):
+    import copystation.devices as dev
+
+    monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 5.0)  # long, but must bail at once
+    missing = tmp_path / "sdc"            # never created
+    tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
+    w = _watcher()
+    assert w._hold_before_copy(
+        _probe_with_node("cam", missing), _probe_with_node("sd", tgt)
+    ) is False
+
+
 class _RecordingHub:
     """Captures log_event / signal calls for the detection-flow tests."""
 
