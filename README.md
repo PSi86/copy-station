@@ -66,10 +66,13 @@ Error = red, Success = a short green blink); during a copy the LEDs `1..N` form 
 proportional progress bar that blinks at 10 Hz, the same activity pattern as the
 Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
 the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
-MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable its SPI controller in
-the device tree and wire DIN to that controller's **MOSI** header pin; the MOSI
-offset is fixed by the controller (not a `config.yaml` line), so point `device` at
-the matching `/dev/spidevX.Y`.
+MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable the **`spidev on SPI1`**
+overlay (in `rsetup` -> Overlays; the backend needs a `/dev/spidev*` node, so this
+is required) and wire DIN to **SPI1-MOSI = PD12, header pin 19** -- only MOSI is
+used (MISO/CLK/CS stay unconnected). After enabling, find the bus with
+`ls /dev/spidev*` (typically `/dev/spidev1.0`) and set it as `device`. Note that
+PD12/PD13 (pins 19/21) are the same pins the Grove LED Bar uses, so drive **either**
+the Grove bar **or** a WS2812 strip on them, not both.
 
 ## Powering off safely
 
