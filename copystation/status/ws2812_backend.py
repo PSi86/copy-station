@@ -16,8 +16,9 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
   device's fill level (``set_fill``) -- same bar idea as the copy progress, but
   white and not blinking. At least one LED is lit so "detected" reads even for a
   near-empty volume. The gauge is a brief readout: it shows for ~3 s after a
-  device is detected and then the strip rests (off) -- unless it is ``sticky``
-  (set just before a copy), when it stays up until the copy bar takes over.
+  device is detected, then a slow MAGENTA pulse marks "detecting, waiting"
+  (deliberately far from the green idle) -- unless the gauge is ``sticky`` (set
+  just before a copy), when it stays up until the copy bar takes over.
 * Error (``ERROR``): ALL LEDs blink red -- impossible to miss, e.g. when a device
   is pulled mid-copy.
 * Ready: the first LED is lit steady green. Success = a short green blink on it.
@@ -79,6 +80,10 @@ _COPY_COLOR = (0, 0, 60)  # blue
 # Colour of the fill gauge shown while detecting -- white, unmistakably different
 # from the green "ready" colour and the blue copy bar.
 _FILL_COLOR = (50, 50, 50)  # white
+
+# Colour of the "detecting, waiting" indicator shown after the fill gauge -- a
+# magenta pulse, deliberately far from the green idle so the two never look alike.
+_DETECTING_COLOR = (50, 0, 50)  # magenta
 
 # Confirmations are a touch brighter (~90) so they read as a deliberate event,
 # not a resting colour.
@@ -213,21 +218,26 @@ class Ws2812Backend(StatusIndicator):
                     fill_elapsed = now - self._fill_shown_at
 
             if phase is State.COPYING:
-                count = leds_for(progress, self._led_count)
+                # At least one LED so the very start of the copy (0 %) is not a
+                # dark strip that reads as a pause before the bar grows.
+                count = max(1, leds_for(progress, self._led_count))
                 pixels = self._bar(count, _COPY_COLOR) if blink_on else self._all_off()
                 self._render(pixels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # White fill gauge. A brief readout that rests after a few seconds,
-                # unless it is sticky (a copy is imminent) -- then it stays up until
-                # COPYING takes over, so there is no gap before the copy bar.
                 if sticky or fill_gauge_visible(fill_elapsed):
+                    # White fill gauge: a brief readout, or held until the copy bar
+                    # takes over when sticky (a copy is imminent) -- no gap.
                     self._render(self._fill_pixels(fill))
+                    blink_on = True
+                    time.sleep(0.05)
                 else:
-                    self._render(self._all_off())
-                blink_on = True
-                time.sleep(0.05)
+                    # Gauge done, still waiting -> a slow magenta pulse, clearly
+                    # distinct from the green idle (not just a dark strip).
+                    self._render(self._single(_DETECTING_COLOR) if blink_on else self._all_off())
+                    blink_on = not blink_on
+                    time.sleep(0.4)  # ~1.25 Hz
             elif phase is State.ERROR:
                 # All LEDs blink red until the situation is cleared (devices removed).
                 self._render([_ERROR_COLOR] * self._led_count if blink_on else self._all_off())

@@ -83,6 +83,7 @@ def perform_transfer(
     source_device: str | None = None,
     target_device: str | None = None,
     on_devices_refresh=None,
+    required: int | None = None,
 ) -> Path:
     """Perform a complete transfer.
 
@@ -94,7 +95,10 @@ def perform_transfer(
     promptly if either is unplugged mid-transfer, rather than waiting for the I/O
     timeout. ``on_devices_refresh`` (optional) is called to re-measure the devices
     for the web view: throttled during the copy (target filling up) and once after
-    the source has been cleared (source now empty).
+    the source has been cleared (source now empty). ``required`` is the source
+    media size in bytes; pass it to skip a re-scan when the caller already
+    measured it (the daemon does this during the pre-copy gauge hold so the copy
+    bar appears promptly).
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
@@ -108,7 +112,8 @@ def perform_transfer(
     src_label = source_name or "source"
     hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, "target"))
 
-    required = total_size(media_dir)
+    if required is None:
+        required = total_size(media_dir)
     check_free_space(target_root, required)
 
     dest = next_transfer_dir(target_root, source_name)

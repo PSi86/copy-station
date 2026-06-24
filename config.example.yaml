@@ -57,9 +57,9 @@ status:
     line: 37         # Cubie PB5 (pin 12) | Pi: BCM24
 
   # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
-  # New device: 2 green flashes, then a white fill gauge for ~3 s. Copy: blue
-  # 1..N progress bar (blinking). Error: all LEDs blink red. Ready: first LED green.
-  # Service start: cyan wipe; service stop: all LEDs off.
+  # New device: 2 green flashes, then a white fill gauge for ~3 s, then a magenta
+  # pulse while waiting. Copy: blue 1..N progress bar (blinking). Error: all LEDs
+  # blink red. Ready: first LED green. Service start: cyan wipe; stop: all off.
   ws2812:
     device: /dev/spidev0.0
     led_count: 1       # number of LEDs in the strip (1-10)

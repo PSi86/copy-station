@@ -10,8 +10,9 @@ Behaviour:
   blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to signal activity.
 * Detecting (``DETECTING``): a STEADY fill gauge of the detected device
   (``set_fill``) -- segments ``1..segments_for(fill)``, at least one -- shown as a
-  brief ~3 s readout, after which the bar rests; if ``sticky`` (a copy is
-  imminent) it stays up until the copy bar takes over.
+  brief ~3 s readout, after which segment 2 blinks slowly ("waiting", distinct
+  from the steady idle segment 3); if ``sticky`` (a copy is imminent) the gauge
+  stays up until the copy bar takes over.
 * Error (``ERROR``): all segments blink until the situation is cleared.
 * Ready: a single steady segment (3). Success = short green blink on segment 3.
 
@@ -150,20 +151,26 @@ class GroveLedBarBackend(StatusIndicator):
                     fill_elapsed = now - self._fill_shown_at
 
             if phase is State.COPYING:
-                count = segments_for(progress)
+                # At least one segment so 0 % is not a dark bar that reads as a
+                # pause before the fill grows.
+                count = max(1, segments_for(progress))
                 levels = self._first_n(count) if blink_on else [_OFF] * SEGMENT_COUNT
                 self._render(levels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # Fill gauge (at least one segment): a brief readout, unless sticky
-                # (a copy is imminent) -- then it stays up until COPYING takes over.
                 if sticky or fill_gauge_visible(fill_elapsed):
+                    # Fill gauge (>=1 segment): a brief readout, or held until the
+                    # copy bar takes over when sticky (a copy is imminent).
                     self._render(self._first_n(max(1, segments_for(fill))))
+                    blink_on = True
+                    time.sleep(0.05)
                 else:
-                    self._render([_OFF] * SEGMENT_COUNT)
-                blink_on = True
-                time.sleep(0.05)
+                    # Gauge done, still waiting -> a slow blink of segment 2,
+                    # distinct from the steady idle segment (3).
+                    self._render(self._single(2) if blink_on else [_OFF] * SEGMENT_COUNT)
+                    blink_on = not blink_on
+                    time.sleep(0.4)
             elif phase is State.ERROR:
                 # All segments blink until the situation is cleared (devices removed).
                 self._render([_ON] * SEGMENT_COUNT if blink_on else [_OFF] * SEGMENT_COUNT)

@@ -28,7 +28,7 @@ from .config import Config
 from .state import StatusHub
 from .status import Event, State
 from .status.effects import FILL_GAUGE_SECONDS
-from .transfer import TransferError
+from .transfer import TransferError, total_size
 
 _LOG = logging.getLogger("copystation.devices")
 
@@ -468,10 +468,14 @@ class DeviceWatcher:
             # Let the source's fill gauge have its moment before the copy bar takes
             # over: keep it up (sticky) and hold in DETECTING for the gauge
             # duration, then start the copy. Sticky => the gauge stays visible
-            # until COPYING replaces it, so there is no gap before the copy.
+            # until COPYING replaces it, so there is no gap before the copy. The
+            # (possibly slow) size scan happens INSIDE the hold so the copy bar
+            # appears promptly when the gauge time is up, not after an extra pause.
             self._hub.set_fill(fill, sticky=True)
             self._hub.set_phase(State.DETECTING)
-            if not self._hold_before_copy(source, target):
+            media_dir = source.mountpoint / self._config.media_dirname
+            required = self._hold_before_copy(source, target, media_dir)
+            if required is None:
                 self._armed = True
                 self._hub.log_event("A device was removed before the copy started")
                 _LOG.info("A device disappeared during the pre-copy hold.")
@@ -492,6 +496,7 @@ class DeviceWatcher:
                 hub=self._hub,
                 config=self._config,
                 on_devices_refresh=_refresh_devices,
+                required=required,  # measured during the hold -> no re-scan delay
             )
             self._hub.log_event("Ready to remove devices")
         except TransferError as exc:
@@ -511,23 +516,31 @@ class DeviceWatcher:
             for probe in probes:
                 self._umount(probe.mountpoint)
 
-    def _hold_before_copy(self, source: Probe, target: Probe) -> bool:
+    def _hold_before_copy(self, source: Probe, target: Probe, media_dir: Path):
         """Stay in DETECTING for the fill-gauge duration before copying.
 
         The render thread shows the source's fill gauge during this hold, so the
-        user sees how full the source is before the copy bar takes over. Polls
-        for device removal so a card pulled in this window does not start a copy
-        that is doomed to abort. Returns False if a device disappeared.
+        user sees how full the source is before the copy bar takes over. The
+        source size scan runs INSIDE the window (it counts towards the hold), so
+        the copy bar appears promptly afterwards instead of after an extra scan.
+        Polls for device removal so a card pulled here does not start a doomed
+        copy. Returns the source media size in bytes, or None if a device
+        disappeared.
         """
         deadline = time.monotonic() + FILL_GAUGE_SECONDS
+        try:
+            required = total_size(media_dir)
+        except OSError:
+            return None
         while time.monotonic() < deadline:
-            if not (
-                os.path.exists(source.device_node)
-                and os.path.exists(target.device_node)
-            ):
-                return False
+            if not self._both_present(source, target):
+                return None
             time.sleep(0.1)
-        return True
+        return required if self._both_present(source, target) else None
+
+    @staticmethod
+    def _both_present(source: Probe, target: Probe) -> bool:
+        return os.path.exists(source.device_node) and os.path.exists(target.device_node)
 
     def _is_candidate(self, device) -> bool:
         """True if the device is a mountable USB volume (not root).
