@@ -10,8 +10,10 @@ from copystation.devices import (
     NoTargetError,
     Probe,
     device_views,
+    has_empty_source,
     select_roles,
 )
+from copystation.status import Event
 
 GB = 1024**3
 MIN_BYTES = 6 * GB
@@ -110,6 +112,53 @@ def test_vid_pid_mismatch_excludes_source():
     sd = _probe("sd", 256 * GB, has_dcim=False)
     with pytest.raises(NoSourceError):
         select_roles([cam, sd], MIN_BYTES)
+
+
+def test_has_empty_source():
+    empty = _probe("cam", 23 * GB, has_dcim=True, has_media=False)
+    full = _probe("cam2", 23 * GB, has_dcim=True, has_media=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    assert has_empty_source([empty, sd]) is True
+    assert has_empty_source([full, sd]) is False       # a source with media exists
+    assert has_empty_source([empty, full, sd]) is False  # one full source is enough
+    assert has_empty_source([sd]) is False              # no source-shaped volume
+    # A DCIM device that fails the VID/PID allowlist is not "source-shaped".
+    foreign = _probe("x", 23 * GB, has_dcim=True, has_media=False, matched_source=False)
+    assert has_empty_source([foreign, sd]) is False
+
+
+class _RecordingHub:
+    """Captures log_event / signal calls for the detection-flow tests."""
+
+    def __init__(self):
+        self.events = []
+        self.signals = []
+
+    def log_event(self, message, level="info"):
+        self.events.append((message, level))
+
+    def signal(self, event):
+        self.signals.append(event)
+
+
+def test_detected_devices_emit_one_signal_each():
+    w = _watcher()
+    w._hub = _RecordingHub()
+    w._prev_nodes = set()
+    w._node_names = {}
+
+    cam = _probe("cam", 23 * GB, has_dcim=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    added, removed = w._log_device_changes([cam, sd])
+
+    assert added and not removed
+    # One green "detected" blink per newly recognised volume.
+    assert w._hub.signals.count(Event.DEVICE_DETECTED) == 2
+
+    # Re-evaluating the same set emits nothing new (no spurious re-blink).
+    w._hub.signals.clear()
+    w._log_device_changes([cam, sd])
+    assert w._hub.signals == []
 
 
 class _FakeDevice:

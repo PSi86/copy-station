@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class State(enum.Enum):
-    """Operating states that are signalled to the outside."""
+    """Steady operating states that are signalled to the outside."""
 
     READY = "ready"
     DETECTING = "detecting"
@@ -26,10 +26,22 @@ class State(enum.Enum):
     SUCCESS = "success"  # short confirmation pulse after a successful transfer
 
 
+class Event(enum.Enum):
+    """One-shot moments worth a brief, unmistakable signal.
+
+    Unlike a :class:`State` (a steady phase the indicator keeps showing), an
+    ``Event`` plays a transient animation once and then hands the indicator back
+    to the current state. See ``status.effects`` for the shared timing.
+    """
+
+    DEVICE_DETECTED = "device_detected"  # a new eligible volume was recognised
+    SOURCE_EMPTY = "source_empty"        # a source is connected but has nothing to copy
+
+
 class StatusIndicator:
     """Base class / no-op backend.
 
-    Concrete backends override ``set_state`` and optionally ``close``.
+    Concrete backends override ``set_state`` and optionally ``signal`` / ``close``.
     """
 
     def set_state(self, state: State) -> None:  # pragma: no cover - no-op
@@ -37,6 +49,11 @@ class StatusIndicator:
 
     def set_progress(self, fraction: float) -> None:  # pragma: no cover - no-op
         """Report copy progress (0.0..1.0). Only progress-aware backends use it."""
+        pass
+
+    def signal(self, event: Event) -> None:  # pragma: no cover - no-op
+        """Fire a one-shot transient effect. Backends that support animation
+        override this; the rest safely ignore it."""
         pass
 
     def close(self) -> None:  # pragma: no cover - no-op
@@ -64,6 +81,13 @@ class CompositeIndicator(StatusIndicator):
         for backend in self._backends:
             try:
                 backend.set_progress(fraction)
+            except Exception:  # pragma: no cover - indication must never crash
+                pass
+
+    def signal(self, event: Event) -> None:
+        for backend in self._backends:
+            try:
+                backend.signal(event)
             except Exception:  # pragma: no cover - indication must never crash
                 pass
 

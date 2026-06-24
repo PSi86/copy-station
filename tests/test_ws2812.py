@@ -1,4 +1,13 @@
-from copystation.status.ws2812_backend import MAX_LEDS, encode_pixels, leds_for
+from copystation.status import Event
+from copystation.status.ws2812_backend import (
+    MAX_LEDS,
+    Ws2812Backend,
+    _DETECT_COLOR,
+    _EMPTY_COLOR,
+    _OFF,
+    encode_pixels,
+    leds_for,
+)
 
 
 def test_leds_for_bounds():
@@ -66,3 +75,15 @@ def test_encode_round_trips_colours():
 
 def test_encode_off_pixel_round_trips():
     assert _decode(encode_pixels([(0, 0, 0)])) == [(0, 0, 0)]
+
+
+def test_effect_pixels_cover_all_leds():
+    # One-shot effects use the whole strip (bypass __init__: no spidev needed).
+    b = Ws2812Backend.__new__(Ws2812Backend)
+    b._led_count = 3
+    assert b._effect_pixels(Event.DEVICE_DETECTED, True) == [_DETECT_COLOR] * 3
+    assert b._effect_pixels(Event.DEVICE_DETECTED, False) == [_OFF] * 3
+    # 'source empty' is a steady hold -> always lit while it plays.
+    assert b._effect_pixels(Event.SOURCE_EMPTY, True) == [_EMPTY_COLOR] * 3
+    # Detection green and empty-source blue must be visually different.
+    assert _DETECT_COLOR != _EMPTY_COLOR

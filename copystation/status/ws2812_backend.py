@@ -17,6 +17,16 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
   LED. The remaining LEDs stay dark until a transfer needs them for the
   progress bar.
 
+On top of those steady states, one-shot :class:`Event` signals overlay a brief
+animation (see ``status.effects``) and then hand the strip back to the current
+state:
+
+* ``DEVICE_DETECTED``: all LEDs flash bright green four times -- an unmistakable
+  "a volume was recognised" that the near-identical idle colours can't convey.
+* ``SOURCE_EMPTY``: all LEDs hold solid blue for a few seconds -- "a source is
+  connected but there is nothing to copy". (Distinct from the copy colour, which
+  is a *partial, blinking* progress bar rather than a solid hold.)
+
 Without ``spidev`` / matching hardware the constructor raises -- the factory
 caller then skips the backend.
 """
@@ -26,7 +36,8 @@ from __future__ import annotations
 import threading
 import time
 
-from . import State, StatusIndicator
+from . import Event, State, StatusIndicator
+from .effects import EFFECT_TICK_SECONDS, TransientQueue, effect_phase
 
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
@@ -34,18 +45,22 @@ MAX_LEDS = 10
 # (R, G, B) of an unlit pixel.
 _OFF = (0, 0, 0)
 
-# Idle status colour shown on the first LED, per phase.
+# Idle status colour shown on the first LED, per phase. Kept at an even ~60
+# brightness so the three idle colours read as one consistent family.
 _IDLE_COLOR: dict[State, tuple[int, int, int]] = {
-    State.READY: (0, 40, 0),       # green
-    State.DETECTING: (40, 30, 0),  # yellow
-    State.ERROR: (80, 0, 0),       # red
+    State.READY: (0, 60, 0),       # green
+    State.DETECTING: (60, 40, 0),  # amber/yellow
+    State.ERROR: (60, 0, 0),       # red
 }
 
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
 
-# Colour of the success confirmation blink.
-_SUCCESS_COLOR = (0, 80, 0)  # bright green
+# Confirmations are a touch brighter (~90) so they read as a deliberate event,
+# not a resting colour.
+_SUCCESS_COLOR = (0, 90, 0)   # bright green -- transfer done
+_DETECT_COLOR = (0, 90, 0)    # bright green -- one-shot "device detected" flash
+_EMPTY_COLOR = (0, 0, 90)     # bright blue  -- one-shot "source empty" hold
 
 
 def leds_for(progress: float, led_count: int) -> int:
@@ -100,6 +115,7 @@ class Ws2812Backend(StatusIndicator):
         self._phase = State.READY
         self._progress = 0.0
         self._last_pixels: list[tuple[int, int, int]] | None = None
+        self._transients = TransientQueue()
 
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -122,6 +138,11 @@ class Ws2812Backend(StatusIndicator):
         with self._lock:
             self._progress = fraction
 
+    def signal(self, event: Event) -> None:
+        # Momentary effects are queued; the render loop plays them in order and
+        # then resumes the steady state.
+        self._transients.push(event)
+
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1.0)
@@ -139,6 +160,12 @@ class Ws2812Backend(StatusIndicator):
     def _run(self) -> None:
         blink_on = True
         while not self._stop.is_set():
+            # A queued one-shot effect (detection blink / empty-source hold) takes
+            # over the strip until it finishes, then the steady state resumes.
+            if self._play_transient():
+                blink_on = True
+                continue
+
             with self._lock:
                 phase = self._phase
                 progress = self._progress
@@ -159,6 +186,35 @@ class Ws2812Backend(StatusIndicator):
                 self._render(self._single(color) if color else self._all_off())
                 blink_on = True
                 time.sleep(0.05)
+
+    def _play_transient(self) -> bool:
+        """Render the active one-shot effect, if any.
+
+        Drains finished effects and renders the first live one for a single tick.
+        Returns True while an effect is playing (the caller then skips the
+        steady-state rendering), False when the queue is empty.
+        """
+        now = time.monotonic()
+        while True:
+            cur = self._transients.current(now)
+            if cur is None:
+                return False
+            event, elapsed = cur
+            lit, done = effect_phase(event, elapsed)
+            if done:
+                self._transients.finish()
+                continue  # try the next queued effect immediately
+            self._render(self._effect_pixels(event, lit))
+            time.sleep(EFFECT_TICK_SECONDS)
+            return True
+
+    def _effect_pixels(self, event: Event, lit: bool) -> list[tuple[int, int, int]]:
+        """All-LED colour for a one-shot effect (green flash / blue hold)."""
+        if event is Event.DEVICE_DETECTED:
+            return [_DETECT_COLOR if lit else _OFF] * self._led_count
+        if event is Event.SOURCE_EMPTY:
+            return [_EMPTY_COLOR if lit else _OFF] * self._led_count
+        return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:
         return [_OFF] * self._led_count

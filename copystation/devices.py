@@ -25,7 +25,7 @@ from typing import Callable, Optional
 
 from .config import Config
 from .state import StatusHub
-from .status import State
+from .status import Event, State
 from .transfer import TransferError
 
 _LOG = logging.getLogger("copystation.devices")
@@ -103,6 +103,18 @@ def select_roles(
             f"({target.capacity} B) -- refusing to copy"
         )
     return source, target
+
+
+def has_empty_source(eligible: list[Probe]) -> bool:
+    """True when a source is connected but there is nothing to copy.
+
+    That is: at least one eligible volume is source-shaped (carries a DCIM folder
+    and matches the optional VID/PID allowlist), and *every* such volume has an
+    empty DCIM. Used both to decide the "empty source" status signal and to skip
+    starting a transfer.
+    """
+    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    return bool(source_shaped) and not any(p.has_media for p in source_shaped)
 
 
 def device_views(
@@ -310,6 +322,8 @@ class DeviceWatcher:
         self._node_names.update(names)
         for node in sorted(added):
             self._hub.log_event(f"Storage device detected: {names[node]}")
+            # A quick green blink per recognised volume -- unmistakable on the LEDs.
+            self._hub.signal(Event.DEVICE_DETECTED)
         for node in sorted(removed):
             self._hub.log_event(f"Device removed: {self._node_names.pop(node, node)}")
         self._prev_nodes = current
@@ -332,6 +346,11 @@ class DeviceWatcher:
             eligible = [p for p in probes if p.capacity >= min_bytes]
             added, removed = self._log_device_changes(eligible)
 
+            # A source is connected but its DCIM is empty -> a steady blue "nothing
+            # to copy" hold. Fire only on a change, so it does not repeat endlessly.
+            if added and has_empty_source(eligible):
+                self._hub.signal(Event.SOURCE_EMPTY)
+
             if not eligible:
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
@@ -353,8 +372,7 @@ class DeviceWatcher:
 
             # A source is connected but its DCIM is empty -- nothing to copy. Don't
             # start a transfer and don't error; show it as "empty" and wait.
-            source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
-            if source_shaped and not any(p.has_media for p in source_shaped):
+            if has_empty_source(eligible):
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
                 self._hub.set_phase(State.DETECTING)

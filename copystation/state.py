@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .status import State, StatusIndicator
+from .status import Event, State, StatusIndicator
 
 # How many recent action-log entries to keep for the web UI.
 MAX_EVENTS = 200
@@ -213,6 +213,11 @@ class StatusHub:
         self._state.begin_transfer(name, bytes_total)
         self._indicator.set_state(State.COPYING)
         self._indicator.set_progress(0.0)
+
+    def signal(self, event: Event) -> None:
+        """Fire a one-shot status effect (e.g. a detection blink). Momentary --
+        it is not part of the persisted snapshot, only the live indicators."""
+        self._indicator.signal(event)
 
     def update_progress(self, bytes_done: int) -> None:
         self._state.update_progress(bytes_done)

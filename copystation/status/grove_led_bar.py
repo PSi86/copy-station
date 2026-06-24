@@ -12,6 +12,13 @@ Behaviour:
   Detecting = yellow (segment 2), Error = red (segment 1). Success = short green
   blink on segment 3.
 
+One-shot :class:`Event` signals overlay a brief animation (see ``status.effects``)
+and then resume the steady state. The bar is single-colour, so both use the whole
+bar: ``DEVICE_DETECTED`` flashes all segments four times ("a volume was
+recognised"); ``SOURCE_EMPTY`` holds all segments steady for a few seconds
+("nothing to copy"). Both stay distinct from the copy pattern, which is a
+*partial* blinking progress bar.
+
 The exact latch timing and the segment-to-channel orientation must be validated
 on the hardware (see the plan's open points).
 """
@@ -21,7 +28,8 @@ from __future__ import annotations
 import threading
 import time
 
-from . import State, StatusIndicator
+from . import Event, State, StatusIndicator
+from .effects import EFFECT_TICK_SECONDS, TransientQueue, effect_phase
 
 # Number of segments on the bar.
 SEGMENT_COUNT = 10
@@ -75,6 +83,7 @@ class GroveLedBarBackend(StatusIndicator):
         self._progress = 0.0
         self._last_levels: list[int] | None = None
         self._clock_state = 0
+        self._transients = TransientQueue()
 
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -90,6 +99,9 @@ class GroveLedBarBackend(StatusIndicator):
         with self._lock:
             self._progress = fraction
 
+    def signal(self, event: Event) -> None:
+        self._transients.push(event)
+
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1.0)
@@ -104,6 +116,11 @@ class GroveLedBarBackend(StatusIndicator):
     def _run(self) -> None:
         blink_on = True
         while not self._stop.is_set():
+            # A queued one-shot effect takes over the bar until it finishes.
+            if self._play_transient():
+                blink_on = True
+                continue
+
             with self._lock:
                 phase = self._phase
                 progress = self._progress
@@ -124,6 +141,23 @@ class GroveLedBarBackend(StatusIndicator):
                 self._render(self._single(segment) if segment else [_OFF] * SEGMENT_COUNT)
                 blink_on = True
                 time.sleep(0.05)
+
+    def _play_transient(self) -> bool:
+        """Render the active one-shot effect, if any. Returns True while playing."""
+        now = time.monotonic()
+        while True:
+            cur = self._transients.current(now)
+            if cur is None:
+                return False
+            event, elapsed = cur
+            lit, done = effect_phase(event, elapsed)
+            if done:
+                self._transients.finish()
+                continue
+            # Single-colour bar: every one-shot effect uses the whole bar.
+            self._render([_ON] * SEGMENT_COUNT if lit else [_OFF] * SEGMENT_COUNT)
+            time.sleep(EFFECT_TICK_SECONDS)
+            return True
 
     def _first_n(self, n: int) -> list[int]:
         return [_ON if i < n else _OFF for i in range(SEGMENT_COUNT)]

@@ -33,7 +33,10 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   from a still-connected reader. Either way the source is never deleted unless
   verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
-  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable).
+  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable). On the light
+  backends each newly detected volume gives a quick four-flash green blink, and a
+  connected source with nothing to copy a short blue hold, so detection is
+  unmistakable at a glance.
 
 ## Web interface (optional)
 
