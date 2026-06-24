@@ -219,11 +219,12 @@ class StatusHub:
         it is not part of the persisted snapshot, only the live indicators."""
         self._indicator.signal(event)
 
-    def set_fill(self, fraction: float) -> None:
+    def set_fill(self, fraction: float, sticky: bool = False) -> None:
         """Feed the detected device's fill level to the indicators (shown as a
-        gauge while detecting). Indicator-only: the web UI has its own per-device
-        storage figures, so this never touches the snapshot."""
-        self._indicator.set_fill(fraction)
+        gauge while detecting). ``sticky`` keeps the gauge up until the state
+        changes. Indicator-only: the web UI has its own per-device storage
+        figures, so this never touches the snapshot."""
+        self._indicator.set_fill(fraction, sticky)
 
     def update_progress(self, bytes_done: int) -> None:
         self._state.update_progress(bytes_done)

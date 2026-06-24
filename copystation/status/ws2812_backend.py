@@ -16,9 +16,11 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
   device's fill level (``set_fill``) -- same bar idea as the copy progress, but
   white and not blinking. At least one LED is lit so "detected" reads even for a
   near-empty volume. The gauge is a brief readout: it shows for ~3 s after a
-  device is detected and then the strip rests (off) until the next event.
-* Other idle phases: only the first LED is lit steady in the status colour --
-  Ready = green, Error = red. Success = a short green blink on the first LED.
+  device is detected and then the strip rests (off) -- unless it is ``sticky``
+  (set just before a copy), when it stays up until the copy bar takes over.
+* Error (``ERROR``): ALL LEDs blink red -- impossible to miss, e.g. when a device
+  is pulled mid-copy.
+* Ready: the first LED is lit steady green. Success = a short green blink on it.
 
 On top of those steady states, one-shot :class:`Event` signals overlay a brief
 animation (see ``status.effects``) and then hand the strip back to the current
@@ -53,13 +55,15 @@ MAX_LEDS = 10
 # (R, G, B) of an unlit pixel.
 _OFF = (0, 0, 0)
 
-# Idle status colour shown on the first LED, per phase. Kept at an even ~60
-# brightness so the idle colours read as one consistent family. DETECTING is not
-# here -- it shows a white fill gauge (see ``_FILL_COLOR``), not a single colour.
+# Idle status colour shown on the first LED, per phase. DETECTING (white fill
+# gauge) and ERROR (all LEDs blink red) have their own rendering, so only READY
+# is a single steady colour here.
 _IDLE_COLOR: dict[State, tuple[int, int, int]] = {
     State.READY: (0, 60, 0),   # green
-    State.ERROR: (60, 0, 0),   # red
 }
+
+# Error: ALL LEDs blink red -- impossible to miss (e.g. a device pulled mid-copy).
+_ERROR_COLOR = (90, 0, 0)  # bright red
 
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
@@ -127,6 +131,7 @@ class Ws2812Backend(StatusIndicator):
         self._phase = State.READY
         self._progress = 0.0
         self._fill = 0.0
+        self._fill_sticky = False                 # keep the gauge up until COPYING
         self._fill_shown_at: float | None = None  # when the gauge first appeared
         self._last_pixels: list[tuple[int, int, int]] | None = None
         self._transients = TransientQueue()
@@ -152,9 +157,10 @@ class Ws2812Backend(StatusIndicator):
         with self._lock:
             self._progress = fraction
 
-    def set_fill(self, fraction: float) -> None:
+    def set_fill(self, fraction: float, sticky: bool = False) -> None:
         with self._lock:
             self._fill = fraction
+            self._fill_sticky = sticky
             # Restart the brief gauge window at the next detecting render.
             self._fill_shown_at = None
 
@@ -191,6 +197,7 @@ class Ws2812Backend(StatusIndicator):
                 phase = self._phase
                 progress = self._progress
                 fill = self._fill
+                sticky = self._fill_sticky
                 fill_elapsed = 0.0
                 if phase is State.DETECTING:
                     if self._fill_shown_at is None:
@@ -204,14 +211,20 @@ class Ws2812Backend(StatusIndicator):
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # Steady white fill gauge, but only as a brief readout: after a few
-                # seconds the strip rests until the next event.
-                if fill_gauge_visible(fill_elapsed):
+                # White fill gauge. A brief readout that rests after a few seconds,
+                # unless it is sticky (a copy is imminent) -- then it stays up until
+                # COPYING takes over, so there is no gap before the copy bar.
+                if sticky or fill_gauge_visible(fill_elapsed):
                     self._render(self._fill_pixels(fill))
                 else:
                     self._render(self._all_off())
                 blink_on = True
                 time.sleep(0.05)
+            elif phase is State.ERROR:
+                # All LEDs blink red until the situation is cleared (devices removed).
+                self._render([_ERROR_COLOR] * self._led_count if blink_on else self._all_off())
+                blink_on = not blink_on
+                time.sleep(0.25)  # ~2 Hz alarm blink (distinct from the 10 Hz copy)
             elif phase is State.SUCCESS:
                 pixels = self._single(_SUCCESS_COLOR) if blink_on else self._all_off()
                 self._render(pixels)

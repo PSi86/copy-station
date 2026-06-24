@@ -265,6 +265,11 @@ class DeviceWatcher:
         # was already handled. It is cleared when a transfer starts and re-armed
         # once fewer than two eligible volumes remain (i.e. one was removed).
         self._armed = True
+        # ``_errored`` latches the error indication after a failed/aborted copy so
+        # the red stays up until the user clears it by unplugging the device(s) --
+        # otherwise the very USB-remove event that caused the abort would at once
+        # re-evaluate back to DETECTING and the error would never be seen.
+        self._errored = False
         # For the action log: which eligible volumes were present last time, and
         # their names (kept so a removal can still be named after it is gone).
         self._prev_nodes: set[str] = set()
@@ -287,6 +292,7 @@ class DeviceWatcher:
         monitor.filter_by(subsystem="block")
 
         self._armed = True
+        self._errored = False
         self._publish_ready()
         _LOG.info("Ready -- waiting for devices ...")
         # Devices may already be plugged in when the daemon starts.
@@ -369,6 +375,15 @@ class DeviceWatcher:
             eligible = [p for p in probes if p.capacity >= min_bytes]
             added, removed = self._log_device_changes(eligible)
 
+            # While latched in error, keep showing the red alarm until the user
+            # clears it by unplugging everything. Any device still present holds
+            # the error; an empty bus resets it (handled by the READY block below).
+            if self._errored:
+                if eligible:
+                    self._hub.set_devices(device_views(probes, min_bytes))
+                    return
+                self._errored = False
+
             # A source is connected but its DCIM is empty -> a steady blue "nothing
             # to copy" hold. Fire only on a change, so it does not repeat endlessly.
             if added and has_empty_source(eligible):
@@ -385,7 +400,8 @@ class DeviceWatcher:
 
             # Feed the detected device's fill level to the LED gauge shown while
             # detecting (the web UI keeps its own per-device storage figures).
-            self._hub.set_fill(fill_fraction_for_display(eligible) or 0.0)
+            fill = fill_fraction_for_display(eligible) or 0.0
+            self._hub.set_fill(fill)
 
             if len(eligible) < 2:
                 # Not enough to decide yet -- keep waiting and re-arm.
@@ -433,7 +449,10 @@ class DeviceWatcher:
             )
 
             # Let the source's fill gauge have its moment before the copy bar takes
-            # over: hold in DETECTING for the gauge duration, then start the copy.
+            # over: keep it up (sticky) and hold in DETECTING for the gauge
+            # duration, then start the copy. Sticky => the gauge stays visible
+            # until COPYING replaces it, so there is no gap before the copy.
+            self._hub.set_fill(fill, sticky=True)
             self._hub.set_phase(State.DETECTING)
             if not self._hold_before_copy(source, target):
                 self._armed = True
@@ -460,11 +479,13 @@ class DeviceWatcher:
             self._hub.log_event("Ready to remove devices")
         except TransferError as exc:
             self._armed = False
+            self._errored = True
             _LOG.error("Transfer failed: %s", exc)
             self._hub.log_event(f"Copy failed: {exc}", level="error")
             self._hub.set_error(str(exc))
         except Exception as exc:  # pragma: no cover - defensive
             self._armed = False
+            self._errored = True
             _LOG.exception("Unexpected error: %s", exc)
             self._hub.log_event(f"Unexpected error: {exc}", level="error")
             self._hub.set_error(str(exc))

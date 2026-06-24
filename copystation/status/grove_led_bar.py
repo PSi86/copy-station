@@ -10,9 +10,10 @@ Behaviour:
   blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to signal activity.
 * Detecting (``DETECTING``): a STEADY fill gauge of the detected device
   (``set_fill``) -- segments ``1..segments_for(fill)``, at least one -- shown as a
-  brief ~3 s readout, after which the bar rests until the next event.
-* Other idle phases: a single steady segment by phase -- Ready = green
-  (segment 3), Error = red (segment 1). Success = short green blink on segment 3.
+  brief ~3 s readout, after which the bar rests; if ``sticky`` (a copy is
+  imminent) it stays up until the copy bar takes over.
+* Error (``ERROR``): all segments blink until the situation is cleared.
+* Ready: a single steady segment (3). Success = short green blink on segment 3.
 
 One-shot :class:`Event` signals overlay a brief animation (see ``status.effects``)
 and then resume the steady state. The bar is single-colour, so both use the whole
@@ -48,11 +49,10 @@ _OFF = 0x0000
 # MY9221 command word: 0x0000 selects the default mode.
 _CMD = 0x0000
 
-# Idle phase -> which single segment (1-based) is lit steady. DETECTING is not
-# here -- it shows a fill gauge (segments 1..n), not a single segment.
+# Idle phase -> which single segment (1-based) is lit steady. DETECTING (fill
+# gauge) and ERROR (all segments blink) render on their own, so only READY here.
 _IDLE_SEGMENT = {
     State.READY: 3,  # green
-    State.ERROR: 1,  # red
 }
 
 
@@ -88,6 +88,7 @@ class GroveLedBarBackend(StatusIndicator):
         self._phase = State.READY
         self._progress = 0.0
         self._fill = 0.0
+        self._fill_sticky = False                 # keep the gauge up until COPYING
         self._fill_shown_at: float | None = None  # when the gauge first appeared
         self._last_levels: list[int] | None = None
         self._clock_state = 0
@@ -107,9 +108,10 @@ class GroveLedBarBackend(StatusIndicator):
         with self._lock:
             self._progress = fraction
 
-    def set_fill(self, fraction: float) -> None:
+    def set_fill(self, fraction: float, sticky: bool = False) -> None:
         with self._lock:
             self._fill = fraction
+            self._fill_sticky = sticky
             self._fill_shown_at = None  # restart the brief gauge window
 
     def signal(self, event: Event) -> None:
@@ -139,6 +141,7 @@ class GroveLedBarBackend(StatusIndicator):
                 phase = self._phase
                 progress = self._progress
                 fill = self._fill
+                sticky = self._fill_sticky
                 fill_elapsed = 0.0
                 if phase is State.DETECTING:
                     if self._fill_shown_at is None:
@@ -152,13 +155,19 @@ class GroveLedBarBackend(StatusIndicator):
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # Steady fill gauge (at least one segment), shown only briefly.
-                if fill_gauge_visible(fill_elapsed):
+                # Fill gauge (at least one segment): a brief readout, unless sticky
+                # (a copy is imminent) -- then it stays up until COPYING takes over.
+                if sticky or fill_gauge_visible(fill_elapsed):
                     self._render(self._first_n(max(1, segments_for(fill))))
                 else:
                     self._render([_OFF] * SEGMENT_COUNT)
                 blink_on = True
                 time.sleep(0.05)
+            elif phase is State.ERROR:
+                # All segments blink until the situation is cleared (devices removed).
+                self._render([_ON] * SEGMENT_COUNT if blink_on else [_OFF] * SEGMENT_COUNT)
+                blink_on = not blink_on
+                time.sleep(0.25)  # ~2 Hz alarm blink (distinct from the 10 Hz copy)
             elif phase is State.SUCCESS:
                 levels = self._single(3) if blink_on else [_OFF] * SEGMENT_COUNT
                 self._render(levels)

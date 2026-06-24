@@ -1,10 +1,14 @@
-from copystation.status import Event
+import threading
+
+from copystation.status import Event, State
 from copystation.status.ws2812_backend import (
     MAX_LEDS,
     Ws2812Backend,
     _DETECT_COLOR,
     _EMPTY_COLOR,
+    _ERROR_COLOR,
     _FILL_COLOR,
+    _IDLE_COLOR,
     _OFF,
     encode_pixels,
     leds_for,
@@ -102,3 +106,18 @@ def test_fill_gauge_is_white_and_at_least_one_led():
     # White is equal-channel and clearly not the green detection colour.
     assert _FILL_COLOR[0] == _FILL_COLOR[1] == _FILL_COLOR[2]
     assert _FILL_COLOR != _DETECT_COLOR
+
+
+def test_error_is_bright_red_with_its_own_rendering():
+    # ERROR is all-LEDs-blink-red, so it must NOT also be a single idle colour.
+    assert State.ERROR not in _IDLE_COLOR
+    assert _ERROR_COLOR[0] > 0 and _ERROR_COLOR[1] == 0 and _ERROR_COLOR[2] == 0
+
+
+def test_set_fill_tracks_sticky_flag():
+    b = Ws2812Backend.__new__(Ws2812Backend)
+    b._lock = threading.Lock()
+    b.set_fill(0.5, sticky=True)
+    assert (b._fill, b._fill_sticky, b._fill_shown_at) == (0.5, True, None)
+    b.set_fill(0.3)  # default: a brief (non-sticky) readout again
+    assert b._fill_sticky is False
