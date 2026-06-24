@@ -62,6 +62,7 @@ class Probe:
     capacity: int
     free: int
     name: str
+    has_media: bool = True  # DCIM folder contains at least one file
 
 
 def select_roles(
@@ -73,8 +74,9 @@ def select_roles(
 
     Policy:
     * Partitions below ``min_bytes`` are ignored entirely.
-    * Source = the smallest partition that has a DCIM folder (and matches the
-      optional USB VID/PID allowlist).
+    * Source = the smallest partition that has a NON-EMPTY DCIM folder (and
+      matches the optional USB VID/PID allowlist). A device whose DCIM folder is
+      empty is never a source -- there is nothing to copy.
     * Target = the largest of the remaining partitions.
     * Unless disabled, the source must be strictly smaller than the target, so
       the larger device is never used as source even if it also carries DCIM.
@@ -83,9 +85,11 @@ def select_roles(
     """
     eligible = [p for p in probes if p.capacity >= min_bytes]
 
-    source_candidates = [p for p in eligible if p.has_dcim and p.matched_source]
+    source_candidates = [
+        p for p in eligible if p.has_dcim and p.matched_source and p.has_media
+    ]
     if not source_candidates:
-        raise NoSourceError("No source (DCIM) found among eligible partitions")
+        raise NoSourceError("No source (non-empty DCIM) found among eligible partitions")
     source = min(source_candidates, key=lambda p: p.capacity)
 
     target_candidates = [p for p in eligible if p is not source]
@@ -115,9 +119,10 @@ def device_views(
     shown as ``"candidate"`` rather than guessed, because the smaller/larger
     split is only known once two volumes are present.
 
-    ``role``: ``"source"`` | ``"target"`` | ``"candidate"`` (eligible, undecided)
-    | ``"unused"`` (eligible but not chosen, e.g. a third volume) | ``"ignored"``
-    (below ``min_bytes``).
+    ``role``: ``"source"`` | ``"target"`` | ``"empty"`` (source-shaped but its
+    DCIM folder is empty -> nothing to copy) | ``"candidate"`` (eligible,
+    undecided) | ``"unused"`` (eligible but not chosen, e.g. a third volume) |
+    ``"ignored"`` (below ``min_bytes``).
     """
     src_node = source.device_node if source else None
     tgt_node = target.device_node if target else None
@@ -130,6 +135,8 @@ def device_views(
             role = "source"
         elif p.device_node == tgt_node:
             role = "target"
+        elif p.has_dcim and p.matched_source and not p.has_media:
+            role = "empty"  # a camera/source with an empty DCIM -- nothing to copy
         elif src_node or tgt_node:
             role = "unused"  # eligible, but a different volume was chosen
         else:
@@ -146,6 +153,20 @@ def device_views(
             }
         )
     return views
+
+
+def _dcim_has_media(media_dir: Path) -> bool:
+    """True if the DCIM folder contains at least one regular file (any depth).
+
+    Early-exits on the first file, so it is cheap even for a full card.
+    """
+    try:
+        for entry in media_dir.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                return True
+    except OSError:  # pragma: no cover - defensive (e.g. media vanished)
+        return False
+    return False
 
 
 def _root_source_device() -> Optional[str]:
@@ -325,6 +346,20 @@ class DeviceWatcher:
                 _LOG.info("Detecting -- %d eligible volume(s), need 2 ...", len(eligible))
                 return
 
+            # A source is connected but its DCIM is empty -- nothing to copy. Don't
+            # start a transfer and don't error; show it as "empty" and wait.
+            source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+            if source_shaped and not any(p.has_media for p in source_shaped):
+                self._armed = True
+                self._hub.set_devices(device_views(probes, min_bytes))
+                self._hub.set_phase(State.DETECTING)
+                if added:
+                    self._hub.log_event(
+                        "Source connected but its DCIM folder is empty -- nothing to copy"
+                    )
+                _LOG.info("Source DCIM is empty -- nothing to copy.")
+                return
+
             # Two or more eligible volumes -- decide roles for real.
             try:
                 source, target = select_roles(probes, min_bytes, require_smaller)
@@ -425,16 +460,18 @@ class DeviceWatcher:
             self._umount(mountpoint)
             return None
 
-        media = self._config.media_dirname
+        media_dir = mountpoint / self._config.media_dirname
+        has_dcim = media_dir.is_dir()
         return Probe(
             sys_name=dev.sys_name,
             device_node=dev.device_node,
             mountpoint=mountpoint,
-            has_dcim=(mountpoint / media).is_dir(),
+            has_dcim=has_dcim,
             matched_source=self._matches_source(dev),
             capacity=capacity,
             free=free,
             name=self._volume_name(dev),
+            has_media=has_dcim and _dcim_has_media(media_dir),
         )
 
     @staticmethod

@@ -51,6 +51,7 @@ function renderDevices(el, devices) {
   const roleLabel = {
     source: "source",
     target: "target",
+    empty: "empty",
     candidate: "candidate",
     unused: "unused",
     ignored: "too small",
