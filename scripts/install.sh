@@ -26,7 +26,7 @@ CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
 
 echo ">> Installing system dependencies ..."
 apt-get update
-apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-yaml gpiod
+apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-spidev python3-yaml gpiod
 
 # exFAT support so camera/SD cards mount (package name differs by release:
 # Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).
@@ -76,8 +76,11 @@ if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
       [nN]*) WEB_ENABLED="false" ;;
       *)     WEB_ENABLED="true" ;;
     esac
-    # The config has exactly one 'enabled:' key (web.enabled); set it in place.
-    sed -i -E "s/^([[:space:]]*enabled:[[:space:]]*).*/\1${WEB_ENABLED}/" "${CONFIG_DIR}/config.yaml"
+    # Flip ONLY web.enabled. The config also has power.shutdown_button.enabled,
+    # so the substitution must stay inside the web: section (from `web:` to the
+    # next top-level key/comment) -- a file-wide sed would toggle the shutdown
+    # button on too, which then warns about a missing 'line'.
+    sed -i -E "/^web:/,/^[^[:space:]]/ s/^([[:space:]]*enabled:[[:space:]]*).*/\1${WEB_ENABLED}/" "${CONFIG_DIR}/config.yaml"
     echo "   -> web interface set to enabled=${WEB_ENABLED}."
   fi
   echo "   -> review/confirm the GPIO pins in ${CONFIG_DIR}/config.yaml (see README)."
