@@ -94,14 +94,18 @@ def test_vid_pid_mismatch_excludes_source():
 
 
 class _FakeDevice:
-    """Minimal stand-in for a pyudev device (only .get / .sys_name)."""
+    """Minimal stand-in for a pyudev device (.get / .sys_name / .find_parent)."""
 
-    def __init__(self, sys_name, **props):
+    def __init__(self, sys_name, parent=None, **props):
         self.sys_name = sys_name
         self._props = props
+        self._parent = parent
 
     def get(self, key, default=None):
         return self._props.get(key, default)
+
+    def find_parent(self, subsystem, device_type=None):
+        return self._parent
 
 
 def _watcher(root_dev="mmcblk1"):
@@ -228,3 +232,25 @@ def test_configured_label_matches_vid_pid():
     assert w._volume_name(pro) == "O4 Pro"
     # No mapping match -> fall back to the filesystem label.
     assert w._volume_name(other) == "MYCARD"
+
+
+def test_usb_ids_fall_back_to_usb_parent():
+    # The whole-disk node carries no VID/PID; the USB ancestor does.
+    parent = _FakeDevice("usb1", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020")
+    disk = _FakeDevice("sdc", ID_FS_LABEL="InternalSto", parent=parent)
+    assert _watcher()._usb_ids(disk) == ("2ca3", "0020")
+
+
+def test_default_config_labels_o4_lite():
+    # A fresh install (default config) must name the O4 Lite, not "InternalSto".
+    from copystation.config import Config
+
+    w = _watcher()
+    w._config = Config()  # defaults only
+    o4 = _FakeDevice("sdc", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020", ID_FS_LABEL="InternalSto")
+    assert w._volume_name(o4) == "O4 Lite"
+
+    # ... and via the USB parent when the disk node lacks the IDs.
+    parent = _FakeDevice("usb1", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020")
+    o4_disk = _FakeDevice("sdc", ID_FS_LABEL="InternalSto", parent=parent)
+    assert w._volume_name(o4_disk) == "O4 Lite"

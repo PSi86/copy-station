@@ -436,6 +436,29 @@ class DeviceWatcher:
             name=self._volume_name(dev),
         )
 
+    @staticmethod
+    def _usb_ids(device) -> tuple[str, str]:
+        """(vid, pid) of a device, lowercased.
+
+        A whole-disk node (e.g. the O4's ``sdc``) sometimes lacks
+        ``ID_VENDOR_ID``/``ID_MODEL_ID``; in that case fall back to its USB
+        ancestor, which always carries them. Returns ``("", "")`` if unknown.
+        """
+        vid = (device.get("ID_VENDOR_ID") or "").lower()
+        pid = (device.get("ID_MODEL_ID") or "").lower()
+        if vid and pid:
+            return vid, pid
+        find_parent = getattr(device, "find_parent", None)
+        if callable(find_parent):
+            try:
+                parent = find_parent("usb", "usb_device")
+            except Exception:  # pragma: no cover - defensive
+                parent = None
+            if parent is not None:
+                vid = vid or (parent.get("ID_VENDOR_ID") or "").lower()
+                pid = pid or (parent.get("ID_MODEL_ID") or "").lower()
+        return vid, pid
+
     def _matches_source(self, device) -> bool:
         """Optional hardening via USB VID/PID allowlist (otherwise always True)."""
         ident = self._config.get("identify", {})
@@ -443,8 +466,7 @@ class DeviceWatcher:
         pids = [p.lower() for p in ident.get("source_usb_product_ids", [])]
         if not vids and not pids:
             return True
-        vid = (device.get("ID_VENDOR_ID") or "").lower()
-        pid = (device.get("ID_MODEL_ID") or "").lower()
+        vid, pid = self._usb_ids(device)
         if vids and vid not in vids:
             return False
         if pids and pid not in pids:
@@ -474,8 +496,9 @@ class DeviceWatcher:
     def _configured_label(self, device) -> Optional[str]:
         """Look up a friendly name from ``identify.device_labels`` by VID/PID."""
         mapping = self._config.get("identify", {}).get("device_labels", [])
-        vid = (device.get("ID_VENDOR_ID") or "").lower()
-        pid = (device.get("ID_MODEL_ID") or "").lower()
+        if not mapping:
+            return None
+        vid, pid = self._usb_ids(device)
         for entry in mapping:
             evid = str(entry.get("vid", "")).lower()
             epid = str(entry.get("pid", "")).lower()

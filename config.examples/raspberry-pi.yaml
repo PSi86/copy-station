@@ -17,6 +17,9 @@ identify:
   source_usb_product_ids: []
   min_partition_gb: 6
   require_source_smaller_than_target: true
+  # Friendly web-UI names by USB VID/PID. 2ca3:0020 = DJI O4 Lite (confirmed).
+  device_labels:
+    - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
 
 cleanup:
   keep_dcim_folder: true
