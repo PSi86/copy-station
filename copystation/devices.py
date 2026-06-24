@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -119,10 +119,15 @@ def device_views(
     shown as ``"candidate"`` rather than guessed, because the smaller/larger
     split is only known once two volumes are present.
 
-    ``role``: ``"source"`` | ``"target"`` | ``"empty"`` (source-shaped but its
-    DCIM folder is empty -> nothing to copy) | ``"candidate"`` (eligible,
+    ``role``: ``"target"`` | ``"empty"`` (source-shaped but its DCIM folder is
+    empty -> nothing to copy) | ``"source"`` | ``"candidate"`` (eligible,
     undecided) | ``"unused"`` (eligible but not chosen, e.g. a third volume) |
     ``"ignored"`` (below ``min_bytes``).
+
+    Role precedence matters: ``target`` is checked BEFORE ``empty`` (a device used
+    as the target must never be flagged ``empty``, even if its own DCIM is empty),
+    and ``empty`` is checked BEFORE ``source`` (so once a source's DCIM has been
+    cleared after a successful copy it flips from ``source`` to ``empty``).
     """
     src_node = source.device_node if source else None
     tgt_node = target.device_node if target else None
@@ -131,12 +136,12 @@ def device_views(
         eligible = p.capacity >= min_bytes
         if not eligible:
             role = "ignored"
+        elif p.device_node == tgt_node:
+            role = "target"  # the chosen target -- emptiness is irrelevant here
+        elif p.has_dcim and p.matched_source and not p.has_media:
+            role = "empty"  # a source with an empty DCIM -- nothing to copy
         elif p.device_node == src_node:
             role = "source"
-        elif p.device_node == tgt_node:
-            role = "target"
-        elif p.has_dcim and p.matched_source and not p.has_media:
-            role = "empty"  # a camera/source with an empty DCIM -- nothing to copy
         elif src_node or tgt_node:
             role = "unused"  # eligible, but a different volume was chosen
         else:
@@ -381,6 +386,13 @@ class DeviceWatcher:
             self._hub.log_event(
                 f"Roles assigned: source = {source.name}, target = {target.name}"
             )
+
+            def _refresh_devices() -> None:
+                # Re-measure the mounts and republish, so the web view tracks the
+                # filling target during the copy and the emptied source afterwards.
+                refreshed = [self._restat(p) for p in probes]
+                self._hub.set_devices(device_views(refreshed, min_bytes, source, target))
+
             self._transfer(
                 source_root=source.mountpoint,
                 target_root=target.mountpoint,
@@ -389,6 +401,7 @@ class DeviceWatcher:
                 target_device=target.device_node,
                 hub=self._hub,
                 config=self._config,
+                on_devices_refresh=_refresh_devices,
             )
             self._hub.log_event("Ready to remove devices")
         except TransferError as exc:
@@ -471,6 +484,27 @@ class DeviceWatcher:
             capacity=capacity,
             free=free,
             name=self._volume_name(dev),
+            has_media=has_dcim and _dcim_has_media(media_dir),
+        )
+
+    def _restat(self, probe: Probe) -> Probe:
+        """Re-measure a mounted probe (free space + DCIM contents) in place.
+
+        Used to refresh the web view live during/after a copy: the target fills
+        up, and once the source DCIM has been cleared it becomes empty. Returns
+        the probe unchanged if the mount is gone.
+        """
+        try:
+            stat = os.statvfs(probe.mountpoint)
+        except OSError:
+            return probe
+        media_dir = probe.mountpoint / self._config.media_dirname
+        has_dcim = media_dir.is_dir()
+        return replace(
+            probe,
+            capacity=stat.f_frsize * stat.f_blocks,
+            free=stat.f_frsize * stat.f_bavail,
+            has_dcim=has_dcim,
             has_media=has_dcim and _dcim_has_media(media_dir),
         )
 

@@ -82,6 +82,7 @@ def perform_transfer(
     config: Config,
     source_device: str | None = None,
     target_device: str | None = None,
+    on_devices_refresh=None,
 ) -> Path:
     """Perform a complete transfer.
 
@@ -91,7 +92,9 @@ def perform_transfer(
 
     ``source_device`` / ``target_device`` (e.g. ``/dev/sdc``) let the copy abort
     promptly if either is unplugged mid-transfer, rather than waiting for the I/O
-    timeout.
+    timeout. ``on_devices_refresh`` (optional) is called to re-measure the devices
+    for the web view: throttled during the copy (target filling up) and once after
+    the source has been cleared (source now empty).
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
@@ -114,8 +117,23 @@ def perform_transfer(
     hub.begin_transfer(dest.name, required)
     # Abort the copy quickly if the source or target device disappears (unplugged).
     abort_check = _device_abort_check(source_device, target_device)
-    copy_tree(media_dir, dest, on_progress=hub.update_progress, abort_check=abort_check)
+
+    # Progress handler that also refreshes the device view, throttled to ~1 s so
+    # the panel tracks the filling target without re-stat'ing on every line.
+    last_refresh = [0.0]
+
+    def _on_progress(done: int) -> None:
+        hub.update_progress(done)
+        if on_devices_refresh is not None:
+            now = time.monotonic()
+            if now - last_refresh[0] >= 1.0:
+                last_refresh[0] = now
+                on_devices_refresh()
+
+    copy_tree(media_dir, dest, on_progress=_on_progress, abort_check=abort_check)
     hub.finish_transfer()
+    if on_devices_refresh is not None:
+        on_devices_refresh()  # final figures: target now holds the full copy
 
     _LOG.info("Verifying transfer ...")
     hub.log_event("Verifying transferred data ...")
@@ -125,6 +143,8 @@ def perform_transfer(
     _LOG.info("Verification ok -- clearing source (keep_folder=%s)", keep)
     hub.log_event("Clearing source data ...")
     cleanup_source(media_dir, keep_folder=keep)
+    if on_devices_refresh is not None:
+        on_devices_refresh()  # source DCIM now empty -> "empty" flag + freed space
 
     hub.log_event(f"Copy complete: {dest.name}")
     hub.set_phase(State.SUCCESS)

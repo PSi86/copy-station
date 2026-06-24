@@ -180,6 +180,21 @@ def _hub():
     return StatusHub(StationState(), StatusIndicator())
 
 
+def test_perform_transfer_refreshes_devices(tmp_path):
+    src = tmp_path / "camera"
+    _make_dcim(src, {"100MEDIA/clip.mp4": b"video-data"})
+    target = tmp_path / "sd"
+    target.mkdir()
+
+    calls = []
+    perform_transfer(
+        src, target, "Cam", _hub(), _config(),
+        on_devices_refresh=lambda: calls.append(1),
+    )
+    # Refreshed at least after the copy and after clearing the source.
+    assert len(calls) >= 1
+
+
 def test_perform_transfer_full_cycle(tmp_path):
     src = tmp_path / "camera"
     _make_dcim(src, {"100MEDIA/clip.mp4": b"video-data", "100MEDIA/pic.jpg": b"img"})
