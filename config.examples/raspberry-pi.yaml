@@ -43,7 +43,7 @@ status:
 
   # Alternative: addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI.
   # Enable SPI (`dtparam=spi=on`) and wire DIN to MOSI (BCM GPIO10 / pin 19).
-  # First LED = status colour; during a copy LEDs 1..N form a progress bar.
+  # Detecting = white fill gauge of the device; copy = blue 1..N progress bar.
   ws2812:
     device: /dev/spidev0.0
     led_count: 10        # number of LEDs in the strip (1-10)

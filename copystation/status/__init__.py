@@ -51,6 +51,11 @@ class StatusIndicator:
         """Report copy progress (0.0..1.0). Only progress-aware backends use it."""
         pass
 
+    def set_fill(self, fraction: float) -> None:  # pragma: no cover - no-op
+        """Report the detected device's fill level (0.0..1.0), shown as a gauge
+        while detecting. Only bar-style backends use it."""
+        pass
+
     def signal(self, event: Event) -> None:  # pragma: no cover - no-op
         """Fire a one-shot transient effect. Backends that support animation
         override this; the rest safely ignore it."""
@@ -81,6 +86,13 @@ class CompositeIndicator(StatusIndicator):
         for backend in self._backends:
             try:
                 backend.set_progress(fraction)
+            except Exception:  # pragma: no cover - indication must never crash
+                pass
+
+    def set_fill(self, fraction: float) -> None:
+        for backend in self._backends:
+            try:
+                backend.set_fill(fraction)
             except Exception:  # pragma: no cover - indication must never crash
                 pass
 

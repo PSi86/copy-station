@@ -8,16 +8,17 @@ scheduler jitter delays but never corrupts a frame.
 Behaviour:
 * During a copy (``COPYING``): light segments ``1..segments_for(progress)`` and
   blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to signal activity.
-* Idle: a single steady segment by phase -- Ready = green (segment 3),
-  Detecting = yellow (segment 2), Error = red (segment 1). Success = short green
-  blink on segment 3.
+* Detecting (``DETECTING``): a STEADY fill gauge of the detected device
+  (``set_fill``) -- segments ``1..segments_for(fill)``, at least one -- so the
+  bar shows how full the volume is while you wait.
+* Other idle phases: a single steady segment by phase -- Ready = green
+  (segment 3), Error = red (segment 1). Success = short green blink on segment 3.
 
 One-shot :class:`Event` signals overlay a brief animation (see ``status.effects``)
 and then resume the steady state. The bar is single-colour, so both use the whole
-bar: ``DEVICE_DETECTED`` flashes all segments four times ("a volume was
-recognised"); ``SOURCE_EMPTY`` holds all segments steady for a few seconds
-("nothing to copy"). Both stay distinct from the copy pattern, which is a
-*partial* blinking progress bar.
+bar: ``DEVICE_DETECTED`` flashes all segments twice ("a volume was recognised");
+``SOURCE_EMPTY`` holds all segments steady for a few seconds ("nothing to copy").
+Both stay distinct from the partial bars above.
 
 The exact latch timing and the segment-to-channel orientation must be validated
 on the hardware (see the plan's open points).
@@ -42,11 +43,11 @@ _OFF = 0x0000
 # MY9221 command word: 0x0000 selects the default mode.
 _CMD = 0x0000
 
-# Idle phase -> which single segment (1-based) is lit steady.
+# Idle phase -> which single segment (1-based) is lit steady. DETECTING is not
+# here -- it shows a fill gauge (segments 1..n), not a single segment.
 _IDLE_SEGMENT = {
-    State.READY: 3,      # green
-    State.DETECTING: 2,  # yellow
-    State.ERROR: 1,      # red
+    State.READY: 3,  # green
+    State.ERROR: 1,  # red
 }
 
 
@@ -81,6 +82,7 @@ class GroveLedBarBackend(StatusIndicator):
         self._lock = threading.Lock()
         self._phase = State.READY
         self._progress = 0.0
+        self._fill = 0.0
         self._last_levels: list[int] | None = None
         self._clock_state = 0
         self._transients = TransientQueue()
@@ -98,6 +100,10 @@ class GroveLedBarBackend(StatusIndicator):
     def set_progress(self, fraction: float) -> None:
         with self._lock:
             self._progress = fraction
+
+    def set_fill(self, fraction: float) -> None:
+        with self._lock:
+            self._fill = fraction
 
     def signal(self, event: Event) -> None:
         self._transients.push(event)
@@ -124,6 +130,7 @@ class GroveLedBarBackend(StatusIndicator):
             with self._lock:
                 phase = self._phase
                 progress = self._progress
+                fill = self._fill
 
             if phase is State.COPYING:
                 count = segments_for(progress)
@@ -131,6 +138,11 @@ class GroveLedBarBackend(StatusIndicator):
                 self._render(levels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
+            elif phase is State.DETECTING:
+                # Steady fill gauge of the detected device (at least one segment).
+                self._render(self._first_n(max(1, segments_for(fill))))
+                blink_on = True
+                time.sleep(0.05)
             elif phase is State.SUCCESS:
                 levels = self._single(3) if blink_on else [_OFF] * SEGMENT_COUNT
                 self._render(levels)

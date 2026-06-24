@@ -33,10 +33,10 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   from a still-connected reader. Either way the source is never deleted unless
   verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
-  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable). On the light
-  backends each newly detected volume gives a quick four-flash green blink, and a
-  connected source with nothing to copy a short blue hold, so detection is
-  unmistakable at a glance.
+  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable). On the bar
+  backends each newly detected volume blinks green **twice** and then shows a
+  **white gauge of how full that volume is**; a connected source with nothing to
+  copy holds **blue** briefly -- so detection is unmistakable at a glance.
 
 ## Web interface (optional)
 
@@ -55,19 +55,23 @@ docs). Open `http://<device-ip>:8080/`.
 ## Grove LED Bar v2.0 (optional)
 
 Add `grove_led_bar` to `status.backends` to drive a Seeed Grove LED Bar v2.0
-(MY9221) over two GPIO lines. During a copy the bar shows the proportional fill
-and blinks at 10 Hz; when idle a single LED is steady (Ready = green / segment 3,
-Detecting = yellow / segment 2, Error = red / segment 1). Set the `clock_line` /
-`data_line` offsets (from `gpioinfo`) in the config.
+(MY9221) over two GPIO lines. During a copy the bar shows the proportional copy
+progress and blinks at 10 Hz. While detecting it shows a **steady fill gauge** of
+the detected volume (after flashing the whole bar twice); otherwise a single LED
+is steady (Ready = green / segment 3, Error = red / segment 1). Set the
+`clock_line` / `data_line` offsets (from `gpioinfo`) in the config.
 
 ## WS2812B / NeoPixel strip (optional)
 
 Add `ws2812` to `status.backends` to drive an addressable WS2812B / NeoPixel
 strip of **1-10 LEDs** over SPI (MOSI, each data bit encoded as three SPI bits).
-The first LED always shows the status colour (Ready = green, Detecting = yellow,
-Error = red, Success = a short green blink); during a copy the LEDs `1..N` form a
-proportional progress bar that blinks at 10 Hz, the same activity pattern as the
-Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
+A newly detected volume flashes the whole strip green **twice**, then shows a
+**steady white gauge** of how full that volume is; during a copy the LEDs `1..N`
+form a **blue** progress bar that blinks at 10 Hz (the same activity pattern as
+the Grove LED Bar); otherwise the first LED is steady (Ready = green, Error = red,
+Success = a short green blink). A source with nothing to copy holds the whole
+strip **blue** for a few seconds. Set `led_count` (1-10) and the `device` (e.g.
+`/dev/spidev0.0`) in
 the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
 MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable the **`spidev on SPI1`**
 overlay (in `rsetup` -> Overlays; the backend needs a `/dev/spidev*` node, so this

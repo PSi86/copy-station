@@ -117,6 +117,28 @@ def has_empty_source(eligible: list[Probe]) -> bool:
     return bool(source_shaped) and not any(p.has_media for p in source_shaped)
 
 
+def _used_fraction(p: Probe) -> float:
+    """Fraction of a volume that is in use (0.0..1.0), clamped."""
+    if p.capacity <= 0:
+        return 0.0
+    used = max(0, p.capacity - p.free)
+    return min(1.0, used / p.capacity)
+
+
+def fill_fraction_for_display(eligible: list[Probe]) -> Optional[float]:
+    """The fill level to show on the LED gauge while detecting.
+
+    Prefers a source-shaped volume (the camera, whose contents will be copied --
+    the most informative "how full" number); otherwise the fullest eligible
+    volume. ``None`` when there is nothing to show.
+    """
+    if not eligible:
+        return None
+    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    pool = source_shaped or eligible
+    return max(_used_fraction(p) for p in pool)
+
+
 def device_views(
     probes: list[Probe],
     min_bytes: int,
@@ -359,6 +381,10 @@ class DeviceWatcher:
                     self._hub.log_event("Ready -- waiting for devices")
                 _LOG.info("Ready -- waiting for devices ...")
                 return
+
+            # Feed the detected device's fill level to the LED gauge shown while
+            # detecting (the web UI keeps its own per-device storage figures).
+            self._hub.set_fill(fill_fraction_for_display(eligible) or 0.0)
 
             if len(eligible) < 2:
                 # Not enough to decide yet -- keep waiting and re-arm.

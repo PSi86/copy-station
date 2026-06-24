@@ -17,7 +17,7 @@ The timing here is medium-independent, so every backend animates the same way:
 Each backend maps "lit" to its own medium (an LED colour, a bar of segments, a
 single GPIO line), so the *vocabulary* stays consistent across hardware:
 
-* ``DEVICE_DETECTED`` -- four quick flashes, the moment a volume is recognised.
+* ``DEVICE_DETECTED`` -- two quick flashes, the moment a volume is recognised.
 * ``SOURCE_EMPTY``    -- a steady several-second hold, "nothing to copy".
 """
 
@@ -29,9 +29,9 @@ from typing import Optional, Tuple
 
 from . import Event
 
-# Device-detected: four quick flashes -- short and countable, so a freshly
-# recognised volume is obvious even though the steady idle colour barely moves.
-DETECT_FLASHES = 4
+# Device-detected: two quick flashes -- a short, unmistakable "recognised", after
+# which the steady state takes over with the device's fill gauge.
+DETECT_FLASHES = 2
 DETECT_ON = 0.12   # s lit per flash
 DETECT_OFF = 0.12  # s dark per flash
 

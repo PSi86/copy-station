@@ -10,6 +10,7 @@ from copystation.devices import (
     NoTargetError,
     Probe,
     device_views,
+    fill_fraction_for_display,
     has_empty_source,
     select_roles,
 )
@@ -125,6 +126,30 @@ def test_has_empty_source():
     # A DCIM device that fails the VID/PID allowlist is not "source-shaped".
     foreign = _probe("x", 23 * GB, has_dcim=True, has_media=False, matched_source=False)
     assert has_empty_source([foreign, sd]) is False
+
+
+def test_fill_fraction_prefers_source_and_reflects_usage():
+    # 23 GB source, 8 GB free -> 15/23 used.
+    cam = _probe("cam", 23 * GB, has_dcim=True, free=8 * GB)
+    sd = _probe("sd", 256 * GB, has_dcim=False, free=200 * GB)
+    frac = fill_fraction_for_display([cam, sd])
+    assert abs(frac - (23 - 8) / 23) < 1e-9   # the source's fill, not the SD's
+
+
+def test_fill_fraction_single_device_and_empty():
+    sd = _probe("sd", 256 * GB, has_dcim=False, free=64 * GB)
+    assert abs(fill_fraction_for_display([sd]) - (256 - 64) / 256) < 1e-9
+    assert fill_fraction_for_display([]) is None
+
+
+def test_fill_fraction_clamps_and_handles_zero_capacity():
+    full = _probe("cam", 10 * GB, has_dcim=True, free=0)
+    assert fill_fraction_for_display([full]) == 1.0
+    zero = Probe(
+        sys_name="x", device_node="/dev/x", mountpoint=Path("/x"),
+        has_dcim=True, matched_source=True, capacity=0, free=0, name="x", has_media=True,
+    )
+    assert fill_fraction_for_display([zero]) == 0.0
 
 
 class _RecordingHub:

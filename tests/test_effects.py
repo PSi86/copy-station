@@ -18,8 +18,9 @@ def test_detect_lit_then_dark_within_a_flash():
     assert not lit and not done
 
 
-def test_detect_has_exactly_four_lit_phases():
-    # The middle of each flash's on-window is lit; there is no fifth flash.
+def test_detect_blinks_exactly_twice():
+    assert DETECT_FLASHES == 2  # "only blink green twice", then the fill gauge
+    # The middle of each flash's on-window is lit; there is no extra flash.
     for k in range(DETECT_FLASHES):
         lit, done = effect_phase(Event.DEVICE_DETECTED, k * PERIOD + DETECT_ON / 2)
         assert lit and not done, k

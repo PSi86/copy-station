@@ -70,8 +70,8 @@ DEFAULTS: dict[str, Any] = {
             "line": None,
         },
         # Addressable WS2812B / NeoPixel strip (1-10 LEDs), driven over SPI.
-        # First LED shows the status colour; during a copy LEDs 1..N form a
-        # blinking progress bar.
+        # Detecting shows a white fill gauge of the device; during a copy LEDs
+        # 1..N form a blinking blue progress bar.
         "ws2812": {
             "device": "/dev/spidev0.0",
             "led_count": 1,

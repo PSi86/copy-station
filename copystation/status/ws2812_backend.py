@@ -12,17 +12,19 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
 * During a copy (``COPYING``): light LEDs ``1..leds_for(progress)`` in the copy
   colour and blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to
   signal activity.
-* Idle: only the first LED is lit steady in the status colour -- Ready = green,
-  Detecting = yellow, Error = red. Success = a short green blink on the first
-  LED. The remaining LEDs stay dark until a transfer needs them for the
-  progress bar.
+* Detecting (``DETECTING``): all LEDs form a STEADY white gauge of the detected
+  device's fill level (``set_fill``) -- same bar idea as the copy progress, but
+  white and not blinking. At least one LED is always lit so "detected" reads even
+  for a near-empty volume.
+* Other idle phases: only the first LED is lit steady in the status colour --
+  Ready = green, Error = red. Success = a short green blink on the first LED.
 
 On top of those steady states, one-shot :class:`Event` signals overlay a brief
 animation (see ``status.effects``) and then hand the strip back to the current
 state:
 
-* ``DEVICE_DETECTED``: all LEDs flash bright green four times -- an unmistakable
-  "a volume was recognised" that the near-identical idle colours can't convey.
+* ``DEVICE_DETECTED``: all LEDs flash bright green twice -- an unmistakable "a
+  volume was recognised", after which the white fill gauge above takes over.
 * ``SOURCE_EMPTY``: all LEDs hold solid blue for a few seconds -- "a source is
   connected but there is nothing to copy". (Distinct from the copy colour, which
   is a *partial, blinking* progress bar rather than a solid hold.)
@@ -46,15 +48,19 @@ MAX_LEDS = 10
 _OFF = (0, 0, 0)
 
 # Idle status colour shown on the first LED, per phase. Kept at an even ~60
-# brightness so the three idle colours read as one consistent family.
+# brightness so the idle colours read as one consistent family. DETECTING is not
+# here -- it shows a white fill gauge (see ``_FILL_COLOR``), not a single colour.
 _IDLE_COLOR: dict[State, tuple[int, int, int]] = {
-    State.READY: (0, 60, 0),       # green
-    State.DETECTING: (60, 40, 0),  # amber/yellow
-    State.ERROR: (60, 0, 0),       # red
+    State.READY: (0, 60, 0),   # green
+    State.ERROR: (60, 0, 0),   # red
 }
 
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
+
+# Colour of the fill gauge shown while detecting -- white, unmistakably different
+# from the green "ready" colour and the blue copy bar.
+_FILL_COLOR = (50, 50, 50)  # white
 
 # Confirmations are a touch brighter (~90) so they read as a deliberate event,
 # not a resting colour.
@@ -114,6 +120,7 @@ class Ws2812Backend(StatusIndicator):
         self._lock = threading.Lock()
         self._phase = State.READY
         self._progress = 0.0
+        self._fill = 0.0
         self._last_pixels: list[tuple[int, int, int]] | None = None
         self._transients = TransientQueue()
 
@@ -137,6 +144,10 @@ class Ws2812Backend(StatusIndicator):
     def set_progress(self, fraction: float) -> None:
         with self._lock:
             self._progress = fraction
+
+    def set_fill(self, fraction: float) -> None:
+        with self._lock:
+            self._fill = fraction
 
     def signal(self, event: Event) -> None:
         # Momentary effects are queued; the render loop plays them in order and
@@ -169,6 +180,7 @@ class Ws2812Backend(StatusIndicator):
             with self._lock:
                 phase = self._phase
                 progress = self._progress
+                fill = self._fill
 
             if phase is State.COPYING:
                 count = leds_for(progress, self._led_count)
@@ -176,6 +188,11 @@ class Ws2812Backend(StatusIndicator):
                 self._render(pixels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
+            elif phase is State.DETECTING:
+                # Steady white fill gauge of the detected device.
+                self._render(self._fill_pixels(fill))
+                blink_on = True
+                time.sleep(0.05)
             elif phase is State.SUCCESS:
                 pixels = self._single(_SUCCESS_COLOR) if blink_on else self._all_off()
                 self._render(pixels)
@@ -207,6 +224,12 @@ class Ws2812Backend(StatusIndicator):
             self._render(self._effect_pixels(event, lit))
             time.sleep(EFFECT_TICK_SECONDS)
             return True
+
+    def _fill_pixels(self, fill: float) -> list[tuple[int, int, int]]:
+        """Steady white fill gauge; at least one LED lit so a near-empty volume
+        still reads as 'detected'."""
+        count = max(1, leds_for(fill, self._led_count))
+        return self._bar(count, _FILL_COLOR)
 
     def _effect_pixels(self, event: Event, lit: bool) -> list[tuple[int, int, int]]:
         """All-LED colour for a one-shot effect (green flash / blue hold)."""

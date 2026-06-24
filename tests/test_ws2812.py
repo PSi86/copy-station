@@ -4,6 +4,7 @@ from copystation.status.ws2812_backend import (
     Ws2812Backend,
     _DETECT_COLOR,
     _EMPTY_COLOR,
+    _FILL_COLOR,
     _OFF,
     encode_pixels,
     leds_for,
@@ -87,3 +88,17 @@ def test_effect_pixels_cover_all_leds():
     assert b._effect_pixels(Event.SOURCE_EMPTY, True) == [_EMPTY_COLOR] * 3
     # Detection green and empty-source blue must be visually different.
     assert _DETECT_COLOR != _EMPTY_COLOR
+
+
+def test_fill_gauge_is_white_and_at_least_one_led():
+    b = Ws2812Backend.__new__(Ws2812Backend)
+    b._led_count = 10
+    # Half full -> five white LEDs, the rest off.
+    assert b._fill_pixels(0.5) == [_FILL_COLOR] * 5 + [_OFF] * 5
+    # Empty volume still lights one LED so "detected" reads.
+    assert b._fill_pixels(0.0) == [_FILL_COLOR] + [_OFF] * 9
+    # Full volume lights the whole strip.
+    assert b._fill_pixels(1.0) == [_FILL_COLOR] * 10
+    # White is equal-channel and clearly not the green detection colour.
+    assert _FILL_COLOR[0] == _FILL_COLOR[1] == _FILL_COLOR[2]
+    assert _FILL_COLOR != _DETECT_COLOR
