@@ -351,6 +351,7 @@ class DeviceWatcher:
                 target_root=target.mountpoint,
                 source_name=source.name,
                 source_device=source.device_node,
+                target_device=target.device_node,
                 hub=self._hub,
                 config=self._config,
             )

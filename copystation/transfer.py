@@ -23,10 +23,10 @@ from typing import Callable, Optional
 # Callback invoked with the number of bytes copied so far.
 ProgressCallback = Callable[[int], None]
 
-# Callback returning True when the copy should be aborted (e.g. the source
-# device was unplugged). Polled during the copy so we don't wait for the USB/SCSI
-# I/O timeout (~7-10 s) before reacting.
-AbortCheck = Callable[[], bool]
+# Callback returning a reason string when the copy should be aborted (e.g. the
+# source OR target device was unplugged), or None to keep going. Polled during the
+# copy so we don't wait for the USB/SCSI I/O timeout (~7-10 s) before reacting.
+AbortCheck = Callable[[], Optional[str]]
 
 # How often the abort watcher polls while a copy is running.
 _ABORT_POLL_SECONDS = 0.5
@@ -189,11 +189,11 @@ def _copy_with_rsync(
     )
     assert proc.stdout is not None
 
-    # Watch for a disconnected source in the background and kill rsync at once,
-    # instead of waiting for its I/O timeout. The reading loop below unblocks as
-    # soon as the killed process closes its stdout.
-    aborted = threading.Event()
-    watcher = _start_abort_watcher(proc, abort_check, aborted)
+    # Watch for a disconnected source/target in the background and kill rsync at
+    # once, instead of waiting for its I/O timeout. The reading loop below
+    # unblocks as soon as the killed process closes its stdout.
+    abort = {"reason": None}
+    watcher = _start_abort_watcher(proc, abort_check, abort)
 
     buffer = b""
     while True:
@@ -214,27 +214,35 @@ def _copy_with_rsync(
         watcher.join(timeout=1.0)
     stderr = proc.stderr.read().decode("utf-8", "ignore").strip() if proc.stderr else ""
 
-    if aborted.is_set():
-        raise SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
+    if abort["reason"]:
+        raise SourceVanishedError(_abort_message(abort["reason"]))
     if proc.returncode != 0:
         raise _describe_rsync_failure(proc.returncode, stderr)
 
 
+def _abort_message(reason) -> str:
+    """A reason from abort_check is a message; fall back for a bare truthy value."""
+    return reason if isinstance(reason, str) and reason else _SOURCE_DISCONNECTED_MSG
+
+
 def _start_abort_watcher(
-    proc: "subprocess.Popen", abort_check: Optional[AbortCheck], aborted: threading.Event
+    proc: "subprocess.Popen", abort_check: Optional[AbortCheck], abort: dict
 ) -> Optional[threading.Thread]:
-    """Poll ``abort_check`` while ``proc`` runs; terminate it on abort."""
+    """Poll ``abort_check`` while ``proc`` runs; terminate it on abort.
+
+    Stores the abort reason in ``abort["reason"]`` so the caller can report it.
+    """
     if abort_check is None:
         return None
 
     def _watch() -> None:
         while proc.poll() is None:
             try:
-                stop = abort_check()
+                reason = abort_check()
             except Exception:  # pragma: no cover - defensive
-                stop = False
-            if stop:
-                aborted.set()
+                reason = None
+            if reason:
+                abort["reason"] = reason
                 proc.terminate()
                 try:
                     proc.wait(timeout=3)
@@ -262,8 +270,10 @@ def _copy_with_shutil(
 ) -> None:
     done = 0
     for path in sorted(src.rglob("*")):
-        if abort_check is not None and abort_check():
-            raise SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
+        if abort_check is not None:
+            reason = abort_check()
+            if reason:
+                raise SourceVanishedError(_abort_message(reason))
         rel = path.relative_to(src)
         target = dst / rel
         if path.is_dir():
