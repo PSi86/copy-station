@@ -42,6 +42,12 @@ DEFAULTS: dict[str, Any] = {
         # Require the source to be smaller than the target, so the larger device
         # is never used as source even if it also carries a DCIM folder.
         "require_source_smaller_than_target": True,
+        # Friendly web-UI names matched by USB VID/PID (the O4's USB product
+        # string is only a serial). 2ca3:0020 is the DJI O4 Lite (confirmed);
+        # adjust/add entries for other models as their VID/PIDs are confirmed.
+        "device_labels": [
+            {"vid": "2ca3", "pid": "0020", "name": "O4 Lite"},
+        ],
     },
     # Cleanup behaviour.
     "cleanup": {

@@ -23,11 +23,11 @@ identify:
   require_source_smaller_than_target: true
   # Friendly display names matched by USB VID/PID (shown in the web UI instead of
   # the raw FS label / USB model). The O4's USB product string is only a serial,
-  # so a readable "O4 Lite" / "O4 Pro" name comes from here. Find vid:pid with
-  # `lsusb` (e.g. 2ca3:0020). Match by both, or by vid only / pid only.
-  device_labels: []
-  #   - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
-  #   - { vid: "2ca3", pid: "0021", name: "O4 Pro" }
+  # so a readable "O4 Lite" name comes from here. Find vid:pid with `lsusb`.
+  # Match by both, or by vid only / pid only. 2ca3:0020 = DJI O4 Lite (confirmed).
+  device_labels:
+    - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
+  #   - { vid: "2ca3", pid: "0021", name: "O4 Pro" }   # add once the PID is known
 
 cleanup:
   # true: delete DCIM contents, keep the DCIM folder.
