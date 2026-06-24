@@ -169,6 +169,14 @@ def test_device_views_reflect_actual_decision():
     assert views["boot"]["eligible"] is False
 
 
+def test_device_views_expose_capacity_and_free():
+    # The web UI derives used storage as capacity - free, so both must be present.
+    dev = _probe("cam", 23 * GB, has_dcim=True, free=8 * GB)
+    [view] = device_views([dev], MIN_BYTES)
+    assert view["capacity"] == 23 * GB
+    assert view["free"] == 8 * GB
+
+
 def test_device_views_without_decision_are_candidates():
     # While only one volume is present no source/target split is known yet.
     cam = _probe("cam", 23 * GB, has_dcim=True)

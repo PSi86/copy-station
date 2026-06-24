@@ -75,10 +75,20 @@ function renderDevices(el, devices) {
       const name = d.name || d.node || "device";
       const role = roleLabel[d.role] || d.role || "";
       const dcim = d.has_dcim ? " · DCIM" : "";
+      const used =
+        d.capacity != null && d.free != null ? d.capacity - d.free : null;
+      const size =
+        used != null
+          ? `${fmtBytes(used)} used / ${fmtBytes(d.capacity)}`
+          : fmtBytes(d.capacity);
+      const usedPct = d.capacity ? Math.min(100, (used / d.capacity) * 100) : 0;
       return `
-        <div class="label">
-          <span>${name} <span class="role ${d.role}">${role}</span></span>
-          <span class="muted">${fmtBytes(d.capacity)}${dcim}</span>
+        <div class="device">
+          <div class="label">
+            <span>${name} <span class="role ${d.role}">${role}</span></span>
+            <span class="muted">${size}${dcim}</span>
+          </div>
+          <div class="storage-track"><div class="storage-used" style="width:${usedPct.toFixed(1)}%"></div></div>
         </div>`;
     })
     .join("");
