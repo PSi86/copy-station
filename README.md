@@ -38,7 +38,8 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   **white gauge of how full that volume is for ~3 s** (then the bar rests); a
   connected source with nothing to copy holds **blue** briefly; an **error** (e.g.
   a device unplugged mid-copy) blinks **all LEDs red** until the devices are
-  removed -- so each phase is unmistakable at a glance.
+  removed -- so each phase is unmistakable at a glance. The bar **wipes once when
+  the service starts** and goes **fully dark when it stops**.
 
 ## Web interface (optional)
 
@@ -62,8 +63,9 @@ progress and blinks at 10 Hz. On detection it flashes the whole bar twice and
 then shows a **steady fill gauge** of the detected volume for **~3 s** before
 resting (the gauge stays up until the copy starts). On an **error** (e.g. a device
 unplugged mid-copy) the **whole bar blinks** until the devices are removed; Ready
-is a single steady segment (3). Set the `clock_line` / `data_line` offsets (from
-`gpioinfo`) in the config.
+is a single steady segment (3). When the **service starts** the bar wipes up once;
+when it **stops** every segment goes off. Set the `clock_line` / `data_line`
+offsets (from `gpioinfo`) in the config.
 
 ## WS2812B / NeoPixel strip (optional)
 
@@ -76,7 +78,8 @@ a **blue** progress bar that blinks at 10 Hz (the same activity pattern as the
 Grove LED Bar). On an **error** -- e.g. a device unplugged mid-copy -- **all LEDs
 blink red** until the devices are removed. Ready is a steady green first LED
 (Success = a short green blink). A source with nothing to copy holds the whole
-strip **blue** for a few seconds. Set `led_count`
+strip **blue** for a few seconds. When the **service starts** the strip wipes
+**cyan** once; when it **stops** all LEDs go off. Set `led_count`
 (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
 the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
 MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable the **`spidev on SPI1`**

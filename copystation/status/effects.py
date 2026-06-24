@@ -17,8 +17,9 @@ The timing here is medium-independent, so every backend animates the same way:
 Each backend maps "lit" to its own medium (an LED colour, a bar of segments, a
 single GPIO line), so the *vocabulary* stays consistent across hardware:
 
-* ``DEVICE_DETECTED`` -- two quick flashes, the moment a volume is recognised.
-* ``SOURCE_EMPTY``    -- a steady several-second hold, "nothing to copy".
+* ``DEVICE_DETECTED``  -- two quick flashes, the moment a volume is recognised.
+* ``SOURCE_EMPTY``     -- a steady several-second hold, "nothing to copy".
+* ``SERVICE_STARTED``  -- a one-pass wipe up the bar when the daemon starts.
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ DETECT_OFF = 0.12  # s dark per flash
 
 # Empty source: hold steady long enough to be unmistakable ("nothing to copy").
 EMPTY_HOLD_SECONDS = 5.0
+
+# Service started: a quick one-pass "wipe" up the bar, so a (re)start of the
+# daemon is visible at a glance before it settles into READY.
+STARTUP_SWEEP_SECONDS = 0.7
 
 # The post-detection fill gauge is a brief readout: show it for this long, then
 # let the bar rest (off) until the next event.
@@ -69,7 +74,19 @@ def effect_phase(event: Event, elapsed: float) -> Tuple[bool, bool]:
         if elapsed >= EMPTY_HOLD_SECONDS:
             return False, True
         return True, False
+    if event is Event.SERVICE_STARTED:
+        # Always "lit" while it runs; the backend draws the growing wipe itself
+        # from ``elapsed`` (see :func:`startup_sweep_count`).
+        return True, elapsed >= STARTUP_SWEEP_SECONDS
     return False, True  # unknown -> nothing to play
+
+
+def startup_sweep_count(elapsed: float, count: int) -> int:
+    """LEDs/segments lit so far in the one-pass startup wipe (grows 1 -> count)."""
+    if elapsed <= 0.0:
+        return 1
+    frac = min(1.0, elapsed / STARTUP_SWEEP_SECONDS)
+    return max(1, min(count, round(frac * count)))
 
 
 def fill_gauge_visible(elapsed: float) -> bool:

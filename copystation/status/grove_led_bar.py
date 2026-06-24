@@ -16,10 +16,10 @@ Behaviour:
 * Ready: a single steady segment (3). Success = short green blink on segment 3.
 
 One-shot :class:`Event` signals overlay a brief animation (see ``status.effects``)
-and then resume the steady state. The bar is single-colour, so both use the whole
-bar: ``DEVICE_DETECTED`` flashes all segments twice ("a volume was recognised");
-``SOURCE_EMPTY`` holds all segments steady for a few seconds ("nothing to copy").
-Both stay distinct from the partial bars above.
+and then resume the steady state. The bar is single-colour: ``DEVICE_DETECTED``
+flashes all segments twice ("a volume was recognised"); ``SOURCE_EMPTY`` holds all
+segments steady for a few seconds ("nothing to copy"); ``SERVICE_STARTED`` wipes up
+the bar when the daemon starts. On shutdown ``close()`` switches every segment off.
 
 The exact latch timing and the segment-to-channel orientation must be validated
 on the hardware (see the plan's open points).
@@ -36,6 +36,7 @@ from .effects import (
     TransientQueue,
     effect_phase,
     fill_gauge_visible,
+    startup_sweep_count,
 )
 
 # Number of segments on the bar.
@@ -191,8 +192,11 @@ class GroveLedBarBackend(StatusIndicator):
             if done:
                 self._transients.finish()
                 continue
-            # Single-colour bar: every one-shot effect uses the whole bar.
-            self._render([_ON] * SEGMENT_COUNT if lit else [_OFF] * SEGMENT_COUNT)
+            if event is Event.SERVICE_STARTED:
+                # A wipe up the bar; the rest use the whole bar (single-colour).
+                self._render(self._first_n(startup_sweep_count(elapsed, SEGMENT_COUNT)))
+            else:
+                self._render([_ON] * SEGMENT_COUNT if lit else [_OFF] * SEGMENT_COUNT)
             time.sleep(EFFECT_TICK_SECONDS)
             return True
 

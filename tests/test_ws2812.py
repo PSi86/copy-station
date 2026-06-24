@@ -86,12 +86,27 @@ def test_effect_pixels_cover_all_leds():
     # One-shot effects use the whole strip (bypass __init__: no spidev needed).
     b = Ws2812Backend.__new__(Ws2812Backend)
     b._led_count = 3
-    assert b._effect_pixels(Event.DEVICE_DETECTED, True) == [_DETECT_COLOR] * 3
-    assert b._effect_pixels(Event.DEVICE_DETECTED, False) == [_OFF] * 3
+    assert b._effect_pixels(Event.DEVICE_DETECTED, True, 0.0) == [_DETECT_COLOR] * 3
+    assert b._effect_pixels(Event.DEVICE_DETECTED, False, 0.0) == [_OFF] * 3
     # 'source empty' is a steady hold -> always lit while it plays.
-    assert b._effect_pixels(Event.SOURCE_EMPTY, True) == [_EMPTY_COLOR] * 3
+    assert b._effect_pixels(Event.SOURCE_EMPTY, True, 0.0) == [_EMPTY_COLOR] * 3
     # Detection green and empty-source blue must be visually different.
     assert _DETECT_COLOR != _EMPTY_COLOR
+
+
+def test_startup_sweep_grows_then_fills():
+    from copystation.status.effects import STARTUP_SWEEP_SECONDS
+    from copystation.status.ws2812_backend import _STARTUP_COLOR
+
+    b = Ws2812Backend.__new__(Ws2812Backend)
+    b._led_count = 10
+    # Begins with a single lit LED and wipes up to the full strip.
+    assert b._effect_pixels(Event.SERVICE_STARTED, True, 0.0) == [_STARTUP_COLOR] + [_OFF] * 9
+    assert b._effect_pixels(Event.SERVICE_STARTED, True, STARTUP_SWEEP_SECONDS) == [_STARTUP_COLOR] * 10
+    mid = b._effect_pixels(Event.SERVICE_STARTED, True, STARTUP_SWEEP_SECONDS / 2)
+    assert mid == [_STARTUP_COLOR] * 5 + [_OFF] * 5
+    # Cyan startup is distinct from every other effect colour.
+    assert _STARTUP_COLOR not in (_DETECT_COLOR, _EMPTY_COLOR, _FILL_COLOR)
 
 
 def test_fill_gauge_is_white_and_at_least_one_led():

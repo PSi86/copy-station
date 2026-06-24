@@ -36,6 +36,7 @@ class Event(enum.Enum):
 
     DEVICE_DETECTED = "device_detected"  # a new eligible volume was recognised
     SOURCE_EMPTY = "source_empty"        # a source is connected but has nothing to copy
+    SERVICE_STARTED = "service_started"  # the daemon just started -> a brief boot sweep
 
 
 class StatusIndicator:

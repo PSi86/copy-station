@@ -31,6 +31,9 @@ state:
 * ``SOURCE_EMPTY``: all LEDs hold solid blue for a few seconds -- "a source is
   connected but there is nothing to copy". (Distinct from the copy colour, which
   is a *partial, blinking* progress bar rather than a solid hold.)
+* ``SERVICE_STARTED``: a quick cyan wipe up the strip when the daemon starts.
+
+On shutdown ``close()`` switches every LED off.
 
 Without ``spidev`` / matching hardware the constructor raises -- the factory
 caller then skips the backend.
@@ -47,6 +50,7 @@ from .effects import (
     TransientQueue,
     effect_phase,
     fill_gauge_visible,
+    startup_sweep_count,
 )
 
 # Number of LEDs the feature supports at most.
@@ -64,6 +68,10 @@ _IDLE_COLOR: dict[State, tuple[int, int, int]] = {
 
 # Error: ALL LEDs blink red -- impossible to miss (e.g. a device pulled mid-copy).
 _ERROR_COLOR = (90, 0, 0)  # bright red
+
+# Service started: a cyan wipe up the strip -- a colour used nowhere else, so a
+# (re)start is unmistakable.
+_STARTUP_COLOR = (0, 50, 50)  # cyan
 
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
@@ -253,7 +261,7 @@ class Ws2812Backend(StatusIndicator):
             if done:
                 self._transients.finish()
                 continue  # try the next queued effect immediately
-            self._render(self._effect_pixels(event, lit))
+            self._render(self._effect_pixels(event, lit, elapsed))
             time.sleep(EFFECT_TICK_SECONDS)
             return True
 
@@ -263,12 +271,14 @@ class Ws2812Backend(StatusIndicator):
         count = max(1, leds_for(fill, self._led_count))
         return self._bar(count, _FILL_COLOR)
 
-    def _effect_pixels(self, event: Event, lit: bool) -> list[tuple[int, int, int]]:
-        """All-LED colour for a one-shot effect (green flash / blue hold)."""
+    def _effect_pixels(self, event: Event, lit: bool, elapsed: float) -> list[tuple[int, int, int]]:
+        """Pixels for a one-shot effect (green flash / blue hold / startup wipe)."""
         if event is Event.DEVICE_DETECTED:
             return [_DETECT_COLOR if lit else _OFF] * self._led_count
         if event is Event.SOURCE_EMPTY:
             return [_EMPTY_COLOR if lit else _OFF] * self._led_count
+        if event is Event.SERVICE_STARTED:
+            return self._bar(startup_sweep_count(elapsed, self._led_count), _STARTUP_COLOR)
         return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:

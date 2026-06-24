@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import Config, load_config
 from .naming import next_transfer_dir
 from .state import StationState, StatusHub, StorageInfo
-from .status import State, build_indicator
+from .status import Event, State, build_indicator
 from .transfer import (
     TransferError,
     check_free_space,
@@ -225,6 +225,25 @@ def _maybe_start_shutdown_button(config: Config):
         return None
 
 
+def _install_sigterm_handler() -> None:
+    """Turn SIGTERM into a clean shutdown.
+
+    systemd stops the service with SIGTERM, whose default action kills the
+    process outright -- so the ``finally`` cleanup (which switches the LEDs off)
+    would never run. Re-raise it as KeyboardInterrupt so the normal shutdown path
+    handles it. No-op if not on the main thread (e.g. under the tests).
+    """
+    import signal
+
+    def _handler(signum, frame):  # pragma: no cover - exercised only via a signal
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError:  # pragma: no cover - not the main thread
+        pass
+
+
 def run_daemon(config: Config) -> int:
     """Event-driven daemon (Linux/Cubie only)."""
     # Lazy import: devices needs pyudev, which is not available on Windows.
@@ -233,8 +252,10 @@ def run_daemon(config: Config) -> int:
     state = StationState()
     hub = StatusHub(state, build_indicator(config))
     hub.set_phase(State.READY)
+    hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     _maybe_start_web(state, config)
     button = _maybe_start_shutdown_button(config)
+    _install_sigterm_handler()
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
     try:
@@ -244,7 +265,7 @@ def run_daemon(config: Config) -> int:
     finally:
         if button is not None:
             button.close()
-        hub.close()
+        hub.close()  # switches every LED off
     return 0
 
 

@@ -5,9 +5,11 @@ from copystation.status.effects import (
     DETECT_ON,
     EMPTY_HOLD_SECONDS,
     FILL_GAUGE_SECONDS,
+    STARTUP_SWEEP_SECONDS,
     TransientQueue,
     effect_phase,
     fill_gauge_visible,
+    startup_sweep_count,
 )
 
 PERIOD = DETECT_ON + DETECT_OFF
@@ -43,6 +45,17 @@ def test_fill_gauge_shows_for_three_seconds_then_hides():
     assert fill_gauge_visible(FILL_GAUGE_SECONDS - 0.01) is True
     assert fill_gauge_visible(FILL_GAUGE_SECONDS) is False
     assert fill_gauge_visible(FILL_GAUGE_SECONDS + 5) is False
+
+
+def test_startup_sweep_runs_once_and_grows():
+    # Lit throughout, finishes after the sweep duration.
+    assert effect_phase(Event.SERVICE_STARTED, 0.0) == (True, False)
+    assert effect_phase(Event.SERVICE_STARTED, STARTUP_SWEEP_SECONDS) == (True, True)
+    # The wipe grows from one LED to the full count, monotonically, clamped.
+    assert startup_sweep_count(0.0, 10) == 1
+    assert startup_sweep_count(STARTUP_SWEEP_SECONDS / 2, 10) == 5
+    assert startup_sweep_count(STARTUP_SWEEP_SECONDS, 10) == 10
+    assert startup_sweep_count(STARTUP_SWEEP_SECONDS * 5, 10) == 10  # clamped
 
 
 def test_queue_is_fifo_and_tracks_elapsed():

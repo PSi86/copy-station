@@ -116,6 +116,8 @@ class LedBackend(StatusIndicator):
             return (lit, False, False)        # flash the green 'ready' LED
         if event is Event.SOURCE_EMPTY:
             return (lit, lit, lit)            # all three -> distinct "attention" hold
+        if event is Event.SERVICE_STARTED:
+            return (lit, lit, lit)            # all three briefly at startup
         return (False, False, False)
 
     def close(self) -> None:
