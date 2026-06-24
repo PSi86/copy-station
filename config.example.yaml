@@ -2,7 +2,8 @@
 #
 # All values are optional -- if the file or a key is missing, the defaults from
 # copystation/config.py apply (status only via log, source detection purely by
-# the DCIM folder). On the Cubie, place it at /etc/copystation/config.yaml.
+# the DCIM folder). On the device (Cubie A7S or Raspberry Pi 4/5), place it at
+# /etc/copystation/config.yaml.
 
 # Base directory for the per-device mountpoints (one subfolder per partition).
 mount_base: /run/copystation/mnt
@@ -85,7 +86,7 @@ power:
   shutdown_button:
     enabled: false
     gpiochip: gpiochip0
-    line: null           # line offset of the button (BCM number on Pi)
+    line: null           # button line offset (BCM number on Pi; gpioinfo offset on the Cubie)
     active_low: true      # pressed = pulled to GND
     bias: pull_up         # pull_up | pull_down | disable | as_is
     hold_seconds: 1.0     # must be held this long to trigger (debounce/intent)
