@@ -4,8 +4,10 @@ from copystation.status.effects import (
     DETECT_OFF,
     DETECT_ON,
     EMPTY_HOLD_SECONDS,
+    FILL_GAUGE_SECONDS,
     TransientQueue,
     effect_phase,
+    fill_gauge_visible,
 )
 
 PERIOD = DETECT_ON + DETECT_OFF
@@ -33,6 +35,14 @@ def test_source_empty_holds_lit_then_finishes():
     assert effect_phase(Event.SOURCE_EMPTY, 0.0) == (True, False)
     assert effect_phase(Event.SOURCE_EMPTY, EMPTY_HOLD_SECONDS - 0.01) == (True, False)
     assert effect_phase(Event.SOURCE_EMPTY, EMPTY_HOLD_SECONDS) == (False, True)
+
+
+def test_fill_gauge_shows_for_three_seconds_then_hides():
+    assert FILL_GAUGE_SECONDS == 3.0
+    assert fill_gauge_visible(0.0) is True
+    assert fill_gauge_visible(FILL_GAUGE_SECONDS - 0.01) is True
+    assert fill_gauge_visible(FILL_GAUGE_SECONDS) is False
+    assert fill_gauge_visible(FILL_GAUGE_SECONDS + 5) is False
 
 
 def test_queue_is_fifo_and_tracks_elapsed():

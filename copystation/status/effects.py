@@ -38,6 +38,10 @@ DETECT_OFF = 0.12  # s dark per flash
 # Empty source: hold steady long enough to be unmistakable ("nothing to copy").
 EMPTY_HOLD_SECONDS = 5.0
 
+# The post-detection fill gauge is a brief readout: show it for this long, then
+# let the bar rest (off) until the next event.
+FILL_GAUGE_SECONDS = 3.0
+
 # How often a render thread should re-sample an effect (crisp enough for the
 # flash above without busy-spinning).
 EFFECT_TICK_SECONDS = 0.02
@@ -66,6 +70,15 @@ def effect_phase(event: Event, elapsed: float) -> Tuple[bool, bool]:
             return False, True
         return True, False
     return False, True  # unknown -> nothing to play
+
+
+def fill_gauge_visible(elapsed: float) -> bool:
+    """True while the post-detection fill gauge should still be shown.
+
+    ``elapsed`` is seconds since the gauge first appeared (after the detection
+    blink). Once it lapses the bar rests until the next event.
+    """
+    return elapsed < FILL_GAUGE_SECONDS
 
 
 class TransientQueue:

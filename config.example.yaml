@@ -57,14 +57,14 @@ status:
     line: 37         # Cubie PB5 (pin 12) | Pi: BCM24
 
   # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
-  # New device: 2 green flashes, then a white gauge of how full it is. Copy: blue
+  # New device: 2 green flashes, then a white fill gauge for ~3 s. Copy: blue
   # 1..N progress bar (blinking). Idle: first LED green (ready) / red (error).
   ws2812:
     device: /dev/spidev0.0
     led_count: 1       # number of LEDs in the strip (1-10)
 
   # Seeed Grove LED Bar v2.0 (MY9221), bit-banged over two GPIO lines.
-  # Detecting: steady fill gauge of the device. Copy: bar blinking at 10 Hz.
+  # Detecting: brief (~3 s) fill gauge of the device. Copy: bar blinking at 10 Hz.
   # Idle: single segment (Ready=green/3, Error=red/1).
   grove_led_bar:
     gpiochip: gpiochip0

@@ -9,8 +9,8 @@ Behaviour:
 * During a copy (``COPYING``): light segments ``1..segments_for(progress)`` and
   blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to signal activity.
 * Detecting (``DETECTING``): a STEADY fill gauge of the detected device
-  (``set_fill``) -- segments ``1..segments_for(fill)``, at least one -- so the
-  bar shows how full the volume is while you wait.
+  (``set_fill``) -- segments ``1..segments_for(fill)``, at least one -- shown as a
+  brief ~3 s readout, after which the bar rests until the next event.
 * Other idle phases: a single steady segment by phase -- Ready = green
   (segment 3), Error = red (segment 1). Success = short green blink on segment 3.
 
@@ -30,7 +30,12 @@ import threading
 import time
 
 from . import Event, State, StatusIndicator
-from .effects import EFFECT_TICK_SECONDS, TransientQueue, effect_phase
+from .effects import (
+    EFFECT_TICK_SECONDS,
+    TransientQueue,
+    effect_phase,
+    fill_gauge_visible,
+)
 
 # Number of segments on the bar.
 SEGMENT_COUNT = 10
@@ -83,6 +88,7 @@ class GroveLedBarBackend(StatusIndicator):
         self._phase = State.READY
         self._progress = 0.0
         self._fill = 0.0
+        self._fill_shown_at: float | None = None  # when the gauge first appeared
         self._last_levels: list[int] | None = None
         self._clock_state = 0
         self._transients = TransientQueue()
@@ -104,6 +110,7 @@ class GroveLedBarBackend(StatusIndicator):
     def set_fill(self, fraction: float) -> None:
         with self._lock:
             self._fill = fraction
+            self._fill_shown_at = None  # restart the brief gauge window
 
     def signal(self, event: Event) -> None:
         self._transients.push(event)
@@ -127,10 +134,16 @@ class GroveLedBarBackend(StatusIndicator):
                 blink_on = True
                 continue
 
+            now = time.monotonic()
             with self._lock:
                 phase = self._phase
                 progress = self._progress
                 fill = self._fill
+                fill_elapsed = 0.0
+                if phase is State.DETECTING:
+                    if self._fill_shown_at is None:
+                        self._fill_shown_at = now
+                    fill_elapsed = now - self._fill_shown_at
 
             if phase is State.COPYING:
                 count = segments_for(progress)
@@ -139,8 +152,11 @@ class GroveLedBarBackend(StatusIndicator):
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # Steady fill gauge of the detected device (at least one segment).
-                self._render(self._first_n(max(1, segments_for(fill))))
+                # Steady fill gauge (at least one segment), shown only briefly.
+                if fill_gauge_visible(fill_elapsed):
+                    self._render(self._first_n(max(1, segments_for(fill))))
+                else:
+                    self._render([_OFF] * SEGMENT_COUNT)
                 blink_on = True
                 time.sleep(0.05)
             elif phase is State.SUCCESS:

@@ -14,8 +14,9 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
   signal activity.
 * Detecting (``DETECTING``): all LEDs form a STEADY white gauge of the detected
   device's fill level (``set_fill``) -- same bar idea as the copy progress, but
-  white and not blinking. At least one LED is always lit so "detected" reads even
-  for a near-empty volume.
+  white and not blinking. At least one LED is lit so "detected" reads even for a
+  near-empty volume. The gauge is a brief readout: it shows for ~3 s after a
+  device is detected and then the strip rests (off) until the next event.
 * Other idle phases: only the first LED is lit steady in the status colour --
   Ready = green, Error = red. Success = a short green blink on the first LED.
 
@@ -39,7 +40,12 @@ import threading
 import time
 
 from . import Event, State, StatusIndicator
-from .effects import EFFECT_TICK_SECONDS, TransientQueue, effect_phase
+from .effects import (
+    EFFECT_TICK_SECONDS,
+    TransientQueue,
+    effect_phase,
+    fill_gauge_visible,
+)
 
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
@@ -121,6 +127,7 @@ class Ws2812Backend(StatusIndicator):
         self._phase = State.READY
         self._progress = 0.0
         self._fill = 0.0
+        self._fill_shown_at: float | None = None  # when the gauge first appeared
         self._last_pixels: list[tuple[int, int, int]] | None = None
         self._transients = TransientQueue()
 
@@ -148,6 +155,8 @@ class Ws2812Backend(StatusIndicator):
     def set_fill(self, fraction: float) -> None:
         with self._lock:
             self._fill = fraction
+            # Restart the brief gauge window at the next detecting render.
+            self._fill_shown_at = None
 
     def signal(self, event: Event) -> None:
         # Momentary effects are queued; the render loop plays them in order and
@@ -177,10 +186,16 @@ class Ws2812Backend(StatusIndicator):
                 blink_on = True
                 continue
 
+            now = time.monotonic()
             with self._lock:
                 phase = self._phase
                 progress = self._progress
                 fill = self._fill
+                fill_elapsed = 0.0
+                if phase is State.DETECTING:
+                    if self._fill_shown_at is None:
+                        self._fill_shown_at = now
+                    fill_elapsed = now - self._fill_shown_at
 
             if phase is State.COPYING:
                 count = leds_for(progress, self._led_count)
@@ -189,8 +204,12 @@ class Ws2812Backend(StatusIndicator):
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
             elif phase is State.DETECTING:
-                # Steady white fill gauge of the detected device.
-                self._render(self._fill_pixels(fill))
+                # Steady white fill gauge, but only as a brief readout: after a few
+                # seconds the strip rests until the next event.
+                if fill_gauge_visible(fill_elapsed):
+                    self._render(self._fill_pixels(fill))
+                else:
+                    self._render(self._all_off())
                 blink_on = True
                 time.sleep(0.05)
             elif phase is State.SUCCESS:
