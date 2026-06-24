@@ -79,9 +79,6 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 }
 .muted { color: var(--muted); font-size: 0.85rem; }
 
-.storage { margin-bottom: 0.9rem; }
-.storage:last-child { margin-bottom: 0; }
-.storage .label { display: flex; justify-content: space-between; margin-bottom: 0.3rem; }
 .storage-track { height: 12px; background: #2a2f3a; border-radius: 999px; overflow: hidden; }
 .storage-used { height: 100%; background: var(--accent); }
 

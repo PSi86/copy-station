@@ -72,6 +72,20 @@ def test_event_log_newest_first_and_survives_reset():
     assert [e["message"] for e in state.snapshot()["events"]] == ["second", "first"]
 
 
+def test_set_error_freezes_elapsed_clock():
+    # On failure the elapsed time must stop, not keep counting as if still live.
+    state = StationState()
+    state.begin_transfer("x", 100)
+    state.update_progress(50)
+    assert state._finished_monotonic is None
+    state.set_error("device disconnected")
+    assert state._finished_monotonic is not None
+    # Two reads a moment apart return the same frozen elapsed value.
+    first = state.snapshot()["elapsed_seconds"]
+    second = state.snapshot()["elapsed_seconds"]
+    assert first == second
+
+
 def test_snapshot_exposes_copy_speed():
     state = StationState()
     state.begin_transfer("x", 1000)

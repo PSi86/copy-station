@@ -21,21 +21,6 @@ function fmtDuration(seconds) {
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
-function renderStorage(el, title, info) {
-  if (!info || !info.capacity) {
-    el.innerHTML = `<div class="label"><span>${title}</span><span class="muted">not present</span></div>`;
-    return;
-  }
-  const usedPct = info.capacity ? (info.used / info.capacity) * 100 : 0;
-  const name = info.label ? `${title} (${info.label})` : title;
-  el.innerHTML = `
-    <div class="label">
-      <span>${name}</span>
-      <span class="muted">${fmtBytes(info.free)} free / ${fmtBytes(info.capacity)}</span>
-    </div>
-    <div class="storage-track"><div class="storage-used" style="width:${usedPct.toFixed(1)}%"></div></div>`;
-}
-
 function fmtClock(epochSeconds) {
   if (!epochSeconds) return "";
   const d = new Date(epochSeconds * 1000);
@@ -110,8 +95,6 @@ function apply(data) {
   document.getElementById("bytes").textContent =
     data.bytes_total ? `${fmtBytes(data.bytes_done)} / ${fmtBytes(data.bytes_total)}` : "--";
 
-  renderStorage(document.getElementById("storage-source"), "Source", data.source);
-  renderStorage(document.getElementById("storage-target"), "Target", data.target);
   renderDevices(document.getElementById("devices"), data.devices);
   renderLog(document.getElementById("log"), data.events);
 

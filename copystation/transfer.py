@@ -135,12 +135,19 @@ _SOURCE_DISCONNECTED_MSG = (
     "reconnect it and start again."
 )
 
+# Used when we know a device dropped out but not which side (e.g. an rsync I/O
+# error where the device node has not been re-checked / is ambiguous).
+_DEVICE_DISCONNECTED_MSG = (
+    "A device was disconnected or became unreadable during the copy (I/O error). "
+    "Nothing was deleted -- reconnect it and start again."
+)
+
 
 def _describe_rsync_failure(code: int, stderr: str) -> TransferError:
     """Translate an rsync exit code / stderr into a user-friendly error."""
     low = stderr.lower()
     if "input/output error" in low or "read errors" in low:
-        return SourceVanishedError(_SOURCE_DISCONNECTED_MSG)
+        return SourceVanishedError(_DEVICE_DISCONNECTED_MSG)
     if "no space left" in low:
         return InsufficientSpaceError(
             "The target ran out of space during the copy. Nothing was deleted."
@@ -217,12 +224,19 @@ def _copy_with_rsync(
     if abort["reason"]:
         raise SourceVanishedError(_abort_message(abort["reason"]))
     if proc.returncode != 0:
+        # rsync may have hit the disconnect before our poller did -- common when a
+        # card is pulled from a still-connected reader, where the kernel only
+        # notices on the failed write. Re-check which side is gone so the message
+        # names the right device instead of defaulting to "source".
+        late = abort_check() if abort_check is not None else None
+        if late:
+            raise SourceVanishedError(_abort_message(late))
         raise _describe_rsync_failure(proc.returncode, stderr)
 
 
 def _abort_message(reason) -> str:
     """A reason from abort_check is a message; fall back for a bare truthy value."""
-    return reason if isinstance(reason, str) and reason else _SOURCE_DISCONNECTED_MSG
+    return reason if isinstance(reason, str) and reason else _DEVICE_DISCONNECTED_MSG
 
 
 def _start_abort_watcher(
