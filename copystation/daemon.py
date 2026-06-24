@@ -51,6 +51,29 @@ def storage_info(path: Path, label: str = "") -> StorageInfo:
         return StorageInfo(label=label)
 
 
+def _device_abort_check(source_device: str | None, target_device: str | None):
+    """Abort callback that fires if the source OR target device node disappears.
+
+    Returns a labelled reason string so the failure says which side was unplugged,
+    or None while both are still present. None if there is nothing to watch.
+    """
+    watched = [(d, label) for d, label in
+               ((source_device, "Source"), (target_device, "Target")) if d]
+    if not watched:
+        return None
+
+    def _check():
+        for node, label in watched:
+            if not os.path.exists(node):
+                return (
+                    f"{label} device was disconnected during the copy. Nothing "
+                    f"was deleted -- reconnect it and start again."
+                )
+        return None
+
+    return _check
+
+
 def perform_transfer(
     source_root: Path,
     target_root: Path,
@@ -58,6 +81,7 @@ def perform_transfer(
     hub: StatusHub,
     config: Config,
     source_device: str | None = None,
+    target_device: str | None = None,
 ) -> Path:
     """Perform a complete transfer.
 
@@ -65,8 +89,9 @@ def perform_transfer(
     Any error before successful verification leaves the source untouched.
     Returns the created target folder.
 
-    ``source_device`` (e.g. ``/dev/sdc``) lets the copy abort promptly if the
-    source is unplugged mid-transfer, rather than waiting for the I/O timeout.
+    ``source_device`` / ``target_device`` (e.g. ``/dev/sdc``) let the copy abort
+    promptly if either is unplugged mid-transfer, rather than waiting for the I/O
+    timeout.
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
@@ -87,10 +112,8 @@ def perform_transfer(
     _LOG.info("Copying %s -> %s (%d bytes)", media_dir, dest, required)
     hub.log_event(f"Copy started: {dest.name}")
     hub.begin_transfer(dest.name, required)
-    # Abort the copy quickly if the source device node disappears (unplugged).
-    abort_check = None
-    if source_device:
-        abort_check = lambda: not os.path.exists(source_device)  # noqa: E731
+    # Abort the copy quickly if the source or target device disappears (unplugged).
+    abort_check = _device_abort_check(source_device, target_device)
     copy_tree(media_dir, dest, on_progress=hub.update_progress, abort_check=abort_check)
     hub.finish_transfer()
 

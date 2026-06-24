@@ -122,13 +122,51 @@ def test_perform_transfer_disconnect_keeps_source(tmp_path):
     target.mkdir()
 
     # A device node that does not exist -> abort_check fires immediately.
-    with pytest.raises(SourceVanishedError):
+    with pytest.raises(SourceVanishedError, match="Source"):
         perform_transfer(
             src, target, "DJI_O4", _hub(), _config(), source_device="/dev/does-not-exist"
         )
 
     # Safety guarantee: the source media is untouched after a failed copy.
     assert (src / "DCIM" / "100MEDIA" / "clip.mp4").read_bytes() == b"video-data"
+
+
+def test_perform_transfer_target_disconnect_keeps_source(tmp_path):
+    src = tmp_path / "camera"
+    _make_dcim(src, {"100MEDIA/clip.mp4": b"video-data"})
+    target = tmp_path / "sd"
+    target.mkdir()
+
+    # Only the target node is missing -> abort with a clear "Target" message.
+    with pytest.raises(SourceVanishedError, match="Target"):
+        perform_transfer(
+            src, target, "DJI_O4", _hub(), _config(), target_device="/dev/does-not-exist"
+        )
+
+    # The source media is still untouched (cleanup only happens after verify).
+    assert (src / "DCIM" / "100MEDIA" / "clip.mp4").read_bytes() == b"video-data"
+
+
+def test_copy_tree_abort_reason_propagates(tmp_path):
+    src = _make_dcim(tmp_path / "src", {"a.mp4": b"x" * 100, "b.mp4": b"y" * 100})
+    dst = tmp_path / "dst"
+    with pytest.raises(SourceVanishedError, match="custom reason"):
+        copy_tree(src, dst, abort_check=lambda: "custom reason")
+
+
+def test_device_abort_check_labels_which_side(tmp_path):
+    from copystation.daemon import _device_abort_check
+
+    here = str(tmp_path)  # an existing path
+    # Source present, target gone -> labelled "Target".
+    msg = _device_abort_check(here, "/dev/does-not-exist")()
+    assert msg and "Target" in msg
+    # Target present, source gone -> labelled "Source".
+    msg = _device_abort_check("/dev/does-not-exist", here)()
+    assert msg and "Source" in msg
+    # Both present -> no abort; nothing to watch -> no callback.
+    assert _device_abort_check(here, here)() is None
+    assert _device_abort_check(None, None) is None
 
 
 # ----- end-to-end via perform_transfer -----------------------------------------
