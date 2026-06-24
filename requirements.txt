@@ -2,7 +2,7 @@
 #
 # Hardware dependencies (only needed on the Cubie / Linux) are installed via
 # system packages, NOT via pip:
-#   apt install rsync python3-pyudev python3-libgpiod
+#   apt install rsync python3-pyudev python3-libgpiod python3-spidev
 #
 # This list only covers the pure-Python dependencies that also run on the
 # Windows dev machine.

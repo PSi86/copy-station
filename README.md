@@ -193,8 +193,8 @@ sudo bash scripts/install.sh
 
 The installer:
 
-* installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`, the
-  `gpiod` CLI tools, exFAT support),
+* installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`,
+  `python3-spidev`, the `gpiod` CLI tools, exFAT support),
 * copies the code to `/opt/copystation` and creates a venv with FastAPI/uvicorn
   (PEP 668-safe via `--system-site-packages`),
 * **detects the board** and writes `/etc/copystation/config.yaml` from the
@@ -281,8 +281,8 @@ sudo bash scripts/uninstall.sh --purge    # also delete /etc/copystation
 It stops and disables the service, removes the systemd unit and `/opt/copystation`,
 and unmounts anything left under `/run/copystation`. Your `/etc/copystation/config.yaml`
 is kept unless you pass `--purge`. The apt packages the installer pulled in
-(`rsync`, `python3-pyudev`, `python3-libgpiod`, `gpiod`, exFAT tools) are left in
-place -- remove them by hand if nothing else needs them.
+(`rsync`, `python3-pyudev`, `python3-libgpiod`, `python3-spidev`, `gpiod`, exFAT
+tools) are left in place -- remove them by hand if nothing else needs them.
 
 ## Source/target detection
 
