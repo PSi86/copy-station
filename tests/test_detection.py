@@ -16,7 +16,7 @@ GB = 1024**3
 MIN_BYTES = 6 * GB
 
 
-def _probe(name, capacity, has_dcim, matched_source=True, free=None):
+def _probe(name, capacity, has_dcim, matched_source=True, free=None, has_media=True):
     return Probe(
         sys_name=name,
         device_node=f"/dev/{name}",
@@ -26,6 +26,7 @@ def _probe(name, capacity, has_dcim, matched_source=True, free=None):
         capacity=capacity,
         free=capacity if free is None else free,
         name=name,
+        has_media=has_media,
     )
 
 
@@ -38,6 +39,23 @@ def test_order_independent_source_target():
 
     assert src1.sys_name == src2.sys_name == "cam"
     assert tgt1.sys_name == tgt2.sys_name == "sd"
+
+
+def test_empty_dcim_is_not_a_source():
+    # A device whose DCIM folder is empty must not be picked as source.
+    empty_cam = _probe("cam", 23 * GB, has_dcim=True, has_media=False)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    with pytest.raises(NoSourceError):
+        select_roles([empty_cam, sd], MIN_BYTES)
+
+
+def test_empty_dcim_source_skipped_for_a_nonempty_one():
+    empty = _probe("empty", 23 * GB, has_dcim=True, has_media=False)
+    full = _probe("full", 64 * GB, has_dcim=True, has_media=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    src, tgt = select_roles([empty, full, sd], MIN_BYTES)
+    assert src.sys_name == "full"   # the empty DCIM device is never the source
+    assert tgt.sys_name == "sd"
 
 
 def test_both_have_dcim_smaller_is_source():
@@ -175,6 +193,27 @@ def test_device_views_expose_capacity_and_free():
     [view] = device_views([dev], MIN_BYTES)
     assert view["capacity"] == 23 * GB
     assert view["free"] == 8 * GB
+
+
+def test_device_views_marks_empty_source():
+    # A source-shaped device with an empty DCIM shows as "empty" (no copy).
+    empty = _probe("cam", 23 * GB, has_dcim=True, has_media=False)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    views = {v["name"]: v for v in device_views([empty, sd], MIN_BYTES)}
+    assert views["cam"]["role"] == "empty"
+    assert views["sd"]["role"] == "candidate"
+
+
+def test_dcim_has_media(tmp_path):
+    from copystation.devices import _dcim_has_media
+
+    dcim = tmp_path / "DCIM"
+    dcim.mkdir()
+    assert _dcim_has_media(dcim) is False          # empty folder
+    (dcim / "100MEDIA").mkdir()
+    assert _dcim_has_media(dcim) is False           # empty subfolder, still no file
+    (dcim / "100MEDIA" / "clip.mp4").write_bytes(b"x")
+    assert _dcim_has_media(dcim) is True            # a media file exists
 
 
 def test_device_views_without_decision_are_candidates():
