@@ -99,7 +99,7 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .role.source { background: var(--detecting); color: #2a2300; }
 .role.target { background: var(--accent); color: #042036; }
 .role.candidate { background: #3a4250; color: var(--fg); }
-.role.empty { background: var(--error); color: #2a0a05; }
+.role.empty { background: var(--ready); color: #06210f; }
 
 .log { list-style: none; margin: 0; padding: 0; max-height: 14rem; overflow-y: auto; }
 .log-entry {

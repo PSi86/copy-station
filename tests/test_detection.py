@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,50 @@ def test_device_views_marks_empty_source():
     views = {v["name"]: v for v in device_views([empty, sd], MIN_BYTES)}
     assert views["cam"]["role"] == "empty"
     assert views["sd"]["role"] == "candidate"
+
+
+def test_device_views_source_flips_to_empty_when_cleared():
+    tgt = _probe("sd", 256 * GB, has_dcim=False)
+    # During the copy the chosen source still has media -> "source".
+    src = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    v = {x["name"]: x for x in device_views([src, tgt], MIN_BYTES, src, tgt)}
+    assert v["cam"]["role"] == "source"
+    assert v["sd"]["role"] == "target"
+    # After cleanup the same chosen source is empty -> "empty" (overrides source).
+    cleared = _probe("cam", 23 * GB, has_dcim=True, has_media=False)
+    v2 = {x["name"]: x for x in device_views([cleared, tgt], MIN_BYTES, cleared, tgt)}
+    assert v2["cam"]["role"] == "empty"
+    assert v2["sd"]["role"] == "target"
+
+
+def test_device_views_target_with_empty_dcim_stays_target():
+    # An empty-DCIM device used as TARGET must remain "target", never "empty".
+    src = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    empty_target = _probe("big", 256 * GB, has_dcim=True, has_media=False)
+    v = {x["name"]: x for x in device_views([src, empty_target], MIN_BYTES, src, empty_target)}
+    assert v["big"]["role"] == "target"
+    assert v["cam"]["role"] == "source"
+
+
+@pytest.mark.skipif(not hasattr(os, "statvfs"), reason="statvfs is Linux-only")
+def test_restat_reflects_free_and_media(tmp_path):
+    from copystation.config import Config
+
+    w = _watcher()
+    w._config = Config()
+    mp = tmp_path / "mnt"
+    (mp / "DCIM").mkdir(parents=True)
+    (mp / "DCIM" / "clip.mp4").write_bytes(b"x" * 16)
+    probe = Probe(
+        sys_name="sdb1", device_node="/dev/sdb1", mountpoint=mp,
+        has_dcim=False, matched_source=True, capacity=0, free=0, name="x", has_media=False,
+    )
+    r = w._restat(probe)
+    assert r.has_dcim is True and r.has_media is True
+    assert r.capacity > 0 and r.free > 0
+    # Clearing the DCIM contents -> empty.
+    (mp / "DCIM" / "clip.mp4").unlink()
+    assert w._restat(probe).has_media is False
 
 
 def test_dcim_has_media(tmp_path):
