@@ -264,6 +264,21 @@ Board-specific reference configs:
 derivation explained) and
 [config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml).
 
+### 4. Uninstalling
+
+To remove the station, reverse the installer with:
+
+```
+sudo bash scripts/uninstall.sh            # remove service + code, keep config
+sudo bash scripts/uninstall.sh --purge    # also delete /etc/copystation
+```
+
+It stops and disables the service, removes the systemd unit and `/opt/copystation`,
+and unmounts anything left under `/run/copystation`. Your `/etc/copystation/config.yaml`
+is kept unless you pass `--purge`. The apt packages the installer pulled in
+(`rsync`, `python3-pyudev`, `python3-libgpiod`, `gpiod`, exFAT tools) are left in
+place -- remove them by hand if nothing else needs them.
+
 ## Source/target detection
 
 Detection is independent of the order the devices are enumerated **and of whether
