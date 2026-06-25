@@ -33,7 +33,7 @@ _PATTERN: dict[State, tuple[bool, bool, bool, bool]] = {
 
 
 class LedBackend(StatusIndicator):
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, start: bool = True) -> None:
         from .gpio import open_output_lines
 
         chip = cfg.get("gpiochip", "gpiochip0")
@@ -53,8 +53,11 @@ class LedBackend(StatusIndicator):
         self._current = State.READY
         self._transients = TransientQueue()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        # ``start=False`` skips the render loop (used by the `leds-off` command).
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
 
     def set_state(self, state: State) -> None:
         with self._lock:
@@ -122,5 +125,10 @@ class LedBackend(StatusIndicator):
 
     def close(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1.0)
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        try:
+            self._apply(False, False, False)  # drive every LED off before releasing
+        except Exception:  # pragma: no cover
+            pass
         self._gpio.release()

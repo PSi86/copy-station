@@ -295,6 +295,10 @@ def main(argv: list[str] | None = None) -> int:
     sim.add_argument("source", help="Source folder (contains DCIM)")
     sim.add_argument("target", help="Target folder (SD root)")
     sim.add_argument("--source-name", default="SIM", help="Plain-text source name")
+    sub.add_parser(
+        "leds-off",
+        help="Switch the status LEDs off and exit (used by the systemd ExecStopPost)",
+    )
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -302,7 +306,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "simulate":
         return run_simulation(args, config)
+    if args.mode == "leds-off":
+        return run_leds_off(config)
     return run_daemon(config)
+
+
+def run_leds_off(config: Config) -> int:
+    """Drive the configured status LEDs off and exit.
+
+    Run by the systemd ``ExecStopPost`` after the service has stopped, in a fresh
+    process: it re-opens the hardware (free again once the daemon exited) and
+    sends a single "all off" frame. Decoupling the blackout from the daemon's own
+    shutdown makes it reliable regardless of how the daemon process ended (clean
+    exit, SIGTERM, or SIGKILL).
+    """
+    # start=False: open the hardware without the render loop, so close() just sends
+    # one OFF frame -- no brief flash of the idle colour.
+    indicator = build_indicator(config, start=False)
+    indicator.close()  # close() forces an "all off" frame and releases the hardware
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

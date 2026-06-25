@@ -10,6 +10,14 @@ WorkingDirectory=/opt/copystation
 # Use the venv interpreter created by install.sh (has fastapi/uvicorn and, via
 # --system-site-packages, the apt-installed pyudev/libgpiod).
 ExecStart=/opt/copystation/venv/bin/python -m copystation.daemon --config /etc/copystation/config.yaml
+# After the service stops (clean exit, SIGTERM or SIGKILL), switch the status
+# LEDs off from a fresh process. Decoupling the blackout from the daemon makes it
+# reliable regardless of how the main process ended. Runs after the daemon has
+# released the GPIO/SPI, so the hardware is free to re-open.
+ExecStopPost=/opt/copystation/venv/bin/python -m copystation.daemon --config /etc/copystation/config.yaml leds-off
+# Do not wait long for the daemon to exit before SIGKILL (the LEDs are switched
+# off by ExecStopPost either way).
+TimeoutStopSec=10
 # Root needed for mount/umount and GPIO access.
 User=root
 # Restart on crash, but do not hammer in a tight loop.

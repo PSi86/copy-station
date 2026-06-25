@@ -123,7 +123,7 @@ def encode_pixels(pixels: list[tuple[int, int, int]]) -> list[int]:
 
 
 class Ws2812Backend(StatusIndicator):
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, start: bool = True) -> None:
         # spidev is only meaningfully present on the target boards.
         import spidev  # type: ignore
 
@@ -150,8 +150,13 @@ class Ws2812Backend(StatusIndicator):
         self._transients = TransientQueue()
 
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        # ``start=False`` opens the hardware without the render loop -- used by the
+        # `leds-off` command, which then close()s to send a single OFF frame
+        # without first flashing the idle colour.
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
 
     @staticmethod
     def _parse_device(path: str) -> tuple[int, int]:
@@ -184,8 +189,10 @@ class Ws2812Backend(StatusIndicator):
 
     def close(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1.0)
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
         try:
+            self._last_pixels = None  # bypass the de-dup so OFF is really sent
             self._render([_OFF] * self._led_count)  # all LEDs off
         except Exception:  # pragma: no cover
             pass

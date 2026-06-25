@@ -136,3 +136,48 @@ def test_set_fill_tracks_sticky_flag():
     assert (b._fill, b._fill_sticky, b._fill_shown_at) == (0.5, True, None)
     b.set_fill(0.3)  # default: a brief (non-sticky) readout again
     assert b._fill_sticky is False
+
+
+def _stub_spidev(monkeypatch):
+    import sys
+    import types
+
+    sent = []
+    fake = types.ModuleType("spidev")
+
+    class _Spi:
+        max_speed_hz = 0
+
+        def open(self, *a):
+            pass
+
+        def xfer2(self, data):
+            sent.append(list(data))
+
+        def close(self):
+            pass
+
+    fake.SpiDev = _Spi
+    monkeypatch.setitem(sys.modules, "spidev", fake)
+    return sent
+
+
+def test_start_false_skips_render_thread_and_sends_one_off_frame(monkeypatch):
+    # The `leds-off` path opens the hardware without the render loop, so close()
+    # sends a single OFF frame with no preceding idle flash.
+    sent = _stub_spidev(monkeypatch)
+    b = Ws2812Backend({"device": "/dev/spidev0.0", "led_count": 4}, start=False)
+    assert b._thread is None
+    b.close()  # must not raise (no thread to join) and must send exactly one frame
+    assert len(sent) == 1
+    assert _decode(sent[0]) == [(0, 0, 0)] * 4
+
+
+def test_run_leds_off_returns_zero(monkeypatch):
+    _stub_spidev(monkeypatch)
+    from copystation.config import Config
+    from copystation.daemon import run_leds_off
+
+    cfg = Config()
+    cfg.data["status"] = {"backends": ["ws2812"], "ws2812": {"device": "/dev/spidev0.0", "led_count": 4}}
+    assert run_leds_off(cfg) == 0
