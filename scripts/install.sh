@@ -26,7 +26,9 @@ CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
 
 echo ">> Installing system dependencies ..."
 apt-get update
-apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-spidev python3-yaml gpiod
+# python3-pil + fonts-dejavu-core are for the optional e-paper backend (Pillow
+# renders the status frame; DejaVu gives it crisp text). Harmless if unused.
+apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-spidev python3-yaml python3-pil fonts-dejavu-core gpiod
 
 # exFAT support so camera/SD cards mount (package name differs by release:
 # Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).

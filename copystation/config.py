@@ -56,7 +56,7 @@ DEFAULTS: dict[str, Any] = {
         "keep_dcim_folder": True,
     },
     # Status indication. Multiple backends can be combined.
-    # Available: "log", "led", "buzzer", "ws2812".
+    # Available: "log", "led", "buzzer", "ws2812", "grove_led_bar", "epaper".
     "status": {
         "backends": ["log"],
         # GPIO pin assignment for the LED backend (gpiochip name + line offsets).
@@ -84,6 +84,34 @@ DEFAULTS: dict[str, Any] = {
             "data_line": None,
             # Flip if segment 1 is the wrong physical end of the bar.
             "reverse": False,
+        },
+        # SPI e-paper display (black/white). Renders the transfer progress bar,
+        # the used/free storage of source and target and the current phase.
+        # ``model`` is a one-word preset that fills controller/width/height/
+        # rotation (see ``status/epaper/presets.py``); any field may still be set
+        # explicitly to override the preset. controller/width/height/rotation are
+        # None here so the resolver can tell "unset -> take from the preset" from
+        # an explicit value. The pins below are the standard Waveshare wiring on a
+        # Raspberry Pi (BCM == line offset); on the Cubie A7S point ``device`` at
+        # /dev/spidev1.0 and use the Allwinner offsets (see config.examples).
+        "epaper": {
+            "model": None,            # waveshare-1.54 | waveshare-2.9 | weact-2.9 | weact-3.7
+            "controller": None,       # ssd1680 | ssd1681 | ssd1677 (overrides the preset)
+            "width": None,            # controller-native width in px (datasheet)
+            "height": None,           # controller-native height in px (datasheet)
+            "rotation": None,         # 0 | 90 | 180 | 270 (content orientation)
+            "mirror": False,          # mirror the content (panels wired the other way)
+            "device": "/dev/spidev0.0",
+            "spi_speed_hz": 4_000_000,
+            "gpiochip": "gpiochip0",
+            "dc": 25,                 # BCM 25 / line offset
+            "rst": 17,                # BCM 17
+            "busy": 24,               # BCM 24
+            "pwr": None,              # optional panel power-enable pin
+            "cs": None,               # optional GPIO chip-select (default: SPI hardware CE0)
+            "busy_active_high": True, # SSD168x signal BUSY high; flip for inverted panels
+            "full_refresh_every": 20, # force a full refresh after N partial updates
+            "partial_min_interval": 2.0,  # seconds between partial updates
         },
     },
     # Optional local web interface (off by default).

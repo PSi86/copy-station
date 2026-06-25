@@ -79,6 +79,41 @@ status:
     data_line: 109     # Cubie PD13 (pin 21) | Pi: BCM17 (Grove DI)
     reverse: false     # flip if segment 1 is the wrong physical end
 
+  # SPI e-paper display (black/white). Renders the transfer progress bar, the
+  # used/free storage of source and target and the current phase. Add `epaper`
+  # to `backends` above to enable it. The display keeps growing the bar with fast
+  # partial refreshes and does an occasional full refresh to clear ghosting (and
+  # always a full refresh when a device disappears).
+  #
+  # Pick the panel with `model` (fills controller + resolution + a default
+  # rotation); override any field below as needed:
+  #   waveshare-1.54  -- 200x200, SSD1681 (primary)
+  #   waveshare-2.9   -- 296x128, SSD1680
+  #   weact-2.9       -- 296x128, SSD1680 (WeAct Studio, same driver)
+  #   weact-3.7       -- 480x280, SSD1677 (ROADMAP -- not implemented yet)
+  #
+  # Wiring (standard Waveshare module -> Raspberry Pi, BCM == line offset):
+  #   VCC->3V3  GND->GND  DIN->MOSI/BCM10  CLK->SCLK/BCM11  CS->CE0/BCM8 (hardware)
+  #   DC->BCM25  RST->BCM17  BUSY->BCM24. Enable SPI as for the ws2812 above; the
+  #   node is /dev/spidev0.0 on the Pi (use /dev/spidev1.0 on the Cubie A7S).
+  # NOTE: the e-paper cannot share an SPI bus with a ws2812 strip (the ws2812
+  #   abuses MOSI with strict timing and no chip-select) -- use one or the other.
+  epaper:
+    model: waveshare-1.54
+    device: /dev/spidev0.0
+    spi_speed_hz: 4000000
+    gpiochip: gpiochip0
+    dc: 25             # Cubie: a free PIO offset | Pi: BCM25
+    rst: 17            # Pi: BCM17
+    busy: 24           # Pi: BCM24
+    pwr: null          # optional panel power-enable pin (newer Waveshare revs)
+    cs: null           # optional GPIO chip-select (default: SPI hardware CE0)
+    rotation: 0        # 0 | 90 | 180 | 270 (content orientation; preset default)
+    mirror: false
+    busy_active_high: true
+    full_refresh_every: 20      # force a full refresh after N partial updates
+    partial_min_interval: 2.0   # seconds between partial updates
+
 # Optional local web interface (status + progress + storage, future settings).
 web:
   enabled: false

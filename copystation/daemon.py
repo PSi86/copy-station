@@ -177,7 +177,7 @@ def _maybe_start_web(state: StationState, config: Config) -> bool:
 def run_simulation(args: argparse.Namespace, config: Config) -> int:
     """Run a transfer with local folders (development/test)."""
     state = StationState()
-    hub = StatusHub(state, build_indicator(config))
+    hub = StatusHub(state, build_indicator(config, state=state))
     web_running = _maybe_start_web(state, config)
 
     source = Path(args.source)
@@ -242,7 +242,7 @@ def run_daemon(config: Config) -> int:
     from .devices import DeviceWatcher
 
     state = StationState()
-    hub = StatusHub(state, build_indicator(config))
+    hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     _maybe_start_web(state, config)

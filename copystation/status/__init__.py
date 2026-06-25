@@ -114,7 +114,7 @@ class CompositeIndicator(StatusIndicator):
                 pass
 
 
-def build_indicator(config: "Config", start: bool = True) -> StatusIndicator:
+def build_indicator(config: "Config", state=None, start: bool = True) -> StatusIndicator:
     """Build a (composite) status backend from the configuration.
 
     If initialising a hardware backend fails (e.g. ``libgpiod`` missing on the
@@ -122,6 +122,9 @@ def build_indicator(config: "Config", start: bool = True) -> StatusIndicator:
     remains, a no-op is used. ``start=False`` opens the hardware without starting
     the render threads -- used by the ``leds-off`` command to send a single OFF
     frame without first flashing the idle colour.
+
+    ``state`` is the shared ``StationState``; the e-paper backend reads its
+    snapshot to render the full status frame. The other backends ignore it.
     """
     status_cfg = config.get("status", {})
     names = status_cfg.get("backends", ["log"])
@@ -129,7 +132,7 @@ def build_indicator(config: "Config", start: bool = True) -> StatusIndicator:
 
     for name in names:
         try:
-            backends.append(_create_backend(name, status_cfg, start))
+            backends.append(_create_backend(name, status_cfg, state, start))
         except Exception as exc:
             # Intentionally only warn; the log backend itself should always work.
             import logging
@@ -147,7 +150,9 @@ def build_indicator(config: "Config", start: bool = True) -> StatusIndicator:
     return CompositeIndicator(backends)
 
 
-def _create_backend(name: str, status_cfg: dict, start: bool = True) -> StatusIndicator:
+def _create_backend(
+    name: str, status_cfg: dict, state=None, start: bool = True
+) -> StatusIndicator:
     if name == "log":
         from .log_backend import LogBackend
 
@@ -168,4 +173,8 @@ def _create_backend(name: str, status_cfg: dict, start: bool = True) -> StatusIn
         from .grove_led_bar import GroveLedBarBackend
 
         return GroveLedBarBackend(status_cfg.get("grove_led_bar", {}), start=start)
+    if name == "epaper":
+        from .epaper import EpaperBackend
+
+        return EpaperBackend(status_cfg.get("epaper", {}), state=state, start=start)
     raise ValueError(f"Unknown status backend: {name}")

@@ -49,6 +49,18 @@ status:
     device: /dev/spidev0.0
     led_count: 10        # number of LEDs in the strip (1-10)
 
+  # Alternative: SPI e-paper display (transfer bar + source/target storage +
+  # phase). Add `epaper` to `backends` to enable. Standard Waveshare->Pi wiring:
+  # DIN->BCM10, CLK->BCM11, CS->CE0/BCM8, DC->BCM25, RST->BCM17, BUSY->BCM24.
+  # Cannot share the SPI bus with the ws2812 above -- use one or the other.
+  epaper:
+    model: waveshare-1.54   # waveshare-2.9 | weact-2.9 also supported
+    device: /dev/spidev0.0
+    gpiochip: gpiochip0
+    dc: 25                  # BCM GPIO25
+    rst: 17                 # BCM GPIO17
+    busy: 24                # BCM GPIO24
+
   buzzer:
     gpiochip: gpiochip0
     line: 24              # BCM GPIO24

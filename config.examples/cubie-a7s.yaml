@@ -70,6 +70,19 @@ status:
     device: /dev/spidev1.0
     led_count: 10        # number of LEDs in the strip (1-10)
 
+  # Alternative: SPI e-paper display (transfer bar + source/target storage +
+  # phase). Add `epaper` to `backends` to enable. Use the SPI1 node (the same one
+  # the ws2812 uses -- so drive one or the other, not both): DIN->SPI1-MOSI=PD12
+  # (pin 19), CLK->SPI1-CLK. DC/RST/BUSY go to free PIO lines -- confirm the
+  # offsets with `gpioinfo` (rule: (bank-'A')*32+pin; PB3=35, PB4=36, PB6=38).
+  epaper:
+    model: waveshare-1.54   # waveshare-2.9 | weact-2.9 also supported
+    device: /dev/spidev1.0
+    gpiochip: gpiochip0
+    dc: 35                  # PB3 (example -- confirm with `gpioinfo`)
+    rst: 36                 # PB4 (example -- confirm with `gpioinfo`)
+    busy: 38                # PB6 (example -- confirm with `gpioinfo`)
+
   buzzer:
     gpiochip: gpiochip0
     line: 37              # PB5 (pin 12)
