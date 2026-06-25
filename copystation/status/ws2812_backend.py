@@ -57,6 +57,10 @@ from .effects import (
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
 
+# WS2812 reset (latch) low time. The datasheet needs >50 us; WS2812B wants
+# ~280 us. 1 ms is a safe margin, used to latch the final OFF frame on close().
+_RESET_SECONDS = 0.001
+
 # (R, G, B) of an unlit pixel.
 _OFF = (0, 0, 0)
 
@@ -194,6 +198,12 @@ class Ws2812Backend(StatusIndicator):
         try:
             self._last_pixels = None  # bypass the de-dup so OFF is really sent
             self._render([_OFF] * self._led_count)  # all LEDs off
+            # A WS2812 only LATCHES shifted-in data after a reset -- the line held
+            # low for >50 us. During normal operation the inter-frame sleep
+            # provides that; here there is no following frame, so without this hold
+            # the OFF frame is shifted in but never displayed and the strip keeps
+            # showing the last status. Sleep keeps MOSI idle (low) long enough.
+            time.sleep(_RESET_SECONDS)
         except Exception:  # pragma: no cover
             pass
         try:
