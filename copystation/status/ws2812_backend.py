@@ -57,11 +57,13 @@ from .effects import (
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
 
-# WS2812 latch ("reset"): the data line must be held LOW for longer than the
-# reset time (>50 us original, ~280 us for WS2812B). Appending this many raw zero
-# bytes to a frame actively drives MOSI low for ~850 us (256 * 8 bits / 2.4 MHz),
-# which reliably latches it -- unlike a plain sleep, which depends on the (board-
-# specific) idle level of the line. Used to display the final OFF frame.
+# Raw zero bytes wrapped around every frame to drive MOSI actively low. 256 bytes
+# is ~850 us at 2.4 MHz, well past the WS2812 reset time (>50 us; ~280 us on a
+# WS2812B). Sent BEFORE the data it absorbs the SPI start-of-transfer glitch that
+# otherwise corrupts the FIRST LED (a slightly-off idle colour, and the first LED
+# not going fully dark on OFF); sent AFTER the data it is the reset that latches
+# the frame so it is displayed. Both matter and neither depends on the board's
+# (uncontrolled) idle line level, unlike a plain sleep.
 _RESET_BYTES = 256
 
 # (R, G, B) of an unlit pixel.
@@ -199,15 +201,10 @@ class Ws2812Backend(StatusIndicator):
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         try:
-            # Send an all-off frame immediately followed by a low "reset" so the
-            # WS2812 actually LATCHES (displays) it. During normal operation the
-            # inter-frame gap provides the reset; here there is no following frame,
-            # so without the trailing low the OFF frame is shifted in but never
-            # shown and the strip keeps the last colour. The raw zero bytes drive
-            # the line low deterministically (a plain sleep relies on the idle
-            # level, which varies by board).
-            self._last_pixels = None
-            self._spi.xfer2(encode_pixels([_OFF] * self._led_count) + [0] * _RESET_BYTES)
+            # _render wraps the OFF frame in leading+trailing low resets, so it is
+            # both glitch-free (first LED really goes dark) and latched (displayed).
+            self._last_pixels = None  # force the OFF frame past the de-dup
+            self._render([_OFF] * self._led_count)
         except Exception:  # pragma: no cover
             pass
         try:
@@ -329,4 +326,8 @@ class Ws2812Backend(StatusIndicator):
         if pixels == self._last_pixels:
             return
         self._last_pixels = list(pixels)
-        self._spi.xfer2(encode_pixels(pixels))
+        # Wrap the data in a low period before and after: the leading low absorbs
+        # the SPI start-of-transfer glitch that corrupts the first LED, the
+        # trailing low is the reset that latches the frame. See ``_RESET_BYTES``.
+        reset = [0] * _RESET_BYTES
+        self._spi.xfer2(reset + encode_pixels(pixels) + reset)

@@ -172,10 +172,12 @@ def test_start_false_skips_render_thread_and_sends_one_off_frame(monkeypatch):
     assert b._thread is None
     b.close()  # must not raise (no thread to join) and must send exactly one frame
     assert len(sent) == 1
+    frame = sent[0]
     led_bytes = 4 * 9  # 9 encoded bytes per LED
-    assert _decode(sent[0][:led_bytes]) == [(0, 0, 0)] * 4  # all-off LED data
-    # ... followed by a low reset (raw zero bytes) so the OFF frame latches.
-    assert sent[0][led_bytes:] == [0] * _RESET_BYTES
+    # leading low (glitch guard) + all-off LED data + trailing low (latch reset)
+    assert frame[:_RESET_BYTES] == [0] * _RESET_BYTES
+    assert _decode(frame[_RESET_BYTES:_RESET_BYTES + led_bytes]) == [(0, 0, 0)] * 4
+    assert frame[_RESET_BYTES + led_bytes:] == [0] * _RESET_BYTES
 
 
 def test_run_leds_off_returns_zero(monkeypatch):
