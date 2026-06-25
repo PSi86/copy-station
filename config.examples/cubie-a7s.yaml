@@ -60,11 +60,12 @@ status:
       error: 34           # PB2 (pin 29) -- red
 
   # Alternative: addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI.
-  # Enable the `spidev on SPI1` overlay (rsetup -> Overlays), then wire DIN to
-  # SPI1-MOSI = PD12 (header pin 19); only MOSI is used (MISO/CLK/CS unconnected).
+  # Enable the SPI overlay: run `sudo rsetup` -> Overlays -> enable `spidev on
+  # SPI1`, then reboot. Wire DIN to SPI1-MOSI = PD12 (header pin 19); only MOSI is
+  # used (MISO/CLK/CS unconnected).
   # NOTE: PD12/PD13 (pins 19/21) are the SAME pins the Grove bar above uses --
   # drive one of the two, not both. After enabling, find the bus with
-  # `ls /dev/spidev*` (usually /dev/spidev1.0) and set it as `device` below.
+  # `ls /dev/spidev*` (it is /dev/spidev1.0) and set it as `device` below.
   ws2812:
     device: /dev/spidev1.0
     led_count: 10        # number of LEDs in the strip (1-10)

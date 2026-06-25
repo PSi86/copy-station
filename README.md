@@ -33,7 +33,14 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   from a still-connected reader. Either way the source is never deleted unless
   verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
-  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable).
+  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable). On the bar
+  backends each newly detected volume blinks green **twice** and then shows a
+  **white gauge of how full that volume is for ~3 s** (then a slow **magenta**
+  pulse while it waits -- clearly not the green idle); a connected source with
+  nothing to copy holds **blue** briefly; an **error** (e.g.
+  a device unplugged mid-copy) blinks **all LEDs red** until the devices are
+  removed -- so each phase is unmistakable at a glance. The bar **wipes once when
+  the service starts** and goes **fully dark when it stops**.
 
 ## Web interface (optional)
 
@@ -52,27 +59,41 @@ docs). Open `http://<device-ip>:8080/`.
 ## Grove LED Bar v2.0 (optional)
 
 Add `grove_led_bar` to `status.backends` to drive a Seeed Grove LED Bar v2.0
-(MY9221) over two GPIO lines. During a copy the bar shows the proportional fill
-and blinks at 10 Hz; when idle a single LED is steady (Ready = green / segment 3,
-Detecting = yellow / segment 2, Error = red / segment 1). Set the `clock_line` /
-`data_line` offsets (from `gpioinfo`) in the config.
+(MY9221) over two GPIO lines. During a copy the bar shows the proportional copy
+progress and blinks at 10 Hz. On detection it flashes the whole bar twice and
+then shows a **steady fill gauge** of the detected volume for **~3 s**, after
+which segment 2 blinks slowly while it waits (distinct from the steady idle
+segment 3; the gauge stays up until the copy starts). On an **error** (e.g. a device
+unplugged mid-copy) the **whole bar blinks** until the devices are removed; Ready
+is a single steady segment (3). When the **service starts** the bar wipes up once;
+when it **stops** every segment goes off. Set the `clock_line` / `data_line`
+offsets (from `gpioinfo`) in the config.
 
 ## WS2812B / NeoPixel strip (optional)
 
 Add `ws2812` to `status.backends` to drive an addressable WS2812B / NeoPixel
 strip of **1-10 LEDs** over SPI (MOSI, each data bit encoded as three SPI bits).
-The first LED always shows the status colour (Ready = green, Detecting = yellow,
-Error = red, Success = a short green blink); during a copy the LEDs `1..N` form a
-proportional progress bar that blinks at 10 Hz, the same activity pattern as the
-Grove LED Bar. Set `led_count` (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
-the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
-MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable the **`spidev on SPI1`**
-overlay (in `rsetup` -> Overlays; the backend needs a `/dev/spidev*` node, so this
-is required) and wire DIN to **SPI1-MOSI = PD12, header pin 19** -- only MOSI is
-used (MISO/CLK/CS stay unconnected). After enabling, find the bus with
-`ls /dev/spidev*` (typically `/dev/spidev1.0`) and set it as `device`. Note that
-PD12/PD13 (pins 19/21) are the same pins the Grove LED Bar uses, so drive **either**
-the Grove bar **or** a WS2812 strip on them, not both.
+A newly detected volume flashes the whole strip green **twice**, then shows a
+**steady white gauge** of how full that volume is for **~3 s**; while it then
+waits for the second device the first LED gives a slow **magenta** pulse (clearly
+not the green idle), and once a copy is imminent the gauge stays up until the copy
+bar replaces it (no gap). During a copy the LEDs `1..N` form a **blue** progress
+bar that blinks at 10 Hz (the same activity pattern as the Grove LED Bar). On an
+**error** -- e.g. a device unplugged mid-copy -- **all LEDs blink red** until the
+devices are removed. Ready is a steady green first LED
+(Success = a short green blink). A source with nothing to copy holds the whole
+strip **blue** for a few seconds. When the **service starts** the strip wipes
+**cyan** once; when it **stops** all LEDs go off. Set `led_count`
+(1-10) and the `device` (e.g. `/dev/spidev0.0`) in
+the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
+Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
+MOSI (**BCM GPIO10 / pin 19**); the node is `/dev/spidev0.0`. On the **Cubie A7S**
+run **`sudo rsetup`** -> Overlays and enable **`spidev on SPI1`** (the backend needs
+a `/dev/spidev*` node), reboot, then wire DIN to **SPI1-MOSI = PD12, header pin 19**
+-- only MOSI is used (MISO/CLK/CS stay unconnected); the node is **`/dev/spidev1.0`**
+(confirm with `ls /dev/spidev*`). Note that PD12/PD13 (pins 19/21) are the same pins
+the Grove LED Bar uses, so drive **either** the Grove bar **or** a WS2812 strip on
+them, not both.
 
 ## Powering off safely
 

@@ -10,8 +10,11 @@ from copystation.devices import (
     NoTargetError,
     Probe,
     device_views,
+    fill_fraction_for_display,
+    has_empty_source,
     select_roles,
 )
+from copystation.status import Event
 
 GB = 1024**3
 MIN_BYTES = 6 * GB
@@ -110,6 +113,112 @@ def test_vid_pid_mismatch_excludes_source():
     sd = _probe("sd", 256 * GB, has_dcim=False)
     with pytest.raises(NoSourceError):
         select_roles([cam, sd], MIN_BYTES)
+
+
+def test_has_empty_source():
+    empty = _probe("cam", 23 * GB, has_dcim=True, has_media=False)
+    full = _probe("cam2", 23 * GB, has_dcim=True, has_media=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    assert has_empty_source([empty, sd]) is True
+    assert has_empty_source([full, sd]) is False       # a source with media exists
+    assert has_empty_source([empty, full, sd]) is False  # one full source is enough
+    assert has_empty_source([sd]) is False              # no source-shaped volume
+    # A DCIM device that fails the VID/PID allowlist is not "source-shaped".
+    foreign = _probe("x", 23 * GB, has_dcim=True, has_media=False, matched_source=False)
+    assert has_empty_source([foreign, sd]) is False
+
+
+def test_fill_fraction_prefers_source_and_reflects_usage():
+    # 23 GB source, 8 GB free -> 15/23 used.
+    cam = _probe("cam", 23 * GB, has_dcim=True, free=8 * GB)
+    sd = _probe("sd", 256 * GB, has_dcim=False, free=200 * GB)
+    frac = fill_fraction_for_display([cam, sd])
+    assert abs(frac - (23 - 8) / 23) < 1e-9   # the source's fill, not the SD's
+
+
+def test_fill_fraction_single_device_and_empty():
+    sd = _probe("sd", 256 * GB, has_dcim=False, free=64 * GB)
+    assert abs(fill_fraction_for_display([sd]) - (256 - 64) / 256) < 1e-9
+    assert fill_fraction_for_display([]) is None
+
+
+def test_fill_fraction_clamps_and_handles_zero_capacity():
+    full = _probe("cam", 10 * GB, has_dcim=True, free=0)
+    assert fill_fraction_for_display([full]) == 1.0
+    zero = Probe(
+        sys_name="x", device_node="/dev/x", mountpoint=Path("/x"),
+        has_dcim=True, matched_source=True, capacity=0, free=0, name="x", has_media=True,
+    )
+    assert fill_fraction_for_display([zero]) == 0.0
+
+
+def _probe_with_node(name, node):
+    return Probe(
+        sys_name=name, device_node=str(node), mountpoint=Path("/x"),
+        has_dcim=True, matched_source=True, capacity=GB, free=0, name=name, has_media=True,
+    )
+
+
+def test_hold_before_copy_returns_source_size_when_present(tmp_path, monkeypatch):
+    import copystation.devices as dev
+
+    monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 0.05)  # keep the test quick
+    src = tmp_path / "sdc"; src.write_bytes(b"")
+    tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
+    media = tmp_path / "DCIM"; media.mkdir()
+    (media / "clip.mp4").write_bytes(b"x" * 16)  # the size scanned during the hold
+    w = _watcher()
+    assert w._hold_before_copy(
+        _probe_with_node("cam", src), _probe_with_node("sd", tgt), media
+    ) == 16
+
+
+def test_hold_before_copy_bails_when_a_device_is_gone(tmp_path, monkeypatch):
+    import copystation.devices as dev
+
+    monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 5.0)  # long, but must bail at once
+    missing = tmp_path / "sdc"            # never created
+    tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
+    media = tmp_path / "DCIM"; media.mkdir()
+    (media / "clip.mp4").write_bytes(b"x")
+    w = _watcher()
+    assert w._hold_before_copy(
+        _probe_with_node("cam", missing), _probe_with_node("sd", tgt), media
+    ) is None
+
+
+class _RecordingHub:
+    """Captures log_event / signal calls for the detection-flow tests."""
+
+    def __init__(self):
+        self.events = []
+        self.signals = []
+
+    def log_event(self, message, level="info"):
+        self.events.append((message, level))
+
+    def signal(self, event):
+        self.signals.append(event)
+
+
+def test_detected_devices_emit_one_signal_each():
+    w = _watcher()
+    w._hub = _RecordingHub()
+    w._prev_nodes = set()
+    w._node_names = {}
+
+    cam = _probe("cam", 23 * GB, has_dcim=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    added, removed = w._log_device_changes([cam, sd])
+
+    assert added and not removed
+    # One green "detected" blink per newly recognised volume.
+    assert w._hub.signals.count(Event.DEVICE_DETECTED) == 2
+
+    # Re-evaluating the same set emits nothing new (no spurious re-blink).
+    w._hub.signals.clear()
+    w._log_device_changes([cam, sd])
+    assert w._hub.signals == []
 
 
 class _FakeDevice:

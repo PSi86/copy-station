@@ -25,8 +25,9 @@ from typing import Callable, Optional
 
 from .config import Config
 from .state import StatusHub
-from .status import State
-from .transfer import TransferError
+from .status import Event, State
+from .status.effects import FILL_GAUGE_SECONDS
+from .transfer import TransferError, total_size
 
 _LOG = logging.getLogger("copystation.devices")
 
@@ -103,6 +104,40 @@ def select_roles(
             f"({target.capacity} B) -- refusing to copy"
         )
     return source, target
+
+
+def has_empty_source(eligible: list[Probe]) -> bool:
+    """True when a source is connected but there is nothing to copy.
+
+    That is: at least one eligible volume is source-shaped (carries a DCIM folder
+    and matches the optional VID/PID allowlist), and *every* such volume has an
+    empty DCIM. Used both to decide the "empty source" status signal and to skip
+    starting a transfer.
+    """
+    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    return bool(source_shaped) and not any(p.has_media for p in source_shaped)
+
+
+def _used_fraction(p: Probe) -> float:
+    """Fraction of a volume that is in use (0.0..1.0), clamped."""
+    if p.capacity <= 0:
+        return 0.0
+    used = max(0, p.capacity - p.free)
+    return min(1.0, used / p.capacity)
+
+
+def fill_fraction_for_display(eligible: list[Probe]) -> Optional[float]:
+    """The fill level to show on the LED gauge while detecting.
+
+    Prefers a source-shaped volume (the camera, whose contents will be copied --
+    the most informative "how full" number); otherwise the fullest eligible
+    volume. ``None`` when there is nothing to show.
+    """
+    if not eligible:
+        return None
+    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    pool = source_shaped or eligible
+    return max(_used_fraction(p) for p in pool)
 
 
 def device_views(
@@ -230,6 +265,11 @@ class DeviceWatcher:
         # was already handled. It is cleared when a transfer starts and re-armed
         # once fewer than two eligible volumes remain (i.e. one was removed).
         self._armed = True
+        # ``_errored`` latches the error indication after a failed/aborted copy so
+        # the red stays up until the user clears it by unplugging the device(s) --
+        # otherwise the very USB-remove event that caused the abort would at once
+        # re-evaluate back to DETECTING and the error would never be seen.
+        self._errored = False
         # For the action log: which eligible volumes were present last time, and
         # their names (kept so a removal can still be named after it is gone).
         self._prev_nodes: set[str] = set()
@@ -252,6 +292,7 @@ class DeviceWatcher:
         monitor.filter_by(subsystem="block")
 
         self._armed = True
+        self._errored = False
         self._publish_ready()
         _LOG.info("Ready -- waiting for devices ...")
         # Devices may already be plugged in when the daemon starts.
@@ -265,7 +306,12 @@ class DeviceWatcher:
     # ----- internal helpers ----------------------------------------------------
 
     def _wait_for_change(self, monitor) -> None:
-        """Block until any block add/remove event arrives."""
+        """Block until any block add/remove event arrives.
+
+        A clean ``systemctl stop`` terminates the process here (SIGTERM); the
+        LEDs are switched off afterwards by the unit's ExecStopPost. Ctrl-C raises
+        KeyboardInterrupt, which the daemon catches to shut down cleanly.
+        """
         for device in iter(monitor.poll, None):
             if device.action in ("add", "remove"):
                 return
@@ -310,6 +356,8 @@ class DeviceWatcher:
         self._node_names.update(names)
         for node in sorted(added):
             self._hub.log_event(f"Storage device detected: {names[node]}")
+            # A quick green blink per recognised volume -- unmistakable on the LEDs.
+            self._hub.signal(Event.DEVICE_DETECTED)
         for node in sorted(removed):
             self._hub.log_event(f"Device removed: {self._node_names.pop(node, node)}")
         self._prev_nodes = current
@@ -332,6 +380,20 @@ class DeviceWatcher:
             eligible = [p for p in probes if p.capacity >= min_bytes]
             added, removed = self._log_device_changes(eligible)
 
+            # While latched in error, keep showing the red alarm until the user
+            # clears it by unplugging everything. Any device still present holds
+            # the error; an empty bus resets it (handled by the READY block below).
+            if self._errored:
+                if eligible:
+                    self._hub.set_devices(device_views(probes, min_bytes))
+                    return
+                self._errored = False
+
+            # A source is connected but its DCIM is empty -> a steady blue "nothing
+            # to copy" hold. Fire only on a change, so it does not repeat endlessly.
+            if added and has_empty_source(eligible):
+                self._hub.signal(Event.SOURCE_EMPTY)
+
             if not eligible:
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
@@ -340,6 +402,11 @@ class DeviceWatcher:
                     self._hub.log_event("Ready -- waiting for devices")
                 _LOG.info("Ready -- waiting for devices ...")
                 return
+
+            # Feed the detected device's fill level to the LED gauge shown while
+            # detecting (the web UI keeps its own per-device storage figures).
+            fill = fill_fraction_for_display(eligible) or 0.0
+            self._hub.set_fill(fill)
 
             if len(eligible) < 2:
                 # Not enough to decide yet -- keep waiting and re-arm.
@@ -353,8 +420,7 @@ class DeviceWatcher:
 
             # A source is connected but its DCIM is empty -- nothing to copy. Don't
             # start a transfer and don't error; show it as "empty" and wait.
-            source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
-            if source_shaped and not any(p.has_media for p in source_shaped):
+            if has_empty_source(eligible):
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
                 self._hub.set_phase(State.DETECTING)
@@ -387,6 +453,22 @@ class DeviceWatcher:
                 f"Roles assigned: source = {source.name}, target = {target.name}"
             )
 
+            # Let the source's fill gauge have its moment before the copy bar takes
+            # over: keep it up (sticky) and hold in DETECTING for the gauge
+            # duration, then start the copy. Sticky => the gauge stays visible
+            # until COPYING replaces it, so there is no gap before the copy. The
+            # (possibly slow) size scan happens INSIDE the hold so the copy bar
+            # appears promptly when the gauge time is up, not after an extra pause.
+            self._hub.set_fill(fill, sticky=True)
+            self._hub.set_phase(State.DETECTING)
+            media_dir = source.mountpoint / self._config.media_dirname
+            required = self._hold_before_copy(source, target, media_dir)
+            if required is None:
+                self._armed = True
+                self._hub.log_event("A device was removed before the copy started")
+                _LOG.info("A device disappeared during the pre-copy hold.")
+                return
+
             def _refresh_devices() -> None:
                 # Re-measure the mounts and republish, so the web view tracks the
                 # filling target during the copy and the emptied source afterwards.
@@ -402,15 +484,18 @@ class DeviceWatcher:
                 hub=self._hub,
                 config=self._config,
                 on_devices_refresh=_refresh_devices,
+                required=required,  # measured during the hold -> no re-scan delay
             )
             self._hub.log_event("Ready to remove devices")
         except TransferError as exc:
             self._armed = False
+            self._errored = True
             _LOG.error("Transfer failed: %s", exc)
             self._hub.log_event(f"Copy failed: {exc}", level="error")
             self._hub.set_error(str(exc))
         except Exception as exc:  # pragma: no cover - defensive
             self._armed = False
+            self._errored = True
             _LOG.exception("Unexpected error: %s", exc)
             self._hub.log_event(f"Unexpected error: {exc}", level="error")
             self._hub.set_error(str(exc))
@@ -418,6 +503,32 @@ class DeviceWatcher:
             subprocess.run(["sync"], check=False)
             for probe in probes:
                 self._umount(probe.mountpoint)
+
+    def _hold_before_copy(self, source: Probe, target: Probe, media_dir: Path):
+        """Stay in DETECTING for the fill-gauge duration before copying.
+
+        The render thread shows the source's fill gauge during this hold, so the
+        user sees how full the source is before the copy bar takes over. The
+        source size scan runs INSIDE the window (it counts towards the hold), so
+        the copy bar appears promptly afterwards instead of after an extra scan.
+        Polls for device removal so a card pulled here does not start a doomed
+        copy. Returns the source media size in bytes, or None if a device
+        disappeared.
+        """
+        deadline = time.monotonic() + FILL_GAUGE_SECONDS
+        try:
+            required = total_size(media_dir)
+        except OSError:
+            return None
+        while time.monotonic() < deadline:
+            if not self._both_present(source, target):
+                return None
+            time.sleep(0.1)
+        return required if self._both_present(source, target) else None
+
+    @staticmethod
+    def _both_present(source: Probe, target: Probe) -> bool:
+        return os.path.exists(source.device_node) and os.path.exists(target.device_node)
 
     def _is_candidate(self, device) -> bool:
         """True if the device is a mountable USB volume (not root).

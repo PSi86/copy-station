@@ -12,10 +12,29 @@ WS2812 pixel can show any colour, so a single LED suffices for the status:
 * During a copy (``COPYING``): light LEDs ``1..leds_for(progress)`` in the copy
   colour and blink the whole lit pattern at 10 Hz (50 ms on / 50 ms off) to
   signal activity.
-* Idle: only the first LED is lit steady in the status colour -- Ready = green,
-  Detecting = yellow, Error = red. Success = a short green blink on the first
-  LED. The remaining LEDs stay dark until a transfer needs them for the
-  progress bar.
+* Detecting (``DETECTING``): all LEDs form a STEADY white gauge of the detected
+  device's fill level (``set_fill``) -- same bar idea as the copy progress, but
+  white and not blinking. At least one LED is lit so "detected" reads even for a
+  near-empty volume. The gauge is a brief readout: it shows for ~3 s after a
+  device is detected, then a slow MAGENTA pulse marks "detecting, waiting"
+  (deliberately far from the green idle) -- unless the gauge is ``sticky`` (set
+  just before a copy), when it stays up until the copy bar takes over.
+* Error (``ERROR``): ALL LEDs blink red -- impossible to miss, e.g. when a device
+  is pulled mid-copy.
+* Ready: the first LED is lit steady green. Success = a short green blink on it.
+
+On top of those steady states, one-shot :class:`Event` signals overlay a brief
+animation (see ``status.effects``) and then hand the strip back to the current
+state:
+
+* ``DEVICE_DETECTED``: all LEDs flash bright green twice -- an unmistakable "a
+  volume was recognised", after which the white fill gauge above takes over.
+* ``SOURCE_EMPTY``: all LEDs hold solid blue for a few seconds -- "a source is
+  connected but there is nothing to copy". (Distinct from the copy colour, which
+  is a *partial, blinking* progress bar rather than a solid hold.)
+* ``SERVICE_STARTED``: a quick cyan wipe up the strip when the daemon starts.
+
+On shutdown ``close()`` switches every LED off.
 
 Without ``spidev`` / matching hardware the constructor raises -- the factory
 caller then skips the backend.
@@ -26,26 +45,60 @@ from __future__ import annotations
 import threading
 import time
 
-from . import State, StatusIndicator
+from . import Event, State, StatusIndicator
+from .effects import (
+    EFFECT_TICK_SECONDS,
+    TransientQueue,
+    effect_phase,
+    fill_gauge_visible,
+    startup_sweep_count,
+)
 
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
 
+# Raw zero bytes wrapped around every frame to drive MOSI actively low. 256 bytes
+# is ~850 us at 2.4 MHz, well past the WS2812 reset time (>50 us; ~280 us on a
+# WS2812B). Sent BEFORE the data it absorbs the SPI start-of-transfer glitch that
+# otherwise corrupts the FIRST LED (a slightly-off idle colour, and the first LED
+# not going fully dark on OFF); sent AFTER the data it is the reset that latches
+# the frame so it is displayed. Both matter and neither depends on the board's
+# (uncontrolled) idle line level, unlike a plain sleep.
+_RESET_BYTES = 256
+
 # (R, G, B) of an unlit pixel.
 _OFF = (0, 0, 0)
 
-# Idle status colour shown on the first LED, per phase.
+# Idle status colour shown on the first LED, per phase. DETECTING (white fill
+# gauge) and ERROR (all LEDs blink red) have their own rendering, so only READY
+# is a single steady colour here.
 _IDLE_COLOR: dict[State, tuple[int, int, int]] = {
-    State.READY: (0, 40, 0),       # green
-    State.DETECTING: (40, 30, 0),  # yellow
-    State.ERROR: (80, 0, 0),       # red
+    State.READY: (0, 60, 0),   # green
 }
+
+# Error: ALL LEDs blink red -- impossible to miss (e.g. a device pulled mid-copy).
+_ERROR_COLOR = (90, 0, 0)  # bright red
+
+# Service started: a cyan wipe up the strip -- a colour used nowhere else, so a
+# (re)start is unmistakable.
+_STARTUP_COLOR = (0, 50, 50)  # cyan
 
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
 
-# Colour of the success confirmation blink.
-_SUCCESS_COLOR = (0, 80, 0)  # bright green
+# Colour of the fill gauge shown while detecting -- white, unmistakably different
+# from the green "ready" colour and the blue copy bar.
+_FILL_COLOR = (50, 50, 50)  # white
+
+# Colour of the "detecting, waiting" indicator shown after the fill gauge -- a
+# magenta pulse, deliberately far from the green idle so the two never look alike.
+_DETECTING_COLOR = (50, 0, 50)  # magenta
+
+# Confirmations are a touch brighter (~90) so they read as a deliberate event,
+# not a resting colour.
+_SUCCESS_COLOR = (0, 90, 0)   # bright green -- transfer done
+_DETECT_COLOR = (0, 90, 0)    # bright green -- one-shot "device detected" flash
+_EMPTY_COLOR = (0, 0, 90)     # bright blue  -- one-shot "source empty" hold
 
 
 def leds_for(progress: float, led_count: int) -> int:
@@ -79,7 +132,7 @@ def encode_pixels(pixels: list[tuple[int, int, int]]) -> list[int]:
 
 
 class Ws2812Backend(StatusIndicator):
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, start: bool = True) -> None:
         # spidev is only meaningfully present on the target boards.
         import spidev  # type: ignore
 
@@ -99,11 +152,20 @@ class Ws2812Backend(StatusIndicator):
         self._lock = threading.Lock()
         self._phase = State.READY
         self._progress = 0.0
+        self._fill = 0.0
+        self._fill_sticky = False                 # keep the gauge up until COPYING
+        self._fill_shown_at: float | None = None  # when the gauge first appeared
         self._last_pixels: list[tuple[int, int, int]] | None = None
+        self._transients = TransientQueue()
 
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        # ``start=False`` opens the hardware without the render loop -- used by the
+        # `leds-off` command, which then close()s to send a single OFF frame
+        # without first flashing the idle colour.
+        self._thread: threading.Thread | None = None
+        if start:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
 
     @staticmethod
     def _parse_device(path: str) -> tuple[int, int]:
@@ -122,11 +184,27 @@ class Ws2812Backend(StatusIndicator):
         with self._lock:
             self._progress = fraction
 
+    def set_fill(self, fraction: float, sticky: bool = False) -> None:
+        with self._lock:
+            self._fill = fraction
+            self._fill_sticky = sticky
+            # Restart the brief gauge window at the next detecting render.
+            self._fill_shown_at = None
+
+    def signal(self, event: Event) -> None:
+        # Momentary effects are queued; the render loop plays them in order and
+        # then resumes the steady state.
+        self._transients.push(event)
+
     def close(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1.0)
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
         try:
-            self._render([_OFF] * self._led_count)  # all LEDs off
+            # _render wraps the OFF frame in leading+trailing low resets, so it is
+            # both glitch-free (first LED really goes dark) and latched (displayed).
+            self._last_pixels = None  # force the OFF frame past the de-dup
+            self._render([_OFF] * self._led_count)
         except Exception:  # pragma: no cover
             pass
         try:
@@ -139,16 +217,50 @@ class Ws2812Backend(StatusIndicator):
     def _run(self) -> None:
         blink_on = True
         while not self._stop.is_set():
+            # A queued one-shot effect (detection blink / empty-source hold) takes
+            # over the strip until it finishes, then the steady state resumes.
+            if self._play_transient():
+                blink_on = True
+                continue
+
+            now = time.monotonic()
             with self._lock:
                 phase = self._phase
                 progress = self._progress
+                fill = self._fill
+                sticky = self._fill_sticky
+                fill_elapsed = 0.0
+                if phase is State.DETECTING:
+                    if self._fill_shown_at is None:
+                        self._fill_shown_at = now
+                    fill_elapsed = now - self._fill_shown_at
 
             if phase is State.COPYING:
-                count = leds_for(progress, self._led_count)
+                # At least one LED so the very start of the copy (0 %) is not a
+                # dark strip that reads as a pause before the bar grows.
+                count = max(1, leds_for(progress, self._led_count))
                 pixels = self._bar(count, _COPY_COLOR) if blink_on else self._all_off()
                 self._render(pixels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
+            elif phase is State.DETECTING:
+                if sticky or fill_gauge_visible(fill_elapsed):
+                    # White fill gauge: a brief readout, or held until the copy bar
+                    # takes over when sticky (a copy is imminent) -- no gap.
+                    self._render(self._fill_pixels(fill))
+                    blink_on = True
+                    time.sleep(0.05)
+                else:
+                    # Gauge done, still waiting -> a slow magenta pulse, clearly
+                    # distinct from the green idle (not just a dark strip).
+                    self._render(self._single(_DETECTING_COLOR) if blink_on else self._all_off())
+                    blink_on = not blink_on
+                    time.sleep(0.4)  # ~1.25 Hz
+            elif phase is State.ERROR:
+                # All LEDs blink red until the situation is cleared (devices removed).
+                self._render([_ERROR_COLOR] * self._led_count if blink_on else self._all_off())
+                blink_on = not blink_on
+                time.sleep(0.25)  # ~2 Hz alarm blink (distinct from the 10 Hz copy)
             elif phase is State.SUCCESS:
                 pixels = self._single(_SUCCESS_COLOR) if blink_on else self._all_off()
                 self._render(pixels)
@@ -159,6 +271,43 @@ class Ws2812Backend(StatusIndicator):
                 self._render(self._single(color) if color else self._all_off())
                 blink_on = True
                 time.sleep(0.05)
+
+    def _play_transient(self) -> bool:
+        """Render the active one-shot effect, if any.
+
+        Drains finished effects and renders the first live one for a single tick.
+        Returns True while an effect is playing (the caller then skips the
+        steady-state rendering), False when the queue is empty.
+        """
+        now = time.monotonic()
+        while True:
+            cur = self._transients.current(now)
+            if cur is None:
+                return False
+            event, elapsed = cur
+            lit, done = effect_phase(event, elapsed)
+            if done:
+                self._transients.finish()
+                continue  # try the next queued effect immediately
+            self._render(self._effect_pixels(event, lit, elapsed))
+            time.sleep(EFFECT_TICK_SECONDS)
+            return True
+
+    def _fill_pixels(self, fill: float) -> list[tuple[int, int, int]]:
+        """Steady white fill gauge; at least one LED lit so a near-empty volume
+        still reads as 'detected'."""
+        count = max(1, leds_for(fill, self._led_count))
+        return self._bar(count, _FILL_COLOR)
+
+    def _effect_pixels(self, event: Event, lit: bool, elapsed: float) -> list[tuple[int, int, int]]:
+        """Pixels for a one-shot effect (green flash / blue hold / startup wipe)."""
+        if event is Event.DEVICE_DETECTED:
+            return [_DETECT_COLOR if lit else _OFF] * self._led_count
+        if event is Event.SOURCE_EMPTY:
+            return [_EMPTY_COLOR if lit else _OFF] * self._led_count
+        if event is Event.SERVICE_STARTED:
+            return self._bar(startup_sweep_count(elapsed, self._led_count), _STARTUP_COLOR)
+        return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:
         return [_OFF] * self._led_count
@@ -177,4 +326,8 @@ class Ws2812Backend(StatusIndicator):
         if pixels == self._last_pixels:
             return
         self._last_pixels = list(pixels)
-        self._spi.xfer2(encode_pixels(pixels))
+        # Wrap the data in a low period before and after: the leading low absorbs
+        # the SPI start-of-transfer glitch that corrupts the first LED, the
+        # trailing low is the reset that latches the frame. See ``_RESET_BYTES``.
+        reset = [0] * _RESET_BYTES
+        self._spi.xfer2(reset + encode_pixels(pixels) + reset)

@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import Config, load_config
 from .naming import next_transfer_dir
 from .state import StationState, StatusHub, StorageInfo
-from .status import State, build_indicator
+from .status import Event, State, build_indicator
 from .transfer import (
     TransferError,
     check_free_space,
@@ -83,6 +83,7 @@ def perform_transfer(
     source_device: str | None = None,
     target_device: str | None = None,
     on_devices_refresh=None,
+    required: int | None = None,
 ) -> Path:
     """Perform a complete transfer.
 
@@ -94,7 +95,10 @@ def perform_transfer(
     promptly if either is unplugged mid-transfer, rather than waiting for the I/O
     timeout. ``on_devices_refresh`` (optional) is called to re-measure the devices
     for the web view: throttled during the copy (target filling up) and once after
-    the source has been cleared (source now empty).
+    the source has been cleared (source now empty). ``required`` is the source
+    media size in bytes; pass it to skip a re-scan when the caller already
+    measured it (the daemon does this during the pre-copy gauge hold so the copy
+    bar appears promptly).
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
@@ -108,7 +112,8 @@ def perform_transfer(
     src_label = source_name or "source"
     hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, "target"))
 
-    required = total_size(media_dir)
+    if required is None:
+        required = total_size(media_dir)
     check_free_space(target_root, required)
 
     dest = next_transfer_dir(target_root, source_name)
@@ -226,13 +231,20 @@ def _maybe_start_shutdown_button(config: Config):
 
 
 def run_daemon(config: Config) -> int:
-    """Event-driven daemon (Linux/Cubie only)."""
+    """Event-driven daemon (Linux/Cubie only).
+
+    ``systemctl stop`` terminates this process with SIGTERM (default action); the
+    LEDs are switched off afterwards by the unit's ExecStopPost (`leds-off`),
+    which is reliable regardless of how the process exits. An interactive Ctrl-C
+    raises KeyboardInterrupt and shuts down cleanly here.
+    """
     # Lazy import: devices needs pyudev, which is not available on Windows.
     from .devices import DeviceWatcher
 
     state = StationState()
     hub = StatusHub(state, build_indicator(config))
     hub.set_phase(State.READY)
+    hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     _maybe_start_web(state, config)
     button = _maybe_start_shutdown_button(config)
 
@@ -244,7 +256,7 @@ def run_daemon(config: Config) -> int:
     finally:
         if button is not None:
             button.close()
-        hub.close()
+        hub.close()  # switches every LED off
     return 0
 
 
@@ -265,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     sim.add_argument("source", help="Source folder (contains DCIM)")
     sim.add_argument("target", help="Target folder (SD root)")
     sim.add_argument("--source-name", default="SIM", help="Plain-text source name")
+    sub.add_parser(
+        "leds-off",
+        help="Switch the status LEDs off and exit (used by the systemd ExecStopPost)",
+    )
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -272,7 +288,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "simulate":
         return run_simulation(args, config)
+    if args.mode == "leds-off":
+        return run_leds_off(config)
     return run_daemon(config)
+
+
+def run_leds_off(config: Config) -> int:
+    """Drive the configured status LEDs off and exit.
+
+    Run by the systemd ``ExecStopPost`` after the service has stopped, in a fresh
+    process: it re-opens the hardware (free again once the daemon exited) and
+    sends a single "all off" frame. Decoupling the blackout from the daemon's own
+    shutdown makes it reliable regardless of how the daemon process ended (clean
+    exit, SIGTERM, or SIGKILL).
+    """
+    names = config.get("status", {}).get("backends", ["log"])
+    _LOG.info("leds-off: switching status backends off: %s", ", ".join(names))
+    # start=False: open the hardware without the render loop, so close() just sends
+    # one OFF frame -- no brief flash of the idle colour.
+    indicator = build_indicator(config, start=False)
+    indicator.close()  # close() forces an "all off" frame and releases the hardware
+    _LOG.info("leds-off: done")
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
