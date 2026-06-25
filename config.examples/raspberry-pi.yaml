@@ -42,8 +42,9 @@ status:
       error: 23           # BCM GPIO23 (red)
 
   # Alternative: addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI.
-  # Enable SPI (`dtparam=spi=on`) and wire DIN to MOSI (BCM GPIO10 / pin 19).
-  # Detecting = brief (~3 s) white fill gauge; copy = blue 1..N progress bar.
+  # Enable SPI (`sudo raspi-config` -> Interface Options -> SPI, or `dtparam=spi=on`
+  # in /boot/firmware/config.txt), then wire DIN to MOSI (BCM GPIO10 / pin 19). The
+  # node is /dev/spidev0.0. Detecting = brief (~3 s) white fill gauge.
   ws2812:
     device: /dev/spidev0.0
     led_count: 10        # number of LEDs in the strip (1-10)

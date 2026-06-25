@@ -85,14 +85,15 @@ devices are removed. Ready is a steady green first LED
 strip **blue** for a few seconds. When the **service starts** the strip wipes
 **cyan** once; when it **stops** all LEDs go off. Set `led_count`
 (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
-the config. On the **Raspberry Pi** enable SPI (`dtparam=spi=on`) and wire DIN to
-MOSI (**BCM GPIO10 / pin 19**). On the **Cubie A7S** enable the **`spidev on SPI1`**
-overlay (in `rsetup` -> Overlays; the backend needs a `/dev/spidev*` node, so this
-is required) and wire DIN to **SPI1-MOSI = PD12, header pin 19** -- only MOSI is
-used (MISO/CLK/CS stay unconnected). After enabling, find the bus with
-`ls /dev/spidev*` (typically `/dev/spidev1.0`) and set it as `device`. Note that
-PD12/PD13 (pins 19/21) are the same pins the Grove LED Bar uses, so drive **either**
-the Grove bar **or** a WS2812 strip on them, not both.
+the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
+Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
+MOSI (**BCM GPIO10 / pin 19**); the node is `/dev/spidev0.0`. On the **Cubie A7S**
+run **`sudo rsetup`** -> Overlays and enable **`spidev on SPI1`** (the backend needs
+a `/dev/spidev*` node), reboot, then wire DIN to **SPI1-MOSI = PD12, header pin 19**
+-- only MOSI is used (MISO/CLK/CS stay unconnected); the node is **`/dev/spidev1.0`**
+(confirm with `ls /dev/spidev*`). Note that PD12/PD13 (pins 19/21) are the same pins
+the Grove LED Bar uses, so drive **either** the Grove bar **or** a WS2812 strip on
+them, not both.
 
 ## Powering off safely
 

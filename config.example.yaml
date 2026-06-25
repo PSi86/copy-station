@@ -57,6 +57,12 @@ status:
     line: 37         # Cubie PB5 (pin 12) | Pi: BCM24
 
   # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
+  # Enable SPI first and point `device` at the resulting node:
+  #   Cubie A7S:     `sudo rsetup` -> Overlays -> enable `spidev on SPI1`,
+  #                  then device: /dev/spidev1.0 (DIN to SPI1-MOSI = PD12 / pin 19)
+  #   Raspberry Pi:  enable SPI (`sudo raspi-config` -> Interface Options -> SPI,
+  #                  or `dtparam=spi=on`), then device: /dev/spidev0.0
+  #                  (DIN to MOSI = BCM GPIO10 / pin 19)
   # New device: 2 green flashes, then a white fill gauge for ~3 s, then a magenta
   # pulse while waiting. Copy: blue 1..N progress bar (blinking). Error: all LEDs
   # blink red. Ready: first LED green. Service start: cyan wipe; stop: all off.
