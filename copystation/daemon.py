@@ -320,10 +320,13 @@ def run_leds_off(config: Config) -> int:
     shutdown makes it reliable regardless of how the daemon process ended (clean
     exit, SIGTERM, or SIGKILL).
     """
+    names = config.get("status", {}).get("backends", ["log"])
+    _LOG.info("leds-off: switching status backends off: %s", ", ".join(names))
     # start=False: open the hardware without the render loop, so close() just sends
     # one OFF frame -- no brief flash of the idle colour.
     indicator = build_indicator(config, start=False)
     indicator.close()  # close() forces an "all off" frame and releases the hardware
+    _LOG.info("leds-off: done")
     return 0
 
 

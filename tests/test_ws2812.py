@@ -165,12 +165,17 @@ def _stub_spidev(monkeypatch):
 def test_start_false_skips_render_thread_and_sends_one_off_frame(monkeypatch):
     # The `leds-off` path opens the hardware without the render loop, so close()
     # sends a single OFF frame with no preceding idle flash.
+    from copystation.status.ws2812_backend import _RESET_BYTES
+
     sent = _stub_spidev(monkeypatch)
     b = Ws2812Backend({"device": "/dev/spidev0.0", "led_count": 4}, start=False)
     assert b._thread is None
     b.close()  # must not raise (no thread to join) and must send exactly one frame
     assert len(sent) == 1
-    assert _decode(sent[0]) == [(0, 0, 0)] * 4
+    led_bytes = 4 * 9  # 9 encoded bytes per LED
+    assert _decode(sent[0][:led_bytes]) == [(0, 0, 0)] * 4  # all-off LED data
+    # ... followed by a low reset (raw zero bytes) so the OFF frame latches.
+    assert sent[0][led_bytes:] == [0] * _RESET_BYTES
 
 
 def test_run_leds_off_returns_zero(monkeypatch):

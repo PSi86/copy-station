@@ -57,9 +57,12 @@ from .effects import (
 # Number of LEDs the feature supports at most.
 MAX_LEDS = 10
 
-# WS2812 reset (latch) low time. The datasheet needs >50 us; WS2812B wants
-# ~280 us. 1 ms is a safe margin, used to latch the final OFF frame on close().
-_RESET_SECONDS = 0.001
+# WS2812 latch ("reset"): the data line must be held LOW for longer than the
+# reset time (>50 us original, ~280 us for WS2812B). Appending this many raw zero
+# bytes to a frame actively drives MOSI low for ~850 us (256 * 8 bits / 2.4 MHz),
+# which reliably latches it -- unlike a plain sleep, which depends on the (board-
+# specific) idle level of the line. Used to display the final OFF frame.
+_RESET_BYTES = 256
 
 # (R, G, B) of an unlit pixel.
 _OFF = (0, 0, 0)
@@ -196,14 +199,15 @@ class Ws2812Backend(StatusIndicator):
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         try:
-            self._last_pixels = None  # bypass the de-dup so OFF is really sent
-            self._render([_OFF] * self._led_count)  # all LEDs off
-            # A WS2812 only LATCHES shifted-in data after a reset -- the line held
-            # low for >50 us. During normal operation the inter-frame sleep
-            # provides that; here there is no following frame, so without this hold
-            # the OFF frame is shifted in but never displayed and the strip keeps
-            # showing the last status. Sleep keeps MOSI idle (low) long enough.
-            time.sleep(_RESET_SECONDS)
+            # Send an all-off frame immediately followed by a low "reset" so the
+            # WS2812 actually LATCHES (displays) it. During normal operation the
+            # inter-frame gap provides the reset; here there is no following frame,
+            # so without the trailing low the OFF frame is shifted in but never
+            # shown and the strip keeps the last colour. The raw zero bytes drive
+            # the line low deterministically (a plain sleep relies on the idle
+            # level, which varies by board).
+            self._last_pixels = None
+            self._spi.xfer2(encode_pixels([_OFF] * self._led_count) + [0] * _RESET_BYTES)
         except Exception:  # pragma: no cover
             pass
         try:
