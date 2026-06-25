@@ -230,31 +230,14 @@ def _maybe_start_shutdown_button(config: Config):
         return None
 
 
-def _install_stop_handlers(watcher) -> None:
-    """Stop the watcher cleanly on SIGTERM/SIGINT so the cleanup runs.
-
-    systemd stops the service with SIGTERM, whose default action kills the
-    process outright -- so the ``finally`` cleanup (which switches the LEDs off)
-    would never run. The handler just sets the watcher's stop flag; its
-    timeout-polled loop notices it and exits (the flag is checked in the main
-    thread, which is why the loop must not block indefinitely). No-op off the
-    main thread (e.g. under the tests).
-    """
-    import signal
-
-    def _handler(signum, frame):  # pragma: no cover - exercised only via a signal
-        _LOG.info("Signal %s received -- shutting down ...", signum)
-        watcher.request_stop()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            signal.signal(sig, _handler)
-        except (ValueError, OSError):  # pragma: no cover - not the main thread
-            pass
-
-
 def run_daemon(config: Config) -> int:
-    """Event-driven daemon (Linux/Cubie only)."""
+    """Event-driven daemon (Linux/Cubie only).
+
+    ``systemctl stop`` terminates this process with SIGTERM (default action); the
+    LEDs are switched off afterwards by the unit's ExecStopPost (`leds-off`),
+    which is reliable regardless of how the process exits. An interactive Ctrl-C
+    raises KeyboardInterrupt and shuts down cleanly here.
+    """
     # Lazy import: devices needs pyudev, which is not available on Windows.
     from .devices import DeviceWatcher
 
@@ -266,7 +249,6 @@ def run_daemon(config: Config) -> int:
     button = _maybe_start_shutdown_button(config)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
-    _install_stop_handlers(watcher)
     try:
         watcher.run()
     except KeyboardInterrupt:  # pragma: no cover

@@ -18,7 +18,6 @@ import logging
 import os
 import re
 import subprocess
-import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -266,9 +265,6 @@ class DeviceWatcher:
         # was already handled. It is cleared when a transfer starts and re-armed
         # once fewer than two eligible volumes remain (i.e. one was removed).
         self._armed = True
-        # Set by ``request_stop`` (from the daemon's SIGTERM handler) to break the
-        # run loop so the shutdown cleanup (LEDs off) runs.
-        self._stop = threading.Event()
         # ``_errored`` latches the error indication after a failed/aborted copy so
         # the red stays up until the user clears it by unplugging the device(s) --
         # otherwise the very USB-remove event that caused the abort would at once
@@ -302,31 +298,23 @@ class DeviceWatcher:
         # Devices may already be plugged in when the daemon starts.
         self._evaluate()
 
-        while not self._stop.is_set():
-            if not self._wait_for_change(monitor):
-                break  # stop requested (service stopping)
+        while True:
+            self._wait_for_change(monitor)
             self._settle(monitor)
             self._evaluate()
 
-    def request_stop(self) -> None:
-        """Ask the run loop to exit (called from the daemon's signal handler)."""
-        self._stop.set()
-
     # ----- internal helpers ----------------------------------------------------
 
-    def _wait_for_change(self, monitor) -> bool:
-        """Block until a block add/remove event; False if stop was requested.
+    def _wait_for_change(self, monitor) -> None:
+        """Block until any block add/remove event arrives.
 
-        Polls with a timeout so the main thread returns to Python regularly. With
-        an indefinite poll a SIGTERM (``systemctl stop``) delivered to another
-        thread would never get its handler run here, so the run loop would never
-        exit and the LEDs would never be switched off.
+        A clean ``systemctl stop`` terminates the process here (SIGTERM); the
+        LEDs are switched off afterwards by the unit's ExecStopPost. Ctrl-C raises
+        KeyboardInterrupt, which the daemon catches to shut down cleanly.
         """
-        while not self._stop.is_set():
-            device = monitor.poll(timeout=1.0)
-            if device is not None and device.action in ("add", "remove"):
-                return True
-        return False
+        for device in iter(monitor.poll, None):
+            if device.action in ("add", "remove"):
+                return
 
     def _settle(self, monitor) -> None:
         """Adaptive debounce: return once the bus is quiet, capped at settle_seconds.

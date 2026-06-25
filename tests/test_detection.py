@@ -1,5 +1,4 @@
 import os
-import threading
 from pathlib import Path
 
 import pytest
@@ -414,28 +413,6 @@ def test_settle_returns_immediately_when_quiet():
     mon = _FakeMonitor([])  # bus already quiet
     w._settle(mon)
     assert mon.polls == 1
-
-
-class _Evt:
-    def __init__(self, action):
-        self.action = action
-
-
-def test_wait_for_change_returns_true_on_relevant_event():
-    w = _watcher()
-    w._stop = threading.Event()
-    # A non-add/remove event is ignored; the loop waits for the next one.
-    mon = _FakeMonitor([_Evt("change"), _Evt("add")])
-    assert w._wait_for_change(mon) is True
-
-
-def test_request_stop_makes_wait_return_false():
-    # The SIGTERM handler calls request_stop(); the loop must then exit even with
-    # an event pending, so the shutdown cleanup (LEDs off) can run.
-    w = _watcher()
-    w._stop = threading.Event()
-    w.request_stop()
-    assert w._wait_for_change(_FakeMonitor([_Evt("add")])) is False
 
 
 def test_configured_label_matches_vid_pid():
