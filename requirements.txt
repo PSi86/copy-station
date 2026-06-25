@@ -4,6 +4,9 @@
 # system packages, NOT via pip:
 #   apt install rsync python3-pyudev python3-libgpiod python3-spidev
 #
+# The optional e-paper backend renders with Pillow; on the device it comes from
+# apt (python3-pil + fonts-dejavu-core, installed by scripts/install.sh).
+#
 # This list only covers the pure-Python dependencies that also run on the
 # Windows dev machine.
 
@@ -16,3 +19,4 @@ uvicorn>=0.20
 # Development/tests only:
 #   pytest>=6.0
 #   httpx>=0.24   (FastAPI TestClient)
+#   Pillow>=9.0   (e-paper layout/backend tests)

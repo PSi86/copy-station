@@ -49,6 +49,22 @@ status:
     device: /dev/spidev0.0
     led_count: 10        # number of LEDs in the strip (1-10)
 
+  # Alternative: SPI e-paper display (transfer bar + source/target storage +
+  # phase). Add `epaper` to `backends` to enable. Standard Waveshare->Pi wiring:
+  # DIN->BCM10, CLK->BCM11, CS->CE0/BCM8, DC->BCM25, RST->BCM17, BUSY->BCM24.
+  # The 2.13" HATs/HAT+ plug straight onto the 40-pin header (no wiring) and use
+  # these same pins plus power-enable on BCM18 (set via the preset's pwr: 18).
+  # Cannot share the SPI bus with the ws2812 above -- use one or the other.
+  epaper:
+    # waveshare-1.54 | waveshare-2.9 | waveshare-2.13 | waveshare-2.13-hatplus | weact-2.9
+    model: waveshare-2.13
+    device: /dev/spidev0.0
+    gpiochip: gpiochip0
+    dc: 25                  # BCM GPIO25
+    rst: 17                 # BCM GPIO17
+    busy: 24                # BCM GPIO24
+    # pwr: 18               # BCM GPIO18 -- preset default for the 2.13 HATs
+
   buzzer:
     gpiochip: gpiochip0
     line: 24              # BCM GPIO24

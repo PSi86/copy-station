@@ -33,7 +33,7 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   from a still-connected reader. Either way the source is never deleted unless
   verification succeeded.
 * **Status:** `Ready / Detecting / Copying / Error` via interchangeable backends
-  (log, LEDs, buzzer, WS2812, Grove LED Bar -- freely combinable). On the bar
+  (log, LEDs, buzzer, WS2812, Grove LED Bar, e-paper -- freely combinable). On the bar
   backends each newly detected volume blinks green **twice** and then shows a
   **white gauge of how full that volume is for ~3 s** (then a slow **magenta**
   pulse while it waits -- clearly not the green idle); a connected source with
@@ -94,6 +94,81 @@ a `/dev/spidev*` node), reboot, then wire DIN to **SPI1-MOSI = PD12, header pin 
 (confirm with `ls /dev/spidev*`). Note that PD12/PD13 (pins 19/21) are the same pins
 the Grove LED Bar uses, so drive **either** the Grove bar **or** a WS2812 strip on
 them, not both.
+
+## E-Paper display (optional)
+
+Add `epaper` to `status.backends` to drive a black/white SPI e-paper panel that
+shows the **transfer progress bar**, the **used/free storage of source and
+target** and the **current phase** (ready / detecting / copying / error / done) --
+essentially a small physical mirror of the web UI's status. The layout adapts to
+the panel's shape: a portrait stack on the square 1.54", a two-column landscape on
+the wider 2.9".
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/epaper-1.54-copying.png" width="200" alt="1.54 inch panel, copying"><br><sub>1.54″ — copying</sub></td>
+    <td align="center"><img src="docs/images/epaper-2.9-copying.png" width="290" alt="2.9 inch panel, copying"><br><sub>2.9″ — copying</sub></td>
+    <td align="center"><img src="docs/images/epaper-2.13-copying.png" width="290" alt="2.13 inch HAT, copying"><br><sub>2.13″ HAT — copying</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/epaper-1.54-detecting.png" width="200" alt="1.54 inch panel, detecting"><br><sub>1.54″ — detecting</sub></td>
+    <td align="center"><img src="docs/images/epaper-1.54-error.png" width="200" alt="1.54 inch panel, error"><br><sub>1.54″ — error</sub></td>
+    <td align="center"><img src="docs/images/epaper-1.54-stopped.png" width="200" alt="1.54 inch panel, powered off"><br><sub>1.54″ — power off</sub></td>
+  </tr>
+</table>
+
+<sub>Rendered from the actual layout code by
+<a href="scripts/render_epaper_previews.py"><code>scripts/render_epaper_previews.py</code></a>;
+re-run it after changing the layout.</sub>
+
+Pick the panel with a one-word `model` (it fills the controller, resolution and a
+sensible default rotation); every field stays overridable:
+
+| `model` | Panel | Resolution | Controller |
+|---------|-------|-----------|------------|
+| `waveshare-1.54` | Waveshare 1.54" | 200×200 | SSD1681 |
+| `waveshare-2.9` | Waveshare 2.9" | 296×128 | SSD1680 |
+| `waveshare-2.13` | Waveshare 2.13" HAT (V4) | 250×122 | SSD1680 |
+| `waveshare-2.13-hatplus` | Waveshare 2.13" HAT+ (Pi 5) | 250×122 | SSD1680 |
+| `weact-2.9` | WeAct Studio 2.9" BW | 296×128 | SSD1680 |
+| `weact-3.7` | WeAct Studio 3.7" BW | 480×280 | SSD1677 (**roadmap**, not yet implemented) |
+
+The **2.13" HAT / HAT+** plug directly onto the Pi's 40-pin header (no manual
+wiring) and use the standard pins below plus a panel **power-enable on BCM18** --
+their presets default `pwr: 18`, so just set `model` and you are done.
+
+**Refresh behaviour.** E-paper must not full-refresh too often (it flashes for
+~1–2 s), but partial updates leave faint ghosts. So the panel grows the progress
+bar with fast **partial** refreshes (about every `partial_min_interval`, default
+2 s) while content only grows, and does a **full** refresh when the structure
+changes -- a phase change, **a device disappears** (a filled area must go truly
+white again), or after `full_refresh_every` partials (default 20) to wipe
+accumulated ghosting. A freshly detected device drawn onto a blank area is a clean
+partial. When the service stops, the panel is left showing a clean
+`Copy_Station` / version / `Power off` frame and then deep-sleeps.
+
+**Wiring (standard Waveshare module → Raspberry Pi, BCM == line offset):**
+
+| Module | Pi pin | Module | Pi pin |
+|--------|--------|--------|--------|
+| VCC → 3V3 | 1 | DC → BCM25 | 22 |
+| GND → GND | 6 | RST → BCM17 | 11 |
+| DIN → MOSI/BCM10 | 19 | BUSY → BCM24 | 18 |
+| CLK → SCLK/BCM11 | 23 | CS → CE0/BCM8 | 24 |
+
+Enable SPI exactly as for the WS2812 above (`/dev/spidev0.0` on the Pi,
+`/dev/spidev1.0` on the Cubie A7S; set `dc`/`rst`/`busy` to free Allwinner offsets
+from `gpioinfo` on the Cubie). The renderer uses **Pillow** (`python3-pil` +
+`fonts-dejavu-core`, installed by `scripts/install.sh`).
+
+> **Do not share the SPI bus with a WS2812 strip.** The ws2812 backend abuses the
+> MOSI line with strict timing and no chip-select, so it cannot coexist with the
+> e-paper on the same bus -- drive **either** a strip **or** an e-paper panel.
+
+The exact panel init/partial waveform and BUSY polarity may need confirming on
+your specific module (`busy_active_high`, `rotation`/`mirror`, `cs` for a panel
+that needs a GPIO chip-select). See [config.example.yaml](config.example.yaml)
+for the full `epaper` block.
 
 ## Powering off safely
 

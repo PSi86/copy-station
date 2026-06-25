@@ -1,0 +1,92 @@
+from copystation.status.epaper.model import StorageView, ViewModel
+from copystation.status.epaper.policy import Decision, decide
+
+
+def _vm(
+    *,
+    phase="copying",
+    percent=50,
+    src=(12, 32),
+    tgt=(120, 256),
+    devices=2,
+    error="",
+):
+    def storage(t):
+        used, cap = t
+        return StorageView(label="x", used=used, capacity=cap)
+
+    return ViewModel(
+        status_text=phase.title(),
+        phase=phase,
+        percent=percent,
+        progress_fraction=percent / 100.0,
+        show_progress=phase in ("copying", "success"),
+        source=storage(src),
+        target=storage(tgt),
+        device_count=devices,
+        speed_text="1 MB/s",
+        eta_text="0:10",
+        error_text=error,
+        version="0.1.0",
+    )
+
+
+_KW = dict(
+    partials_since_full=0,
+    seconds_since_last=999.0,
+    full_refresh_every=20,
+    partial_min_interval=2.0,
+)
+
+
+def test_first_frame_is_full():
+    assert decide(None, _vm(), **_KW) is Decision.FULL
+
+
+def test_phase_change_is_full():
+    prev = _vm(phase="detecting", percent=0)
+    assert decide(prev, _vm(phase="copying", percent=1), **_KW) is Decision.FULL
+
+
+def test_device_removed_is_full():
+    prev = _vm(devices=2)
+    assert decide(prev, _vm(devices=1), **_KW) is Decision.FULL
+
+
+def test_progress_reset_is_full():
+    prev = _vm(percent=80)
+    assert decide(prev, _vm(percent=10), **_KW) is Decision.FULL
+
+
+def test_storage_shrink_is_full():
+    prev = _vm(src=(20, 32))
+    assert decide(prev, _vm(src=(12, 32)), **_KW) is Decision.FULL
+
+
+def test_no_change_is_skip():
+    prev = _vm(percent=50)
+    assert decide(prev, _vm(percent=50), **_KW) is Decision.SKIP
+
+
+def test_additive_but_throttled_is_skip():
+    prev = _vm(percent=50)
+    kw = {**_KW, "seconds_since_last": 0.5}  # below the 2 s interval
+    assert decide(prev, _vm(percent=55), **kw) is Decision.SKIP
+
+
+def test_additive_after_interval_is_partial():
+    prev = _vm(percent=50)
+    assert decide(prev, _vm(percent=55), **_KW) is Decision.PARTIAL
+
+
+def test_budget_exhausted_forces_full():
+    prev = _vm(percent=50)
+    kw = {**_KW, "partials_since_full": 20}
+    assert decide(prev, _vm(percent=55), **kw) is Decision.FULL
+
+
+def test_clear_beats_budget_and_throttle():
+    # A required clear (device removed) is a full refresh even when throttled.
+    prev = _vm(devices=2)
+    kw = {**_KW, "seconds_since_last": 0.0}
+    assert decide(prev, _vm(devices=1), **kw) is Decision.FULL
