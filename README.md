@@ -104,6 +104,23 @@ essentially a small physical mirror of the web UI's status. The layout adapts to
 the panel's shape: a portrait stack on the square 1.54", a two-column landscape on
 the wider 2.9".
 
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/epaper-1.54-copying.png" width="200" alt="1.54 inch panel, copying"><br><sub>1.54″ — copying</sub></td>
+    <td align="center"><img src="docs/images/epaper-2.9-copying.png" width="290" alt="2.9 inch panel, copying"><br><sub>2.9″ — copying</sub></td>
+    <td align="center"><img src="docs/images/epaper-2.13-copying.png" width="290" alt="2.13 inch HAT, copying"><br><sub>2.13″ HAT — copying</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/epaper-1.54-detecting.png" width="200" alt="1.54 inch panel, detecting"><br><sub>1.54″ — detecting</sub></td>
+    <td align="center"><img src="docs/images/epaper-1.54-error.png" width="200" alt="1.54 inch panel, error"><br><sub>1.54″ — error</sub></td>
+    <td align="center"><img src="docs/images/epaper-1.54-stopped.png" width="200" alt="1.54 inch panel, powered off"><br><sub>1.54″ — power off</sub></td>
+  </tr>
+</table>
+
+<sub>Rendered from the actual layout code by
+<a href="scripts/render_epaper_previews.py"><code>scripts/render_epaper_previews.py</code></a>;
+re-run it after changing the layout.</sub>
+
 Pick the panel with a one-word `model` (it fills the controller, resolution and a
 sensible default rotation); every field stays overridable:
 

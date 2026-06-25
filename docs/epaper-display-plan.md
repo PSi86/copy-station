@@ -162,7 +162,8 @@ optimisation.
 ## 6. Layout (adapts to aspect ratio)
 
 `layout.render()` draws with Pillow into a 1bpp image, then rotates to the panel.
-Two designs chosen by aspect ratio (see the mockup in the PR/chat):
+Two designs chosen by aspect ratio (rendered samples live in `docs/images/`, see
+the README gallery):
 
 * **Square (1.54″, 200×200), portrait stack:** title `Copy_Station` + version;
   big status word; transfer bar + %; source bar + `used/total`; target bar +
