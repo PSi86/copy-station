@@ -24,6 +24,16 @@ PRESETS: dict[str, dict[str, Any]] = {
     "waveshare-2.9": {"controller": "ssd1680", "width": 128, "height": 296, "rotation": 90},
     # WeAct Studio 2.9" black/white -- same SSD1680 panel as the Waveshare 2.9".
     "weact-2.9": {"controller": "ssd1680", "width": 128, "height": 296, "rotation": 90},
+    # Waveshare 2.13" e-Paper HAT (V4) -- native 122x250, SSD1680, landscape. The
+    # HAT gates panel power on BCM18, so the preset defaults `pwr` to 18.
+    "waveshare-2.13": {
+        "controller": "ssd1680", "width": 122, "height": 250, "rotation": 90, "pwr": 18,
+    },
+    # Waveshare 2.13" e-Paper HAT+ -- same SSD1680 panel/resolution in the HAT+
+    # (Pi 5) form factor; electrically identical, also powered via BCM18.
+    "waveshare-2.13-hatplus": {
+        "controller": "ssd1680", "width": 122, "height": 250, "rotation": 90, "pwr": 18,
+    },
     # WeAct Studio 3.7" black/white -- 280x480, SSD1677. ROADMAP: the ssd1677
     # driver is not implemented yet, so this preset is reserved, not functional.
     "weact-3.7": {"controller": "ssd1677", "width": 280, "height": 480, "rotation": 90},
@@ -68,6 +78,13 @@ def resolve_panel(cfg: dict) -> dict:
             resolved[field] = 0
         else:
             resolved[field] = None
+
+    # pwr: an explicit pin wins; otherwise the preset's default (the 2.13 HATs
+    # gate panel power on BCM18); otherwise whatever cfg held (None = no PWR pin).
+    if cfg.get("pwr") is not None:
+        resolved["pwr"] = cfg["pwr"]
+    elif preset.get("pwr") is not None:
+        resolved["pwr"] = preset["pwr"]
 
     missing = [f for f in ("controller", "width", "height") if resolved.get(f) is None]
     if missing:

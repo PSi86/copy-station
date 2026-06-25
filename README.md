@@ -111,8 +111,14 @@ sensible default rotation); every field stays overridable:
 |---------|-------|-----------|------------|
 | `waveshare-1.54` | Waveshare 1.54" | 200×200 | SSD1681 |
 | `waveshare-2.9` | Waveshare 2.9" | 296×128 | SSD1680 |
+| `waveshare-2.13` | Waveshare 2.13" HAT (V4) | 250×122 | SSD1680 |
+| `waveshare-2.13-hatplus` | Waveshare 2.13" HAT+ (Pi 5) | 250×122 | SSD1680 |
 | `weact-2.9` | WeAct Studio 2.9" BW | 296×128 | SSD1680 |
 | `weact-3.7` | WeAct Studio 3.7" BW | 480×280 | SSD1677 (**roadmap**, not yet implemented) |
+
+The **2.13" HAT / HAT+** plug directly onto the Pi's 40-pin header (no manual
+wiring) and use the standard pins below plus a panel **power-enable on BCM18** --
+their presets default `pwr: 18`, so just set `model` and you are done.
 
 **Refresh behaviour.** E-paper must not full-refresh too often (it flashes for
 ~1–2 s), but partial updates leave faint ghosts. So the panel grows the progress

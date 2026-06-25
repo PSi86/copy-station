@@ -95,7 +95,9 @@ DEFAULTS: dict[str, Any] = {
         # Raspberry Pi (BCM == line offset); on the Cubie A7S point ``device`` at
         # /dev/spidev1.0 and use the Allwinner offsets (see config.examples).
         "epaper": {
-            "model": None,            # waveshare-1.54 | waveshare-2.9 | weact-2.9 | weact-3.7
+            # waveshare-1.54 | waveshare-2.9 | waveshare-2.13 | waveshare-2.13-hatplus
+            # | weact-2.9 | weact-3.7
+            "model": None,
             "controller": None,       # ssd1680 | ssd1681 | ssd1677 (overrides the preset)
             "width": None,            # controller-native width in px (datasheet)
             "height": None,           # controller-native height in px (datasheet)

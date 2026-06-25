@@ -87,10 +87,13 @@ status:
   #
   # Pick the panel with `model` (fills controller + resolution + a default
   # rotation); override any field below as needed:
-  #   waveshare-1.54  -- 200x200, SSD1681 (primary)
-  #   waveshare-2.9   -- 296x128, SSD1680
-  #   weact-2.9       -- 296x128, SSD1680 (WeAct Studio, same driver)
-  #   weact-3.7       -- 480x280, SSD1677 (ROADMAP -- not implemented yet)
+  #   waveshare-1.54          -- 200x200, SSD1681 (primary)
+  #   waveshare-2.9           -- 296x128, SSD1680
+  #   waveshare-2.13          -- 250x122, SSD1680 (Raspberry Pi HAT, V4)
+  #   waveshare-2.13-hatplus  -- 250x122, SSD1680 (Raspberry Pi HAT+, Pi 5)
+  #   weact-2.9               -- 296x128, SSD1680 (WeAct Studio, same driver)
+  #   weact-3.7               -- 480x280, SSD1677 (ROADMAP -- not implemented yet)
+  # The 2.13" HATs gate panel power on BCM18, so their presets default `pwr: 18`.
   #
   # Wiring (standard Waveshare module -> Raspberry Pi, BCM == line offset):
   #   VCC->3V3  GND->GND  DIN->MOSI/BCM10  CLK->SCLK/BCM11  CS->CE0/BCM8 (hardware)

@@ -24,6 +24,26 @@ def test_2_9_preset_defaults_to_landscape_rotation():
     assert (weact["controller"], weact["width"], weact["height"]) == ("ssd1680", 128, 296)
 
 
+def test_2_13_hat_presets_share_ssd1680_and_default_pwr():
+    for model in ("waveshare-2.13", "waveshare-2.13-hatplus"):
+        panel = resolve_panel({"model": model})
+        assert panel["controller"] == "ssd1680"
+        assert (panel["width"], panel["height"]) == (122, 250)
+        assert panel["rotation"] == 90
+        assert panel["pwr"] == 18  # the 2.13 HATs gate panel power on BCM18
+
+
+def test_explicit_pwr_overrides_preset_default():
+    panel = resolve_panel({"model": "waveshare-2.13", "pwr": 6})
+    assert panel["pwr"] == 6
+
+
+def test_preset_without_pwr_leaves_it_unset():
+    # A panel preset that does not gate power must not force a PWR pin.
+    assert resolve_panel({"model": "waveshare-1.54"}).get("pwr") is None
+    assert resolve_panel({"model": "waveshare-1.54", "pwr": None}).get("pwr") is None
+
+
 def test_explicit_value_overrides_preset():
     panel = resolve_panel({"model": "waveshare-1.54", "width": 250, "rotation": 180})
     assert panel["width"] == 250          # explicit wins

@@ -28,10 +28,17 @@ Roadmap (not this PR, but the abstraction reserves the slot):
 
 | Panel | Resolution | Controller | Driver class | Partial | Status |
 |-------|-----------|------------|--------------|---------|--------|
-| Waveshare 1.54″ V2 | 200×200 | SSD1681 | `ssd168x` | yes | this PR (primary) |
-| Waveshare 2.9″ V2 | 296×128 | SSD1680 | `ssd168x` | yes | this PR |
-| WeAct 2.9″ BW | 296×128 | SSD1680 | `ssd168x` | yes | this PR (same driver) |
+| Waveshare 1.54″ V2 | 200×200 | SSD1681 | `ssd168x` | yes | done (primary) |
+| Waveshare 2.9″ V2 | 296×128 | SSD1680 | `ssd168x` | yes | done |
+| Waveshare 2.13″ HAT (V4) | 250×122 | SSD1680 | `ssd168x` | yes | done (preset only) |
+| Waveshare 2.13″ HAT+ | 250×122 | SSD1680 | `ssd168x` | yes | done (preset only) |
+| WeAct 2.9″ BW | 296×128 | SSD1680 | `ssd168x` | yes | done (same driver) |
 | WeAct 3.7″ BW | 480×280 | SSD1677 | `ssd1677` | yes | roadmap |
+
+The 2.13″ HAT / HAT+ are native 122×250 (note: 122 is not a multiple of 8 -- the
+1px-per-pixel pack pads each row to 16 bytes, which the controller's RAM X window
+already expects) and gate panel power on BCM18, so their presets default
+`pwr: 18`.
 
 SSD1680 and SSD1681 share the command set (driver output control `0x01`, data
 entry `0x11`, RAM windows `0x44/0x45`, counters `0x4E/0x4F`, write RAM `0x24`,

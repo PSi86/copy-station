@@ -12,6 +12,7 @@ from copystation.status.epaper import EpaperBackend  # noqa: E402
 
 class _FakeDriver:
     def __init__(self, panel):
+        self.panel = panel
         self.width = int(panel["width"])
         self.height = int(panel["height"])
         self.bytes_per_row = (self.width + 7) // 8
@@ -89,6 +90,20 @@ def test_rotated_panel_packs_to_native_buffer_size():
     be = EpaperBackend(cfg, state=state, start=False, driver_factory=_FakeDriver)
     be._tick()  # FULL
     expected = (128 // 8) * 296  # bytes_per_row * height = 4736
+    assert len(be._driver.full[0]) == expected
+
+
+def test_2_13_hat_packs_non_byte_aligned_width_and_sets_pwr():
+    # The 2.13" HAT is native 122x250 (122 is not a multiple of 8) and powered
+    # via BCM18. The packed frame must still match the native RAM size.
+    cfg = copy.deepcopy(DEFAULTS["status"]["epaper"])
+    cfg["model"] = "waveshare-2.13"
+    state = StationState()
+    state.begin_transfer("t", 100)
+    be = EpaperBackend(cfg, state=state, start=False, driver_factory=_FakeDriver)
+    assert be._driver.panel["pwr"] == 18
+    be._tick()  # FULL
+    expected = ((122 + 7) // 8) * 250  # 16 bytes/row * 250 = 4000
     assert len(be._driver.full[0]) == expected
 
 
