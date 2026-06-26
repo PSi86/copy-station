@@ -36,28 +36,71 @@ AbortCheck = Callable[[], Optional[str]]
 _ABORT_POLL_SECONDS = 0.5
 
 
+# Where the kernel exposes each block device's capacity (overridable in tests).
+_SYS_BLOCK = "/sys/block"
+
+
 def volume_alive(device_node: Optional[str], mountpoint=None) -> bool:
-    """True while a volume is still really present and answering I/O.
+    """True while a volume is still really present.
 
-    Checking the device node alone is NOT enough -- pulling a USB target is not
-    always visible as the node vanishing (a card pulled from a still-connected
-    reader, or a surprise-removed device, can leave a STALE node and a stale
-    mount). Meanwhile rsync happily buffers writes into the page cache, so a copy
-    can "finish" while the data never reached any device. So we ALSO probe the
-    mountpoint: once the backing device is gone, ``statvfs`` on the (now stale)
-    mount raises. Together these catch a removed source or target promptly.
+    Two failure modes are covered, both passively (no I/O to the device, no
+    writes, no card wear):
 
-    ``statvfs`` is POSIX-only; on the Windows dev machine it is absent and only
-    the node check applies (the daemon path is Linux-only anyway).
+    * **Whole device unplugged** (e.g. the reader, or the source O4): the device
+      node disappears -> ``os.path.exists`` catches it.
+    * **A removable card pulled from a reader** that does not report a clean
+      removal (e.g. one that is also a hub): the node and mount LINGER and
+      ``statvfs`` keeps answering from cache, BUT the kernel zeroes the backing
+      disk's capacity (``/sys/block/<disk>/size`` -> 0) within ~2 s of the next
+      I/O -- and during a copy rsync provides that I/O. :func:`_disk_capacity_zero`
+      reads that sysfs value. This is the signal that actually catches a pulled
+      microSD mid-copy (confirmed on the Cubie: ``detected capacity change ... to
+      0``).
+
+    ``statvfs`` is kept as a cheap best-effort extra (it errors on some stale
+    mounts) and is POSIX-only -- absent on the Windows dev machine.
     """
-    if device_node and not os.path.exists(device_node):
-        return False
+    if device_node:
+        if not os.path.exists(device_node):
+            return False
+        if _disk_capacity_zero(device_node):
+            return False
     if mountpoint is not None and hasattr(os, "statvfs"):
         try:
             os.statvfs(mountpoint)
         except OSError:
             return False
     return True
+
+
+def _disk_name(device_node: str) -> str:
+    """Backing whole-disk name for a device node: ``/dev/sdb1`` -> ``sdb``,
+    ``/dev/mmcblk0p1`` -> ``mmcblk0``, ``/dev/sdc`` (whole disk) -> ``sdc``."""
+    name = os.path.basename(device_node.rstrip("/"))
+    m = re.match(r"^(.*\d)p\d+$", name)        # mmcblk0p1 / nvme0n1p1 -> strip pN
+    if m:
+        return m.group(1)
+    m = re.match(r"^([a-z]+)\d+$", name)       # sdb1 -> sdb (only sd/hd/vd style)
+    if m:
+        return m.group(1)
+    return name                                # sdc / nvme0n1 (whole disk)
+
+
+def _disk_capacity_zero(device_node: str) -> bool:
+    """True when the kernel has zeroed the backing disk's capacity.
+
+    ``/sys/block/<disk>/size`` is in 512-byte sectors; the kernel sets it to 0
+    within ~2 s of a removable card being pulled, even while the filesystem is
+    still mounted -- this is what catches a microSD pulled from a reader that does
+    not report a clean removal. Pure sysfs read, no I/O to the device. If sysfs is
+    unreadable (e.g. the Windows dev machine) it returns False and the node check
+    decides.
+    """
+    try:
+        with open(os.path.join(_SYS_BLOCK, _disk_name(device_node), "size")) as fh:
+            return fh.read().strip() == "0"
+    except OSError:
+        return False
 
 
 class TransferError(Exception):

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from copystation.config import Config
@@ -194,12 +196,47 @@ def test_volume_alive_ok_when_node_and_fs_answer(monkeypatch, tmp_path):
     assert transfer.volume_alive(str(tmp_path), tmp_path) is True
 
 
-def test_abort_check_fires_on_dead_target_mount(monkeypatch, tmp_path):
-    # Regression: a pulled target whose device node lingers (card-in-reader /
-    # stale mount) must still be caught -- the mount stops answering even while
-    # rsync buffers writes into the page cache.
-    import os
+def test_disk_name_derivation():
+    from copystation.transfer import _disk_name
 
+    assert _disk_name("/dev/sdb1") == "sdb"
+    assert _disk_name("/dev/sdc") == "sdc"          # whole disk, no partition
+    assert _disk_name("/dev/mmcblk0p1") == "mmcblk0"
+    assert _disk_name("/dev/nvme0n1p1") == "nvme0n1"
+
+
+def _fake_sysblock(monkeypatch, tmp_path, sizes):
+    """Build a fake /sys/block/<disk>/size tree and point transfer at it."""
+    import copystation.transfer as transfer
+
+    root = tmp_path / "sysblock"
+    for disk, value in sizes.items():
+        (root / disk).mkdir(parents=True)
+        (root / disk / "size").write_text(value)
+    monkeypatch.setattr(transfer, "_SYS_BLOCK", str(root))
+    return transfer
+
+
+def test_disk_capacity_zero_reads_whole_disk_size(monkeypatch, tmp_path):
+    transfer = _fake_sysblock(monkeypatch, tmp_path, {"sdb": "0", "sdc": "249737216"})
+    assert transfer._disk_capacity_zero("/dev/sdb1") is True    # partition -> sdb -> 0
+    assert transfer._disk_capacity_zero("/dev/sdc") is False     # whole disk, nonzero
+    assert transfer._disk_capacity_zero("/dev/sdd1") is False    # no sysfs entry -> unknown
+
+
+def test_volume_alive_uses_the_capacity_check(monkeypatch, tmp_path):
+    import copystation.transfer as transfer
+
+    # Node exists; the kernel reports the backing disk's capacity as zero -> gone.
+    monkeypatch.setattr(transfer, "_disk_capacity_zero", lambda node: True)
+    assert transfer.volume_alive(str(tmp_path), tmp_path) is False
+    monkeypatch.setattr(transfer, "_disk_capacity_zero", lambda node: False)
+    assert transfer.volume_alive(str(tmp_path), tmp_path) is True
+
+
+def test_abort_check_fires_on_zeroed_target_disk(monkeypatch, tmp_path):
+    # Regression (Cubie + card-reader-is-a-hub): a pulled microSD whose node and
+    # mount linger is caught because the kernel zeroes the backing disk's capacity.
     import copystation.transfer as transfer
     from copystation.daemon import _device_abort_check
 
@@ -208,20 +245,16 @@ def test_abort_check_fires_on_dead_target_mount(monkeypatch, tmp_path):
     tgt = tmp_path / "tgt"
     tgt.mkdir()
 
-    def _statvfs(path):
-        if os.fspath(path) == os.fspath(tgt):
-            raise OSError("Input/output error")
-        return None
-
-    monkeypatch.setattr(transfer.os, "statvfs", _statvfs, raising=False)
-    # Both device nodes still resolve (real dirs); only the target's fs is dead.
+    # Only the target's backing disk reads capacity 0.
+    monkeypatch.setattr(
+        transfer, "_disk_capacity_zero",
+        lambda node: os.path.basename(str(node)) == "tgt",
+    )
     msg = _device_abort_check(str(src), str(tgt), src, tgt)()
     assert msg and "Target" in msg
 
 
-def test_perform_transfer_dead_target_mount_keeps_source(monkeypatch, tmp_path):
-    import os
-
+def test_perform_transfer_zeroed_target_keeps_source(monkeypatch, tmp_path):
     import copystation.transfer as transfer
 
     src = tmp_path / "camera"
@@ -229,13 +262,11 @@ def test_perform_transfer_dead_target_mount_keeps_source(monkeypatch, tmp_path):
     target = tmp_path / "sd"
     target.mkdir()
 
-    def _statvfs(path):
-        if os.fspath(path) == os.fspath(target):
-            raise OSError("Input/output error")
-        return None
-
-    monkeypatch.setattr(transfer.os, "statvfs", _statvfs, raising=False)
-    # The target device node still exists (real dir), but its filesystem is gone.
+    # The target node still resolves, but the kernel zeroed its disk capacity.
+    monkeypatch.setattr(
+        transfer, "_disk_capacity_zero",
+        lambda node: os.path.basename(str(node)) == "sd",
+    )
     with pytest.raises(SourceVanishedError, match="Target"):
         perform_transfer(
             src, target, "DJI_O4", _hub(), _config(), target_device=str(target)

@@ -153,8 +153,10 @@ def test_fill_fraction_clamps_and_handles_zero_capacity():
 
 
 def _probe_with_node(name, node):
+    # Mount on the node's parent (a real, existing dir in the tests) so the
+    # liveness checks in _both_present don't spuriously fail.
     return Probe(
-        sys_name=name, device_node=str(node), mountpoint=Path("/x"),
+        sys_name=name, device_node=str(node), mountpoint=Path(node).parent,
         has_dcim=True, matched_source=True, capacity=GB, free=0, name=name, has_media=True,
     )
 

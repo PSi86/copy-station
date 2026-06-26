@@ -525,8 +525,8 @@ class DeviceWatcher:
 
     @staticmethod
     def _both_present(source: Probe, target: Probe) -> bool:
-        # Node existence AND mount liveness, so a stale target (node still there
-        # but the filesystem gone) is caught during the pre-copy hold too.
+        # Node existence AND the kernel's backing-disk capacity, so a pulled card
+        # whose node lingers is caught during the pre-copy hold too -- passively.
         return (
             volume_alive(source.device_node, source.mountpoint)
             and volume_alive(target.device_node, target.mountpoint)
