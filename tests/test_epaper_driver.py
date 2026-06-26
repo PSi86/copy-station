@@ -1,3 +1,8 @@
+import sys
+import types
+
+import pytest
+
 from copystation.status.epaper.drivers.ssd168x import (
     _UPDATE_FULL,
     _UPDATE_PARTIAL,
@@ -114,3 +119,43 @@ def test_sleep_sends_deep_sleep():
     drv, spi, _ = _driver()
     drv.sleep()
     assert _followed_by(spi.xfers, 0x10, 0x01)
+
+
+def test_open_driver_wraps_gpio_errno_517_with_actionable_hint(monkeypatch):
+    # A bare "[Errno 517]" from libgpiod must become an actionable message that
+    # names the offending line/role and explains offsets-vs-pin-numbers.
+    fake = types.ModuleType("spidev")
+
+    class _Spi:
+        max_speed_hz = 0
+        mode = 0
+
+        def open(self, *a):
+            pass
+
+        def close(self):
+            pass
+
+    fake.SpiDev = _Spi
+    monkeypatch.setitem(sys.modules, "spidev", fake)
+
+    import copystation.status.gpio as gpio
+
+    def _boom(*a, **k):
+        raise OSError(517, "Unknown error 517")
+
+    monkeypatch.setattr(gpio, "open_output_lines", _boom)
+
+    from copystation.status.epaper.drivers import open_driver
+
+    panel = {
+        "controller": "ssd1680", "width": 128, "height": 296,
+        "device": "/dev/spidev1.0", "gpiochip": "gpiochip0",
+        "dc": 26, "rst": 18, "busy": 16,
+    }
+    with pytest.raises(RuntimeError) as excinfo:
+        open_driver(panel)
+    msg = str(excinfo.value)
+    assert "517" in msg
+    assert "dc" in msg and "rst" in msg            # the offending roles are named
+    assert "offset" in msg.lower()                  # the offsets-vs-pins hint fires
