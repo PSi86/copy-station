@@ -138,17 +138,12 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y += _line_height(label_f) + 2
         _bar(draw, m, y, width - 2 * m, max(10, height // 18), view.progress_fraction)
         y += max(10, height // 18) + 8
-    if view.source.present or view.target.present:
-        # A transfer is set up (copying / success / error mid-copy): show the
-        # assigned source/target storage.
-        y = _draw_storage(draw, m, right, y, view.source, "Source", view, label_f, small_f)
-        y = _draw_storage(draw, m, right, y, view.target, "Target", view, label_f, small_f)
-    else:
-        # No roles assigned yet (detecting): show the detected volume(s), so a
-        # freshly plugged-in device appears instead of a blank area.
-        y = _draw_devices(draw, m, right, y, view, label_f, small_f)
+    footer = view.show_progress and (view.speed_text or view.eta_text != "--")
+    data_bottom = (height - m - _line_height(small_f) - 4) if footer else (height - m)
+    items, overflow = _gauge_items(view)
+    y = _draw_gauges(draw, m, right, y, data_bottom, items, overflow, label_f, small_f, 9)
 
-    if view.show_progress and (view.speed_text or view.eta_text != "--"):
+    if footer:
         foot_y = height - m - _line_height(small_f)
         if view.speed_text:
             _text(draw, m, foot_y, view.speed_text, small_f)
@@ -198,11 +193,8 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         y += _line_height(label_f) + 2
         _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
         y += max(9, height // 11) + 8
-    if view.source.present or view.target.present:
-        y = _draw_storage(draw, rx, x1, y, view.source, "Source", view, label_f, small_f)
-        _draw_storage(draw, rx, x1, y, view.target, "Target", view, label_f, small_f)
-    else:
-        _draw_devices(draw, rx, x1, y, view, label_f, small_f)
+    items, overflow = _gauge_items(view)
+    _draw_gauges(draw, rx, x1, y, height - m, items, overflow, label_f, small_f, 9)
     return img
 
 
@@ -242,30 +234,85 @@ def _fit_label(draw, text, font, max_w):
     return (text + "…") if text else "…"
 
 
-def _draw_storage(draw, x0, x1, y, storage, title, view, label_f, small_f):
-    """Draw one storage row (Source/Target + used/total + bar); skip if absent."""
-    if not storage.present:
-        return y
-    return _gauge_row(
-        draw, x0, x1, y, title, storage.label or "",
-        view.storage_line(storage), storage.fraction, label_f, small_f,
-    )
+def _gauge_items(view):
+    """The data-area rows as ``(role, name, value, fraction, present)`` tuples,
+    plus the count of detected devices that did not fit (``+N more``).
 
+    Once roles are assigned the rows are the source/target storage; while
+    detecting they are the detected volumes (role = capitalised device role)."""
+    if view.source.present or view.target.present:
+        items = []
+        for role, sv in (("Source", view.source), ("Target", view.target)):
+            if sv.present:
+                items.append((role, sv.label or "", view.storage_line(sv), sv.fraction, True))
+        return items, 0
 
-def _draw_devices(draw, x0, x1, y, view, label_f, small_f):
-    """Draw the detected volumes (name + role + fill gauge), capped at
-    ``MAX_DEVICE_ROWS`` with a ``+N more`` line for any overflow."""
     shown = view.devices[:MAX_DEVICE_ROWS]
-    for device in shown:
-        value = usage_text(device.used, device.capacity) if device.present else ""
-        y = _gauge_row(
-            draw, x0, x1, y, device.name, device.role, value, device.fraction,
-            label_f, small_f, draw_bar=device.present,
+    items = [
+        (d.role.capitalize() if d.role else "",
+         d.name,
+         usage_text(d.used, d.capacity) if d.present else "",
+         d.fraction,
+         d.present)
+        for d in shown
+    ]
+    return items, len(view.devices) - len(shown)
+
+
+def _stacked_item_height(label_f, small_f, bar_h):
+    return _line_height(label_f) + 1 + _line_height(small_f) + 2 + bar_h + 8
+
+
+def _draw_gauges(draw, x0, x1, y, bottom, items, overflow, label_f, small_f, bar_h):
+    """Render the gauge rows, stacking the role onto its own line (role / name +
+    storage / bar) when the remaining vertical space fits every row that way;
+    otherwise fall back to the compact one-line layout."""
+    if not items:
+        return y
+    stacked = (
+        len(items) * _stacked_item_height(label_f, small_f, bar_h) <= (bottom - y)
+    )
+    for role, name, value, fraction, present in items:
+        y = _draw_gauge_item(
+            draw, x0, x1, y, role, name, value, fraction, present,
+            label_f, small_f, bar_h, stacked,
         )
-    extra = len(view.devices) - len(shown)
-    if extra > 0:
-        _text(draw, x0, y, f"+{extra} more", small_f)
+    if overflow > 0:
+        _text(draw, x0, y, f"+{overflow} more", small_f)
         y += _line_height(small_f)
+    return y
+
+
+def _draw_gauge_item(draw, x0, x1, y, role, name, value, fraction, present,
+                     label_f, small_f, bar_h, stacked):
+    avail = x1 - x0
+    if not stacked:
+        # Compact: "role · name" (+ value) on one line, then the bar.
+        primary = role or name
+        distinct = bool(role) and bool(name) and name.lower() != role.lower()
+        secondary = name if distinct else ""
+        return _gauge_row(
+            draw, x0, x1, y, primary, secondary, value, fraction,
+            label_f, small_f, draw_bar=present,
+        )
+
+    # Stacked: the role gets its own line; the device name and the storage
+    # figure share the line above the fill bar.
+    _text(draw, x0, y, role or name, label_f)
+    y += _line_height(label_f) + 1
+    show_name = bool(role) and bool(name) and name.lower() != role.lower()
+    if show_name or value:
+        value_w = _text_width(draw, value, small_f) if value else 0
+        if show_name:
+            _text(draw, x0, y, _fit_label(draw, name, small_f, avail - value_w - 6), small_f)
+        if value:
+            _text(draw, 0, y, value, small_f, anchor_right=x1)
+        y += _line_height(small_f) + 2
+    if present:
+        _bar(draw, x0, y, avail, bar_h, fraction)
+        y += bar_h + 8
+    else:
+        y += 4
     return y
 
 

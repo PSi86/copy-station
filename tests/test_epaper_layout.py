@@ -89,6 +89,60 @@ def test_detecting_device_renders_on_square_panel():
     assert _black_pixels(img) > 0
 
 
+def test_gauge_items_storage_rows():
+    from copystation.status.epaper.layout import _gauge_items
+
+    items, overflow = _gauge_items(_vm(50))  # copying: source/target present
+    assert overflow == 0
+    assert [it[0] for it in items] == ["Source", "Target"]
+    assert [it[1] for it in items] == ["DJI", "SD"]  # names from the storage labels
+
+
+def test_gauge_items_device_rows_capitalise_role():
+    from copystation.status.epaper.layout import _gauge_items
+
+    view = build_view(
+        {
+            "phase": "detecting",
+            "devices": [
+                {"name": "O4 Lite", "role": "source",
+                 "capacity": 32_000_000_000, "free": 20_000_000_000},
+                {"name": "SDXC", "role": "target",
+                 "capacity": 256_000_000_000, "free": 135_000_000_000},
+            ],
+        },
+        "0.1.0",
+    )
+    items, overflow = _gauge_items(view)
+    assert [it[0] for it in items] == ["Source", "Target"]   # capitalised role
+    assert [it[1] for it in items] == ["O4 Lite", "SDXC"]    # device name on its own
+
+
+def test_detecting_with_decided_roles_renders_both_devices():
+    base = {"phase": "detecting", "devices": [
+        {"name": "O4 Lite", "role": "source",
+         "capacity": 32_000_000_000, "free": 20_000_000_000}]}
+    two = {"phase": "detecting", "devices": base["devices"] + [
+        {"name": "SDXC", "role": "target",
+         "capacity": 256_000_000_000, "free": 135_000_000_000}]}
+    one_px = _black_pixels(render(build_view(base, "0.1.0"), 296, 128))
+    two_px = _black_pixels(render(build_view(two, "0.1.0"), 296, 128))
+    assert two_px > one_px  # the second role/device row adds content
+
+
+def test_stacked_falls_back_to_compact_on_a_short_panel():
+    # A panel too short for the 3-line stacked rows must still render (compact).
+    view = build_view(
+        {"phase": "detecting", "devices": [
+            {"name": "O4 Lite", "role": "source",
+             "capacity": 32_000_000_000, "free": 20_000_000_000}]},
+        "0.1.0",
+    )
+    img = render(view, 296, 48)  # deliberately very short
+    assert img.size == (296, 48)
+    assert _black_pixels(img) > 0
+
+
 def test_stopped_frame():
     img = render_stopped("0.1.0", 200, 200)
     assert img.size == (200, 200)
