@@ -12,6 +12,7 @@ Verification is intentionally kept fast: it compares file count and file sizes
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
+
+_LOG = logging.getLogger("copystation.transfer")
 
 # Callback invoked with the number of bytes copied so far.
 ProgressCallback = Callable[[int], None]
@@ -77,10 +80,8 @@ def check_free_space(target_root: Path, required_bytes: int, margin: float = 1.0
     free = shutil.disk_usage(target_root).free
     needed = int(required_bytes * margin)
     if free < needed:
-        raise InsufficientSpaceError(
-            f"Not enough space on the target: need ~{needed} bytes, "
-            f"free {free} bytes"
-        )
+        _LOG.warning("Target too small: need ~%d bytes, %d free", needed, free)
+        raise InsufficientSpaceError("Not enough free space on the target.")
 
 
 def _rsync_available() -> bool:
@@ -120,7 +121,7 @@ def copy_tree(
     src = Path(src)
     dst = Path(dst)
     if not src.is_dir():
-        raise SourceVanishedError(f"Source no longer present: {src}")
+        raise SourceVanishedError("Source no longer present.")
 
     dst.mkdir(parents=True, exist_ok=True)
 
@@ -130,17 +131,9 @@ def copy_tree(
         _copy_with_shutil(src, dst, on_progress, abort_check)
 
 
-_SOURCE_DISCONNECTED_MSG = (
-    "Source device was disconnected during the copy. Nothing was deleted -- "
-    "reconnect it and start again."
-)
-
 # Used when we know a device dropped out but not which side (e.g. an rsync I/O
 # error where the device node has not been re-checked / is ambiguous).
-_DEVICE_DISCONNECTED_MSG = (
-    "A device was disconnected or became unreadable during the copy (I/O error). "
-    "Nothing was deleted -- reconnect it and start again."
-)
+_DEVICE_DISCONNECTED_MSG = "Device disconnected or unreadable. Nothing was deleted."
 
 
 def _describe_rsync_failure(code: int, stderr: str) -> TransferError:
@@ -149,22 +142,14 @@ def _describe_rsync_failure(code: int, stderr: str) -> TransferError:
     if "input/output error" in low or "read errors" in low:
         return SourceVanishedError(_DEVICE_DISCONNECTED_MSG)
     if "no space left" in low:
-        return InsufficientSpaceError(
-            "The target ran out of space during the copy. Nothing was deleted."
-        )
+        return InsufficientSpaceError("Target ran out of space. Nothing was deleted.")
     if code == 24:
-        return SourceVanishedError(
-            "Some source files disappeared during the copy. Nothing was deleted."
-        )
+        return SourceVanishedError("Source files vanished. Nothing was deleted.")
     if code == 23:
-        return TransferError(
-            "Some files could not be copied (partial transfer). Nothing was "
-            "deleted -- check the source and target and try again."
-        )
-    detail = f" ({stderr.splitlines()[0]})" if stderr else ""
-    return TransferError(
-        f"Copy failed (rsync code {code}).{detail} Nothing was deleted."
-    )
+        return TransferError("Some files could not be copied. Nothing was deleted.")
+    if stderr:
+        _LOG.warning("rsync failed (code %d): %s", code, stderr.splitlines()[0])
+    return TransferError(f"Copy failed (rsync {code}). Nothing was deleted.")
 
 
 def _copy_with_rsync(
@@ -319,15 +304,16 @@ def verify(src: Path, dst: Path) -> None:
         if src_sig[rel] != dst_sig[rel]
     )
 
-    details = []
-    if missing:
-        details.append(f"missing in target: {len(missing)} ({missing[:5]})")
-    if extra:
-        details.append(f"unexpected in target: {len(extra)} ({extra[:5]})")
-    if size_mismatch:
-        details.append(f"size mismatch: {len(size_mismatch)} ({size_mismatch[:5]})")
-
-    raise VerificationError("Verification failed -- " + "; ".join(details))
+    # Keep the displayed message short (e-paper/web); the breakdown goes to the log.
+    _LOG.warning(
+        "Verification mismatch: missing=%d, extra=%d, size=%d; examples %s",
+        len(missing), len(extra), len(size_mismatch),
+        (missing[:3] + extra[:3] + size_mismatch[:3]),
+    )
+    differing = len(missing) + len(extra) + len(size_mismatch)
+    raise VerificationError(
+        f"Verification failed: {differing} file(s) differ. Nothing was deleted."
+    )
 
 
 def cleanup_source(media_dir: Path, keep_folder: bool = True) -> None:

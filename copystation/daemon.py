@@ -65,10 +65,7 @@ def _device_abort_check(source_device: str | None, target_device: str | None):
     def _check():
         for node, label in watched:
             if not os.path.exists(node):
-                return (
-                    f"{label} device was disconnected during the copy. Nothing "
-                    f"was deleted -- reconnect it and start again."
-                )
+                return f"{label} disconnected. Nothing was deleted -- reconnect and retry."
         return None
 
     return _check
@@ -106,9 +103,7 @@ def perform_transfer(
     media_dir = source_root / config.media_dirname
 
     if not media_dir.is_dir():
-        raise TransferError(
-            f"No '{config.media_dirname}' folder on the source: {media_dir}"
-        )
+        raise TransferError(f"No {config.media_dirname} folder on the source.")
 
     src_label = source_name or "source"
     tgt_label = target_name or "target"
@@ -143,12 +138,12 @@ def perform_transfer(
         on_devices_refresh()  # final figures: target now holds the full copy
 
     _LOG.info("Verifying transfer ...")
-    hub.log_event("Verifying transferred data ...")
+    hub.log_event("Verifying ...")
     verify(media_dir, dest)
 
     keep = config.get("cleanup", {}).get("keep_dcim_folder", True)
     _LOG.info("Verification ok -- clearing source (keep_folder=%s)", keep)
-    hub.log_event("Clearing source data ...")
+    hub.log_event("Clearing source ...")
     cleanup_source(media_dir, keep_folder=keep)
     if on_devices_refresh is not None:
         on_devices_refresh()  # source DCIM now empty -> "empty" flag + freed space

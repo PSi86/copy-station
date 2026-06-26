@@ -355,11 +355,11 @@ class DeviceWatcher:
         removed = self._prev_nodes - current
         self._node_names.update(names)
         for node in sorted(added):
-            self._hub.log_event(f"Storage device detected: {names[node]}")
+            self._hub.log_event(f"Detected: {names[node]}")
             # A quick green blink per recognised volume -- unmistakable on the LEDs.
             self._hub.signal(Event.DEVICE_DETECTED)
         for node in sorted(removed):
-            self._hub.log_event(f"Device removed: {self._node_names.pop(node, node)}")
+            self._hub.log_event(f"Removed: {self._node_names.pop(node, node)}")
         self._prev_nodes = current
         return bool(added), bool(removed)
 
@@ -425,9 +425,7 @@ class DeviceWatcher:
                 self._hub.set_devices(device_views(probes, min_bytes))
                 self._hub.set_phase(State.DETECTING)
                 if added:
-                    self._hub.log_event(
-                        "Source connected but its DCIM folder is empty -- nothing to copy"
-                    )
+                    self._hub.log_event("Source DCIM empty -- nothing to copy")
                 _LOG.info("Source DCIM is empty -- nothing to copy.")
                 return
 
@@ -449,9 +447,7 @@ class DeviceWatcher:
                 source.device_node, source.name, source.capacity,
                 target.device_node, target.capacity,
             )
-            self._hub.log_event(
-                f"Roles assigned: source = {source.name}, target = {target.name}"
-            )
+            self._hub.log_event(f"Source: {source.name}  Target: {target.name}")
 
             # Let the source's fill gauge have its moment before the copy bar takes
             # over: keep it up (sticky) and hold in DETECTING for the gauge
@@ -465,7 +461,7 @@ class DeviceWatcher:
             required = self._hold_before_copy(source, target, media_dir)
             if required is None:
                 self._armed = True
-                self._hub.log_event("A device was removed before the copy started")
+                self._hub.log_event("Device removed before copy")
                 _LOG.info("A device disappeared during the pre-copy hold.")
                 return
 
