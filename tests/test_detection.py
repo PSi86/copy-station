@@ -12,6 +12,8 @@ from copystation.devices import (
     device_views,
     fill_fraction_for_display,
     has_empty_source,
+    has_source,
+    order_for_display,
     select_roles,
 )
 from copystation.status import Event
@@ -21,7 +23,7 @@ MIN_BYTES = 6 * GB
 
 
 def _probe(name, capacity, has_dcim, matched_source=True, free=None,
-           has_media=True, is_empty=None):
+           has_media=True, is_empty=None, has_label=False):
     # Mirror the production rule: empty = no media AND (has a media folder OR the
     # medium is blank). Tests for a blank medium (no DCIM) pass is_empty=True.
     if is_empty is None:
@@ -37,6 +39,7 @@ def _probe(name, capacity, has_dcim, matched_source=True, free=None,
         name=name,
         has_media=has_media,
         is_empty=is_empty,
+        has_label=has_label,
     )
 
 
@@ -132,6 +135,53 @@ def test_has_empty_source():
     # A DCIM device that fails the VID/PID allowlist is not "source-shaped".
     foreign = _probe("x", 23 * GB, has_dcim=True, has_media=False, matched_source=False)
     assert has_empty_source([foreign, sd]) is False
+
+
+def test_has_source():
+    full = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    empty = _probe("cam2", 23 * GB, has_dcim=True, has_media=False)
+    sd = _probe("sd", 256 * GB, has_dcim=False)
+    assert has_source([full, sd]) is True            # a usable source exists
+    assert has_source([empty, sd]) is False          # source-shaped but empty
+    assert has_source([sd]) is False                 # no source-shaped volume
+    # Two completely blank cards -> no source at all -> wait, don't error.
+    blank_a = _probe("a", 64 * GB, has_dcim=False, has_media=False, is_empty=True)
+    blank_b = _probe("b", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    assert has_source([blank_a, blank_b]) is False
+    # A DCIM device that fails the VID/PID allowlist is not a source.
+    foreign = _probe("x", 23 * GB, has_dcim=True, has_media=True, matched_source=False)
+    assert has_source([foreign, sd]) is False
+
+
+def test_order_for_display_priority():
+    # Prio 1: configured label. Prio 2: source-shaped (DCIM + media). Prio 3:
+    # everything else by descending size. Ignored (< min) last.
+    labelled = _probe("o4", 30 * GB, has_dcim=True, has_media=True, has_label=True)
+    source = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    big_blank = _probe("bigsd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    small_blank = _probe("smallsd", 64 * GB, has_dcim=False, has_media=False, is_empty=True)
+    tiny = _probe("boot", 1 * GB, has_dcim=True, has_media=True)  # below min -> last
+
+    order = [p.sys_name for p in order_for_display(
+        [small_blank, tiny, source, big_blank, labelled], MIN_BYTES)]
+    assert order == ["o4", "cam", "bigsd", "smallsd", "boot"]
+
+
+def test_order_for_display_label_beats_source_and_size():
+    # A configured label outranks a source-shaped device even if larger ones exist.
+    label_small = _probe("o4", 8 * GB, has_dcim=False, has_media=False,
+                         is_empty=True, has_label=True)
+    source_big = _probe("cam", 200 * GB, has_dcim=True, has_media=True)
+    assert [p.sys_name for p in order_for_display([source_big, label_small], MIN_BYTES)] \
+        == ["o4", "cam"]
+
+
+def test_device_views_are_ordered_by_priority():
+    # The web/e-paper list comes out ordered (best candidates first).
+    blank = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    source = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    names = [v["name"] for v in device_views([blank, source], MIN_BYTES)]
+    assert names == ["cam", "sd"]   # the source-shaped volume is shown first
 
 
 def test_fill_fraction_prefers_source_and_reflects_usage():
