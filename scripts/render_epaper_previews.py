@@ -44,7 +44,12 @@ STATES = {
     },
     "detecting": {
         "phase": "detecting", "percent": 0.0,
-        "source": _SOURCE, "devices": [{}],
+        # While detecting, source/target are still empty -- the panel shows the
+        # detected volume(s) from the devices list.
+        "devices": [
+            {"name": "O4 Lite", "node": "/dev/sdb1", "role": "candidate",
+             "capacity": 32_000_000_000, "free": 20_000_000_000},
+        ],
     },
     "error": {
         "phase": "error",

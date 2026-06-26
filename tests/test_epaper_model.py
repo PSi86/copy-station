@@ -37,6 +37,32 @@ def test_build_view_ready_hides_progress():
     assert v.source.present is False  # no storage yet
 
 
+def test_build_view_extracts_detected_devices():
+    v = build_view(
+        {
+            "phase": "detecting",
+            "devices": [
+                {"name": "MassStorageClass", "node": "/dev/sdb1",
+                 "capacity": 128_000_000_000, "free": 121_000_000_000,
+                 "role": "candidate"},
+            ],
+        }
+    )
+    assert v.device_count == 1
+    dev = v.devices[0]
+    assert dev.name == "MassStorageClass"
+    assert dev.role == "candidate"
+    assert dev.capacity == 128_000_000_000
+    assert dev.used == 7_000_000_000          # capacity - free
+    assert 0.0 < dev.fraction < 0.1 and dev.present
+
+
+def test_build_view_device_falls_back_to_node_name():
+    v = build_view({"phase": "detecting", "devices": [{"node": "/dev/sdc"}]})
+    assert v.devices[0].name == "/dev/sdc"
+    assert v.devices[0].present is False       # unknown capacity
+
+
 def test_build_view_error_carries_message():
     v = build_view({"phase": "error", "error": "Target was disconnected"})
     assert v.status_text == "Error"

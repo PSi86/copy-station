@@ -48,7 +48,9 @@ def _signature(vm: ViewModel) -> tuple:
         vm.source.present,
         round(vm.target.fraction, 2),
         vm.target.present,
-        vm.device_count,
+        # The detected-device rows (shown while detecting): a new/changed device
+        # or a fill change must trigger a redraw.
+        tuple((d.name, d.role, round(d.fraction, 2)) for d in vm.devices),
         vm.error_text,
         vm.show_progress,
     )

@@ -3,7 +3,12 @@ import pytest
 pytest.importorskip("PIL")
 
 from copystation.status.epaper.layout import render, render_stopped  # noqa: E402
-from copystation.status.epaper.model import StorageView, ViewModel  # noqa: E402
+from copystation.status.epaper.model import (  # noqa: E402
+    DeviceView,
+    StorageView,
+    ViewModel,
+    build_view,
+)
 
 
 def _vm(percent):
@@ -15,6 +20,7 @@ def _vm(percent):
         show_progress=True,
         source=StorageView(label="DJI", used=12, capacity=32),
         target=StorageView(label="SD", used=120, capacity=256),
+        devices=(),
         device_count=2,
         speed_text="18 MB/s",
         eta_text="0:42",
@@ -46,6 +52,41 @@ def test_progress_bar_grows_with_percent():
     low = _black_pixels(render(_vm(10), 200, 200))
     high = _black_pixels(render(_vm(90), 200, 200))
     assert high > low
+
+
+_DETECTING_SNAPSHOT = {
+    "phase": "detecting",
+    "source": {"capacity": 0, "used": 0},
+    "target": {"capacity": 0, "used": 0},
+    "devices": [
+        {
+            "name": "MassStorageClass",
+            "node": "/dev/sdb1",
+            "capacity": 127843434496,
+            "free": 121482903552,
+            "role": "candidate",
+        }
+    ],
+}
+
+
+def test_detecting_renders_the_candidate_device():
+    # Regression: while detecting, source/target are still empty, so the panel
+    # must render the detected device from the devices list (not a blank frame).
+    view = build_view(_DETECTING_SNAPSHOT, "0.1.0")
+    with_device = _black_pixels(render(view, 296, 128))
+
+    empty = build_view({"phase": "detecting", "devices": []}, "0.1.0")
+    without = _black_pixels(render(empty, 296, 128))
+
+    assert with_device > without  # the device row adds visible content
+
+
+def test_detecting_device_renders_on_square_panel():
+    view = build_view(_DETECTING_SNAPSHOT, "0.1.0")
+    img = render(view, 200, 200)
+    assert img.size == (200, 200)
+    assert _black_pixels(img) > 0
 
 
 def test_stopped_frame():
