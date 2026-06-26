@@ -79,6 +79,7 @@ def perform_transfer(
     config: Config,
     source_device: str | None = None,
     target_device: str | None = None,
+    target_name: str | None = None,
     on_devices_refresh=None,
     required: int | None = None,
 ) -> Path:
@@ -105,7 +106,8 @@ def perform_transfer(
         raise TransferError(f"No {config.media_dirname} folder on the source.")
 
     src_label = source_name or "source"
-    hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, "target"))
+    tgt_label = target_name or "target"
+    hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, tgt_label))
 
     if required is None:
         required = total_size(media_dir)
@@ -149,7 +151,7 @@ def perform_transfer(
     hub.log_event(f"Copy complete: {dest.name}")
     hub.set_phase(State.SUCCESS)
     # Refresh storage figures after the copy (free space changed).
-    hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, "target"))
+    hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, tgt_label))
     _LOG.info("Transfer complete: %s", dest)
     return dest
 

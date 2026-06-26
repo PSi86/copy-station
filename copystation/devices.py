@@ -477,6 +477,7 @@ class DeviceWatcher:
                 source_name=source.name,
                 source_device=source.device_node,
                 target_device=target.device_node,
+                target_name=target.name,
                 hub=self._hub,
                 config=self._config,
                 on_devices_refresh=_refresh_devices,
