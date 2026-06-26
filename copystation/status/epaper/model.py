@@ -45,11 +45,41 @@ def fmt_duration(seconds: float | None) -> str:
     return f"{h}:{m:02d}:{sec:02d}" if h > 0 else f"{m}:{sec:02d}"
 
 
+def usage_text(used: int, capacity: int) -> str:
+    """``used / capacity`` for a gauge row (``--`` when the size is unknown)."""
+    if capacity <= 0:
+        return "--"
+    return f"{fmt_bytes(used)} / {fmt_bytes(capacity)}"
+
+
 @dataclass(frozen=True)
 class StorageView:
     """One mass storage's figures, as the screen needs them."""
 
     label: str
+    used: int
+    capacity: int
+
+    @property
+    def fraction(self) -> float:
+        return (self.used / self.capacity) if self.capacity > 0 else 0.0
+
+    @property
+    def present(self) -> bool:
+        return self.capacity > 0
+
+
+@dataclass(frozen=True)
+class DeviceView:
+    """A detected volume as the panel shows it (name + role + fill gauge).
+
+    Used before a transfer assigns source/target roles -- during detecting the
+    snapshot's ``source``/``target`` are still empty, but the candidate already
+    appears in ``devices`` with its capacity/free, so the panel renders these.
+    """
+
+    name: str
+    role: str
     used: int
     capacity: int
 
@@ -73,6 +103,7 @@ class ViewModel:
     show_progress: bool
     source: StorageView
     target: StorageView
+    devices: tuple[DeviceView, ...]
     device_count: int
     speed_text: str
     eta_text: str
@@ -81,9 +112,7 @@ class ViewModel:
 
     def storage_line(self, storage: StorageView) -> str:
         """``used / capacity`` for a storage row (``--`` when absent)."""
-        if not storage.present:
-            return "--"
-        return f"{fmt_bytes(storage.used)} / {fmt_bytes(storage.capacity)}"
+        return usage_text(storage.used, storage.capacity) if storage.present else "--"
 
 
 def _storage_view(raw: dict[str, Any] | None) -> StorageView:
@@ -95,12 +124,24 @@ def _storage_view(raw: dict[str, Any] | None) -> StorageView:
     )
 
 
+def _device_view(raw: dict[str, Any]) -> DeviceView:
+    capacity = int(raw.get("capacity", 0) or 0)
+    free = int(raw.get("free", 0) or 0)
+    return DeviceView(
+        name=str(raw.get("name") or raw.get("node") or "device"),
+        role=str(raw.get("role", "") or ""),
+        used=max(0, capacity - free),
+        capacity=capacity,
+    )
+
+
 def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
     """Project a StationState snapshot dict into a :class:`ViewModel`."""
     phase = str(snapshot.get("phase", "ready"))
     percent = int(round(float(snapshot.get("percent", 0.0) or 0.0)))
     show_progress = phase in ("copying", "success")
     speed = snapshot.get("speed_bytes")
+    devices = tuple(_device_view(d) for d in (snapshot.get("devices", []) or []))
     return ViewModel(
         status_text=_STATUS_TEXT.get(phase, phase.title() or "Ready"),
         phase=phase,
@@ -109,7 +150,8 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         show_progress=show_progress,
         source=_storage_view(snapshot.get("source")),
         target=_storage_view(snapshot.get("target")),
-        device_count=len(snapshot.get("devices", []) or []),
+        devices=devices,
+        device_count=len(devices),
         speed_text=f"{fmt_bytes(speed)}/s" if speed else "",
         eta_text=fmt_duration(snapshot.get("eta_seconds")),
         error_text=str(snapshot.get("error", "") or ""),

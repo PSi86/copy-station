@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .model import ViewModel
+from .model import ViewModel, usage_text
+
+# How many detected-device rows the panel shows before summarising the rest.
+MAX_DEVICE_ROWS = 3
 
 _WHITE = 1
 _BLACK = 0
@@ -135,9 +138,15 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y += _line_height(label_f) + 2
         _bar(draw, m, y, width - 2 * m, max(10, height // 18), view.progress_fraction)
         y += max(10, height // 18) + 8
-
-    y = _draw_storage(draw, m, right, y, view.source, "Source", view, label_f, small_f)
-    y = _draw_storage(draw, m, right, y, view.target, "Target", view, label_f, small_f)
+    if view.source.present or view.target.present:
+        # A transfer is set up (copying / success / error mid-copy): show the
+        # assigned source/target storage.
+        y = _draw_storage(draw, m, right, y, view.source, "Source", view, label_f, small_f)
+        y = _draw_storage(draw, m, right, y, view.target, "Target", view, label_f, small_f)
+    else:
+        # No roles assigned yet (detecting): show the detected volume(s), so a
+        # freshly plugged-in device appears instead of a blank area.
+        y = _draw_devices(draw, m, right, y, view, label_f, small_f)
 
     if view.show_progress and (view.speed_text or view.eta_text != "--"):
         foot_y = height - m - _line_height(small_f)
@@ -189,27 +198,74 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         y += _line_height(label_f) + 2
         _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
         y += max(9, height // 11) + 8
-    y = _draw_storage(draw, rx, x1, y, view.source, "Source", view, label_f, small_f)
-    _draw_storage(draw, rx, x1, y, view.target, "Target", view, label_f, small_f)
+    if view.source.present or view.target.present:
+        y = _draw_storage(draw, rx, x1, y, view.source, "Source", view, label_f, small_f)
+        _draw_storage(draw, rx, x1, y, view.target, "Target", view, label_f, small_f)
+    else:
+        _draw_devices(draw, rx, x1, y, view, label_f, small_f)
     return img
 
 
+def _gauge_row(draw, x0, x1, y, primary, secondary, value, fraction, label_f,
+               small_f, draw_bar=True):
+    """Draw one labelled gauge row between x0..x1: ``primary [· secondary]`` on
+    the left, the right-aligned ``value``, and a fill bar below. The secondary
+    detail is dropped, then the primary truncated, when the column is too narrow."""
+    avail = x1 - x0
+    value_w = _text_width(draw, value, small_f) if value else 0
+    label_max = avail - value_w - 8
+    full = f"{primary} · {secondary}" if secondary else primary
+    if _text_width(draw, full, label_f) <= label_max:
+        label = full
+    elif _text_width(draw, primary, label_f) <= label_max:
+        label = primary
+    else:
+        label = _fit_label(draw, primary, label_f, label_max)
+    _text(draw, x0, y, label, label_f)
+    if value:
+        _text(draw, 0, y, value, small_f, anchor_right=x1)
+    y += _line_height(label_f) + 2
+    if draw_bar:
+        _bar(draw, x0, y, avail, 9, fraction)
+        y += 9 + 8
+    else:
+        y += 4
+    return y
+
+
+def _fit_label(draw, text, font, max_w):
+    """``text`` truncated with an ellipsis so it fits within ``max_w`` pixels."""
+    if _text_width(draw, text, font) <= max_w:
+        return text
+    while text and _text_width(draw, text + "…", font) > max_w:
+        text = text[:-1]
+    return (text + "…") if text else "…"
+
+
 def _draw_storage(draw, x0, x1, y, storage, title, view, label_f, small_f):
-    """Draw one storage row (label + used/total + bar) between x0..x1; skip if
-    not present. The device name is dropped when it would collide with the value
-    in a narrow column."""
+    """Draw one storage row (Source/Target + used/total + bar); skip if absent."""
     if not storage.present:
         return y
-    label = f"{title} · {storage.label}" if storage.label else title
-    value = view.storage_line(storage)
-    gap = 8
-    if _text_width(draw, label, label_f) + _text_width(draw, value, small_f) + gap > (x1 - x0):
-        label = title
-    _text(draw, x0, y, label, label_f)
-    _text(draw, 0, y, value, small_f, anchor_right=x1)
-    y += _line_height(label_f) + 2
-    _bar(draw, x0, y, x1 - x0, 9, storage.fraction)
-    y += 9 + 8
+    return _gauge_row(
+        draw, x0, x1, y, title, storage.label or "",
+        view.storage_line(storage), storage.fraction, label_f, small_f,
+    )
+
+
+def _draw_devices(draw, x0, x1, y, view, label_f, small_f):
+    """Draw the detected volumes (name + role + fill gauge), capped at
+    ``MAX_DEVICE_ROWS`` with a ``+N more`` line for any overflow."""
+    shown = view.devices[:MAX_DEVICE_ROWS]
+    for device in shown:
+        value = usage_text(device.used, device.capacity) if device.present else ""
+        y = _gauge_row(
+            draw, x0, x1, y, device.name, device.role, value, device.fraction,
+            label_f, small_f, draw_bar=device.present,
+        )
+    extra = len(view.devices) - len(shown)
+    if extra > 0:
+        _text(draw, x0, y, f"+{extra} more", small_f)
+        y += _line_height(small_f)
     return y
 
 

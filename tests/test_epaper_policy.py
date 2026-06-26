@@ -1,4 +1,4 @@
-from copystation.status.epaper.model import StorageView, ViewModel
+from copystation.status.epaper.model import DeviceView, StorageView, ViewModel
 from copystation.status.epaper.policy import Decision, decide
 
 
@@ -15,6 +15,10 @@ def _vm(
         used, cap = t
         return StorageView(label="x", used=used, capacity=cap)
 
+    devs = tuple(
+        DeviceView(name=f"dev{i}", role="candidate", used=1, capacity=2)
+        for i in range(devices)
+    )
     return ViewModel(
         status_text=phase.title(),
         phase=phase,
@@ -23,7 +27,8 @@ def _vm(
         show_progress=phase in ("copying", "success"),
         source=storage(src),
         target=storage(tgt),
-        device_count=devices,
+        devices=devs,
+        device_count=len(devs),
         speed_text="1 MB/s",
         eta_text="0:10",
         error_text=error,
@@ -51,6 +56,13 @@ def test_phase_change_is_full():
 def test_device_removed_is_full():
     prev = _vm(devices=2)
     assert decide(prev, _vm(devices=1), **_KW) is Decision.FULL
+
+
+def test_device_appears_is_partial():
+    # A freshly detected device drawn onto a blank area is additive -> partial.
+    prev = _vm(phase="detecting", percent=0, devices=0)
+    new = _vm(phase="detecting", percent=0, devices=1)
+    assert decide(prev, new, **_KW) is Decision.PARTIAL
 
 
 def test_progress_reset_is_full():

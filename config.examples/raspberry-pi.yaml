@@ -25,6 +25,7 @@ cleanup:
   keep_dcim_folder: true
 
 status:
+  # Any combination of: log, led, buzzer, ws2812, grove_led_bar, epaper
   backends: [log, grove_led_bar]
 
   grove_led_bar:

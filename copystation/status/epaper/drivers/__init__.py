@@ -26,6 +26,33 @@ def _parse_spidev(path: str) -> tuple[int, int]:
     return int(bus_str), int(dev_str)
 
 
+def _claim_lines(opener, chip: str, lines: list[tuple[int, str]], **kwargs):
+    """Request GPIO lines, turning a bare OSError into an actionable message.
+
+    ``lines`` is a list of ``(offset, role)`` pairs. On failure the error names
+    the offending offsets/roles and -- for the common EPROBE_DEFER (517) / EBUSY
+    (16) cases -- explains that the values must be libgpiod line offsets (not
+    header pin numbers) on free GPIOs.
+    """
+    offsets = [off for off, _ in lines]
+    try:
+        return opener(chip, offsets, "copystation-epaper", **kwargs)
+    except OSError as exc:
+        roles = ", ".join(f"{off} ({role})" for off, role in lines)
+        hint = ""
+        if exc.errno in (16, 517):  # EBUSY / EPROBE_DEFER
+            hint = (
+                " These must be libgpiod LINE OFFSETS (from `gpioinfo`), NOT header"
+                " pin numbers, and each must be a free GPIO. Errno"
+                f" {exc.errno} means a pin is owned by a peripheral (SPI/UART/DBI)"
+                " or already in use -- pick free lines and do not assign a hardware"
+                " SPI CS/HOLD pin here (leave `cs: null` for hardware chip-select)."
+            )
+        raise RuntimeError(
+            f"e-paper GPIO request failed for line(s) {roles} on {chip}: {exc}.{hint}"
+        ) from exc
+
+
 def open_driver(panel: dict) -> EpaperDriver:
     """Open SPI + GPIO from a resolved panel config and build the driver."""
     controller = str(panel["controller"]).lower()
@@ -42,7 +69,13 @@ def open_driver(panel: dict) -> EpaperDriver:
 
     bus, dev = _parse_spidev(panel.get("device", "/dev/spidev0.0"))
     spi = spidev.SpiDev()
-    spi.open(bus, dev)
+    try:
+        spi.open(bus, dev)
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not open SPI device {panel.get('device')!r}: {exc}. Enable the "
+            "SPI overlay and confirm the node exists (`ls /dev/spidev*`)."
+        ) from exc
     spi.max_speed_hz = int(panel.get("spi_speed_hz", 4_000_000))
     try:
         spi.mode = 0
@@ -56,16 +89,16 @@ def open_driver(panel: dict) -> EpaperDriver:
     pwr = panel.get("pwr")
     cs = panel.get("cs")
 
-    out_offsets = [dc, rst]
+    out_lines = [(dc, "dc"), (rst, "rst")]
     if pwr is not None:
-        out_offsets.append(int(pwr))
+        out_lines.append((int(pwr), "pwr"))
     if cs is not None:
-        out_offsets.append(int(cs))
-    gpio_out = open_output_lines(chip, out_offsets, "copystation-epaper")
+        out_lines.append((int(cs), "cs"))
+    gpio_out = _claim_lines(open_output_lines, chip, out_lines)
 
     busy_active_high = bool(panel.get("busy_active_high", True))
-    gpio_in = open_input_lines(
-        chip, [busy], "copystation-epaper", active_low=not busy_active_high
+    gpio_in = _claim_lines(
+        open_input_lines, chip, [(busy, "busy")], active_low=not busy_active_high
     )
 
     return cls(
