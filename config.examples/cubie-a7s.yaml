@@ -77,17 +77,21 @@ status:
   # (pin 19), CLK->SPI1-CLK, CS->SPI1-CS0 (hardware -- leave `cs` unset below).
   #
   # IMPORTANT: dc/rst/busy are libgpiod LINE OFFSETS, NOT header pin numbers.
-  # Find them with `gpioinfo` (rule: (bank-'A')*32+pin; e.g. PB3=35, PJ24=312,
+  # Find them with `gpioinfo` (rule: (bank-'A')*32+pin; e.g. PB10=42, PJ24=312,
   # PJ25=313) and confirm the chip with `gpiodetect`. They must be PLAIN, FREE
   # GPIO lines -- do NOT use an SPI/DBI function pin (e.g. SPI1-HOLD/DBI-DCX) for
   # DC, or the kernel refuses the request with errno 517 (EPROBE_DEFER)/16 (EBUSY).
+  #
+  # The offsets below are a CONFIRMED-WORKING WeAct 2.9" wiring on the Cubie A7S
+  # (CS on the hardware SPI1-CS0, so `cs` stays unset).
   epaper:
-    model: waveshare-1.54   # waveshare-2.9 | weact-2.9 also supported
+    model: weact-2.9        # waveshare-1.54 | waveshare-2.9 | waveshare-2.13 also work
     device: /dev/spidev1.0
     gpiochip: gpiochip0
-    dc: 35                  # OFFSET of a free GPIO (PB3) -- confirm with `gpioinfo`
-    rst: 36                 # OFFSET (PB4) -- confirm with `gpioinfo`
-    busy: 38                # OFFSET (PB6) -- confirm with `gpioinfo`
+    dc: 42                  # PB10 (free GPIO) -- confirm with `gpioinfo`
+    rst: 313                # PJ25             -- confirm with `gpioinfo`
+    busy: 312               # PJ24             -- confirm with `gpioinfo`
+    rotation: 90            # landscape (296x128); preset default for 2.9"
 
   buzzer:
     gpiochip: gpiochip0
