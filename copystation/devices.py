@@ -65,6 +65,7 @@ class Probe:
     name: str
     has_media: bool = True   # media folder holds at least one real file
     is_empty: bool = False   # nothing to copy: empty media folder OR blank medium
+    has_label: bool = False  # a user-configured label (identify.device_labels) matched
 
 
 def select_roles(
@@ -107,6 +108,19 @@ def select_roles(
     return source, target
 
 
+def has_source(eligible: list[Probe]) -> bool:
+    """True when at least one eligible volume can serve as the source.
+
+    A source is a volume that carries a non-empty media folder and passes the
+    optional VID/PID allowlist. When this is False there is simply nothing to
+    copy yet -- no card looks like a source, or every source-shaped card is
+    empty. That is a *wait* condition, not an error: the source may still be
+    plugged in. Two blank cards (no DCIM at all) land here too, so they wait
+    quietly instead of raising ``NoSourceError``.
+    """
+    return any(p.has_dcim and p.matched_source and p.has_media for p in eligible)
+
+
 def has_empty_source(eligible: list[Probe]) -> bool:
     """True when a source is connected but there is nothing to copy.
 
@@ -141,13 +155,48 @@ def fill_fraction_for_display(eligible: list[Probe]) -> Optional[float]:
     return max(_used_fraction(p) for p in pool)
 
 
+def _display_rank(p: Probe, min_bytes: int) -> int:
+    """Display priority of a probe -- lower sorts first (shown higher up).
+
+    The panel shows only the top few device rows (the rest collapse into
+    "+N more"), so the most promising volumes must come first:
+
+    * 0 -- a user-configured label matched (``identify.device_labels``): an
+      explicitly recognised device, the strongest signal of interest.
+    * 1 -- looks like a real source: a non-empty media folder that passes the
+      optional VID/PID allowlist.
+    * 2 -- any other eligible volume.
+    * 3 -- ignored (below ``min_bytes``): least interesting, shown last.
+    """
+    if p.capacity < min_bytes:
+        return 3
+    if p.has_label:
+        return 0
+    if p.has_dcim and p.matched_source and p.has_media:
+        return 1
+    return 2
+
+
+def order_for_display(probes: list[Probe], min_bytes: int) -> list[Probe]:
+    """Sort probes for the panel/web display: best candidates first.
+
+    Primary key is :func:`_display_rank` (configured label > source-shaped >
+    other > ignored); within a rank, larger volumes come first. Pure and
+    order-independent so the same set always renders the same way.
+    """
+    return sorted(probes, key=lambda p: (_display_rank(p, min_bytes), -p.capacity))
+
+
 def device_views(
     probes: list[Probe],
     min_bytes: int,
     source: Optional[Probe] = None,
     target: Optional[Probe] = None,
 ) -> list[dict]:
-    """Per-device summary for the web UI.
+    """Per-device summary for the web UI and e-paper panel.
+
+    The result is ordered by :func:`order_for_display` (best candidates first),
+    so a panel that only shows a few rows surfaces the most promising volumes.
 
     When ``source``/``target`` are given (a decision was made by
     ``select_roles``), each volume is labelled with its *actual* role. Without a
@@ -168,7 +217,7 @@ def device_views(
     src_node = source.device_node if source else None
     tgt_node = target.device_node if target else None
     views: list[dict] = []
-    for p in probes:
+    for p in order_for_display(probes, min_bytes):
         eligible = p.capacity >= min_bytes
         if not eligible:
             role = "ignored"
@@ -462,15 +511,22 @@ class DeviceWatcher:
                 _LOG.info("Detecting -- %d eligible volume(s), need 2 ...", len(eligible))
                 return
 
-            # A source is connected but its DCIM is empty -- nothing to copy. Don't
-            # start a transfer and don't error; show it as "empty" and wait.
-            if has_empty_source(eligible):
+            # No usable source yet -- either a source-shaped card is present but
+            # its DCIM is empty, or none of the present volumes looks like a
+            # source at all (e.g. two completely blank cards). Neither is an
+            # error: the source may simply not be attached yet. Show what is
+            # present and keep waiting -- no transfer, no red alarm, so there is
+            # no "unplug everything to reset" dance.
+            if not has_source(eligible):
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
                 self._hub.set_phase(State.DETECTING)
                 if added:
-                    self._hub.log_event("Source DCIM empty -- nothing to copy")
-                _LOG.info("Source DCIM is empty -- nothing to copy.")
+                    if has_empty_source(eligible):
+                        self._hub.log_event("Source DCIM empty -- nothing to copy")
+                    else:
+                        self._hub.log_event("No source detected -- waiting")
+                _LOG.info("No usable source present -- waiting.")
                 return
 
             # Two or more eligible volumes -- decide roles for real.
@@ -657,6 +713,7 @@ class DeviceWatcher:
             # Nothing to copy: the media folder is present but empty, OR the whole
             # medium is blank (no real content at all).
             is_empty=not has_media and (has_dcim or _medium_is_blank(mountpoint)),
+            has_label=self._configured_label(dev) is not None,
         )
 
     def _restat(self, probe: Probe) -> Probe:

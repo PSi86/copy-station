@@ -409,10 +409,22 @@ are ignored. Once two eligible volumes are present:
 Before copying, the target's free space is checked against the source's media
 size; if it does not fit, the cycle ends in `Error` and the source is untouched.
 
+**No source is not an error:** if no attached volume looks like a source --
+because every `DCIM` folder is empty, or none of the cards carries one at all
+(e.g. two completely blank cards) -- the station simply keeps **waiting** in
+`Detecting` and shows the volumes as `empty`. There is no red alarm and nothing
+to reset: plug in a card with media and the copy starts on its own.
+
 **Friendly names:** volumes are labelled in the web UI by their filesystem label
 or USB model. Because the O4's USB product string is only a serial, you can map a
 readable name by USB VID/PID via `identify.device_labels`
 (e.g. `2ca3:0020 -> "O4 Lite"`) -- find the VID/PID with `lsusb`.
+
+**Display order:** when several volumes are attached the most promising appear
+first (the e-paper panel only shows a few rows before collapsing the rest into
+`+N more`). Volumes with a configured `device_labels` name rank highest, then
+volumes that look like a real source (a non-empty media folder), then everything
+else by descending size.
 
 **Detection speed:** after a USB event the station waits only until the bus is
 quiet for `settle_quiet_seconds` (default 1 s) before mounting, capped by
