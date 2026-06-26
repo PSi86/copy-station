@@ -27,7 +27,7 @@ from .config import Config
 from .state import StatusHub
 from .status import Event, State
 from .status.effects import FILL_GAUGE_SECONDS
-from .transfer import TransferError, total_size
+from .transfer import TransferError, total_size, volume_alive
 
 _LOG = logging.getLogger("copystation.devices")
 
@@ -525,7 +525,12 @@ class DeviceWatcher:
 
     @staticmethod
     def _both_present(source: Probe, target: Probe) -> bool:
-        return os.path.exists(source.device_node) and os.path.exists(target.device_node)
+        # Node existence AND mount liveness, so a stale target (node still there
+        # but the filesystem gone) is caught during the pre-copy hold too.
+        return (
+            volume_alive(source.device_node, source.mountpoint)
+            and volume_alive(target.device_node, target.mountpoint)
+        )
 
     def _is_candidate(self, device) -> bool:
         """True if the device is a mountable USB volume (not root).

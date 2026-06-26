@@ -26,12 +26,14 @@ from .naming import next_transfer_dir
 from .state import StationState, StatusHub, StorageInfo
 from .status import Event, State, build_indicator
 from .transfer import (
+    SourceVanishedError,
     TransferError,
     check_free_space,
     cleanup_source,
     copy_tree,
     total_size,
     verify,
+    volume_alive,
 )
 
 _LOG = logging.getLogger("copystation")
@@ -51,20 +53,31 @@ def storage_info(path: Path, label: str = "") -> StorageInfo:
         return StorageInfo(label=label)
 
 
-def _device_abort_check(source_device: str | None, target_device: str | None):
-    """Abort callback that fires if the source OR target device node disappears.
+def _device_abort_check(
+    source_device: str | None,
+    target_device: str | None,
+    source_root: Path | None = None,
+    target_root: Path | None = None,
+):
+    """Abort callback that fires if the source OR target volume goes away.
 
     Returns a labelled reason string so the failure says which side was unplugged,
     or None while both are still present. None if there is nothing to watch.
+
+    For each side it checks both the device node AND the mountpoint's liveness
+    (see :func:`volume_alive`): a pulled *target* often does not show as the node
+    vanishing, yet rsync keeps buffering writes into the page cache, so the
+    mountpoint probe is what catches it -- the data is going nowhere.
     """
-    watched = [(d, label) for d, label in
-               ((source_device, "Source"), (target_device, "Target")) if d]
+    watched = [(d, m, label) for d, m, label in
+               ((source_device, source_root, "Source"),
+                (target_device, target_root, "Target")) if d or m is not None]
     if not watched:
         return None
 
     def _check():
-        for node, label in watched:
-            if not os.path.exists(node):
+        for node, mount, label in watched:
+            if not volume_alive(node, mount):
                 return f"{label} disconnected. Nothing was deleted -- reconnect and retry."
         return None
 
@@ -117,8 +130,11 @@ def perform_transfer(
     _LOG.info("Copying %s -> %s (%d bytes)", media_dir, dest, required)
     hub.log_event(f"Copy started: {dest.name}")
     hub.begin_transfer(dest.name, required)
-    # Abort the copy quickly if the source or target device disappears (unplugged).
-    abort_check = _device_abort_check(source_device, target_device)
+    # Abort the copy quickly if the source or target volume disappears (unplugged
+    # device OR a stale mount, so a vanished target can't go unnoticed).
+    abort_check = _device_abort_check(
+        source_device, target_device, source_root, target_root
+    )
 
     # Progress handler that also refreshes the device view, throttled to ~1 s so
     # the panel tracks the filling target without re-stat'ing on every line.
@@ -133,6 +149,13 @@ def perform_transfer(
                 on_devices_refresh()
 
     copy_tree(media_dir, dest, on_progress=_on_progress, abort_check=abort_check)
+    # Safety net: if the target vanished during the copy but rsync still
+    # "finished" (writes buffered in the page cache, never flushed to a gone
+    # device), do NOT verify/clear -- the data never reached the target.
+    if abort_check is not None:
+        reason = abort_check()
+        if reason:
+            raise SourceVanishedError(reason)
     hub.finish_transfer()
     if on_devices_refresh is not None:
         on_devices_refresh()  # final figures: target now holds the full copy
