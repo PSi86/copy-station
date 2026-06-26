@@ -169,6 +169,81 @@ def test_device_abort_check_labels_which_side(tmp_path):
     assert _device_abort_check(None, None) is None
 
 
+def test_volume_alive_node_missing_is_dead():
+    from copystation.transfer import volume_alive
+
+    assert volume_alive("/dev/does-not-exist") is False
+    assert volume_alive("/dev/does-not-exist", "/wherever") is False
+
+
+def test_volume_alive_detects_dead_mount_via_statvfs(monkeypatch, tmp_path):
+    # The device node still resolves, but the mount no longer answers I/O.
+    import copystation.transfer as transfer
+
+    def _eio(path):
+        raise OSError("Input/output error")
+
+    monkeypatch.setattr(transfer.os, "statvfs", _eio, raising=False)
+    assert transfer.volume_alive(str(tmp_path), tmp_path) is False
+
+
+def test_volume_alive_ok_when_node_and_fs_answer(monkeypatch, tmp_path):
+    import copystation.transfer as transfer
+
+    monkeypatch.setattr(transfer.os, "statvfs", lambda p: None, raising=False)
+    assert transfer.volume_alive(str(tmp_path), tmp_path) is True
+
+
+def test_abort_check_fires_on_dead_target_mount(monkeypatch, tmp_path):
+    # Regression: a pulled target whose device node lingers (card-in-reader /
+    # stale mount) must still be caught -- the mount stops answering even while
+    # rsync buffers writes into the page cache.
+    import os
+
+    import copystation.transfer as transfer
+    from copystation.daemon import _device_abort_check
+
+    src = tmp_path / "src"
+    src.mkdir()
+    tgt = tmp_path / "tgt"
+    tgt.mkdir()
+
+    def _statvfs(path):
+        if os.fspath(path) == os.fspath(tgt):
+            raise OSError("Input/output error")
+        return None
+
+    monkeypatch.setattr(transfer.os, "statvfs", _statvfs, raising=False)
+    # Both device nodes still resolve (real dirs); only the target's fs is dead.
+    msg = _device_abort_check(str(src), str(tgt), src, tgt)()
+    assert msg and "Target" in msg
+
+
+def test_perform_transfer_dead_target_mount_keeps_source(monkeypatch, tmp_path):
+    import os
+
+    import copystation.transfer as transfer
+
+    src = tmp_path / "camera"
+    _make_dcim(src, {"100MEDIA/clip.mp4": b"video-data"})
+    target = tmp_path / "sd"
+    target.mkdir()
+
+    def _statvfs(path):
+        if os.fspath(path) == os.fspath(target):
+            raise OSError("Input/output error")
+        return None
+
+    monkeypatch.setattr(transfer.os, "statvfs", _statvfs, raising=False)
+    # The target device node still exists (real dir), but its filesystem is gone.
+    with pytest.raises(SourceVanishedError, match="Target"):
+        perform_transfer(
+            src, target, "DJI_O4", _hub(), _config(), target_device=str(target)
+        )
+    # Safety guarantee: the source media is untouched.
+    assert (src / "DCIM" / "100MEDIA" / "clip.mp4").read_bytes() == b"video-data"
+
+
 # ----- end-to-end via perform_transfer -----------------------------------------
 
 

@@ -13,6 +13,7 @@ Verification is intentionally kept fast: it compares file count and file sizes
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -33,6 +34,30 @@ AbortCheck = Callable[[], Optional[str]]
 
 # How often the abort watcher polls while a copy is running.
 _ABORT_POLL_SECONDS = 0.5
+
+
+def volume_alive(device_node: Optional[str], mountpoint=None) -> bool:
+    """True while a volume is still really present and answering I/O.
+
+    Checking the device node alone is NOT enough -- pulling a USB target is not
+    always visible as the node vanishing (a card pulled from a still-connected
+    reader, or a surprise-removed device, can leave a STALE node and a stale
+    mount). Meanwhile rsync happily buffers writes into the page cache, so a copy
+    can "finish" while the data never reached any device. So we ALSO probe the
+    mountpoint: once the backing device is gone, ``statvfs`` on the (now stale)
+    mount raises. Together these catch a removed source or target promptly.
+
+    ``statvfs`` is POSIX-only; on the Windows dev machine it is absent and only
+    the node check applies (the daemon path is Linux-only anyway).
+    """
+    if device_node and not os.path.exists(device_node):
+        return False
+    if mountpoint is not None and hasattr(os, "statvfs"):
+        try:
+            os.statvfs(mountpoint)
+        except OSError:
+            return False
+    return True
 
 
 class TransferError(Exception):
