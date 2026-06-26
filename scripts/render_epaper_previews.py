@@ -53,7 +53,7 @@ STATES = {
     },
     "error": {
         "phase": "error",
-        "error": "Target device was disconnected during the copy.",
+        "error": "Target disconnected. Nothing was deleted -- reconnect and retry.",
         "source": _SOURCE, "target": _TARGET, "devices": [{}, {}],
     },
 }
