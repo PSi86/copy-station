@@ -63,7 +63,8 @@ class Probe:
     capacity: int
     free: int
     name: str
-    has_media: bool = True  # DCIM folder contains at least one file
+    has_media: bool = True   # media folder holds at least one real file
+    is_empty: bool = False   # nothing to copy: empty media folder OR blank medium
 
 
 def select_roles(
@@ -154,15 +155,15 @@ def device_views(
     shown as ``"candidate"`` rather than guessed, because the smaller/larger
     split is only known once two volumes are present.
 
-    ``role``: ``"target"`` | ``"empty"`` (source-shaped but its DCIM folder is
-    empty -> nothing to copy) | ``"source"`` | ``"candidate"`` (eligible,
-    undecided) | ``"unused"`` (eligible but not chosen, e.g. a third volume) |
-    ``"ignored"`` (below ``min_bytes``).
+    ``role``: ``"target"`` | ``"empty"`` (nothing to copy: an empty media folder
+    OR a blank medium -> never used as source) | ``"source"`` | ``"candidate"``
+    (eligible, has content, undecided) | ``"unused"`` (eligible but not chosen,
+    e.g. a third volume) | ``"ignored"`` (below ``min_bytes``).
 
     Role precedence matters: ``target`` is checked BEFORE ``empty`` (a device used
-    as the target must never be flagged ``empty``, even if its own DCIM is empty),
-    and ``empty`` is checked BEFORE ``source`` (so once a source's DCIM has been
-    cleared after a successful copy it flips from ``source`` to ``empty``).
+    as the target must never be flagged ``empty``, even if it carries no media),
+    and ``empty`` is checked BEFORE ``source`` (so once a source has been cleared
+    after a successful copy it flips from ``source`` to ``empty``).
     """
     src_node = source.device_node if source else None
     tgt_node = target.device_node if target else None
@@ -173,14 +174,14 @@ def device_views(
             role = "ignored"
         elif p.device_node == tgt_node:
             role = "target"  # the chosen target -- emptiness is irrelevant here
-        elif p.has_dcim and p.matched_source and not p.has_media:
-            role = "empty"  # a source with an empty DCIM -- nothing to copy
+        elif p.is_empty:
+            role = "empty"  # nothing to copy (empty media folder or blank medium)
         elif p.device_node == src_node:
             role = "source"
         elif src_node or tgt_node:
             role = "unused"  # eligible, but a different volume was chosen
         else:
-            role = "candidate"  # no decision yet (waiting for a second volume)
+            role = "candidate"  # eligible, has content, no decision yet
         views.append(
             {
                 "name": p.name,
@@ -195,18 +196,50 @@ def device_views(
     return views
 
 
-def _dcim_has_media(media_dir: Path) -> bool:
-    """True if the DCIM folder contains at least one regular file (any depth).
+# Filesystem bookkeeping that is NOT real content -- a card carrying only these
+# still counts as empty. Hidden entries (names starting with ".") are junk too.
+_JUNK_NAMES = frozenset({
+    "system volume information", "$recycle.bin", "found.000", "lost.dir",
+    "thumbs.db", ".ds_store", ".trashes", ".spotlight-v100", ".fseventsd",
+    ".android_secure", "._.trashes", "desktop.ini",
+})
 
-    Early-exits on the first file, so it is cheap even for a full card.
+
+def _is_junk(name: str) -> bool:
+    """True for hidden entries and known filesystem bookkeeping (not real data)."""
+    n = name.lower()
+    return n.startswith(".") or n in _JUNK_NAMES
+
+
+def _dcim_has_media(media_dir: Path) -> bool:
+    """True if the media folder holds at least one real (non-junk) file (any depth).
+
+    Hidden files and filesystem bookkeeping (.DS_Store, Thumbs.db, System Volume
+    Information, ...) are ignored, so a card the OS sprinkled junk onto still reads
+    as empty when there is nothing worth copying. Early-exits on the first hit.
     """
     try:
         for entry in media_dir.rglob("*"):
-            if entry.is_file() and not entry.is_symlink():
+            if not entry.is_file() or entry.is_symlink():
+                continue
+            rel = entry.relative_to(media_dir)
+            if not any(_is_junk(part) for part in rel.parts):
                 return True
     except OSError:  # pragma: no cover - defensive (e.g. media vanished)
         return False
     return False
+
+
+def _medium_is_blank(mountpoint: Path) -> bool:
+    """True if the medium has no real (non-junk) entries at the top level.
+
+    Used to flag a completely empty card as "empty" even when it has no media
+    folder at all -- so it is shown as empty and never picked as a source.
+    """
+    try:
+        return not any(not _is_junk(entry.name) for entry in mountpoint.iterdir())
+    except OSError:  # pragma: no cover - defensive
+        return False
 
 
 def _root_source_device() -> Optional[str]:
@@ -306,7 +339,16 @@ class DeviceWatcher:
     # ----- internal helpers ----------------------------------------------------
 
     def _wait_for_change(self, monitor) -> None:
-        """Block until any block add/remove event arrives.
+        """Block until a block event that can change which volumes are available.
+
+        ``add``/``remove`` cover a volume appearing/disappearing. A pulled card in
+        a reader that does not report a clean removal does NOT emit ``remove`` at
+        once (the node lingers); instead the kernel emits a ``change`` carrying
+        ``DISK_MEDIA_CHANGE`` -- so we react to that too, otherwise such a removal
+        would go unnoticed until the (much later) ``remove``. Other ``change``
+        events (benign property updates) are ignored so the post-copy 100 % view
+        is not disturbed until a device is actually touched. This is the set of
+        events needed for reliable detection across USB topologies / card readers.
 
         A clean ``systemctl stop`` terminates the process here (SIGTERM); the
         LEDs are switched off afterwards by the unit's ExecStopPost. Ctrl-C raises
@@ -314,6 +356,8 @@ class DeviceWatcher:
         """
         for device in iter(monitor.poll, None):
             if device.action in ("add", "remove"):
+                return
+            if device.action == "change" and device.get("DISK_MEDIA_CHANGE"):
                 return
 
     def _settle(self, monitor) -> None:
@@ -435,12 +479,17 @@ class DeviceWatcher:
             except TransferError:
                 self._hub.set_devices(device_views(probes, min_bytes))
                 raise
-            self._hub.set_devices(device_views(probes, min_bytes, source, target))
 
             if not self._armed:
-                # This set was already handled; wait until a device is removed.
+                # This set was already handled (a copy ran). Show the raw detected
+                # volumes -- candidates/empty, like ready->detecting -- so stale
+                # source/target labels don't linger, and wait for a removal to
+                # re-arm. The phase is left as-is (a SUCCESS 100 % view persists).
+                self._hub.set_devices(device_views(probes, min_bytes))
                 return
 
+            # Roles are shown only when a copy is actually imminent.
+            self._hub.set_devices(device_views(probes, min_bytes, source, target))
             self._armed = False
             _LOG.info(
                 "Source = %s (%s, %d B), Target = %s (%d B)",
@@ -525,8 +574,8 @@ class DeviceWatcher:
 
     @staticmethod
     def _both_present(source: Probe, target: Probe) -> bool:
-        # Node existence AND mount liveness, so a stale target (node still there
-        # but the filesystem gone) is caught during the pre-copy hold too.
+        # Node existence AND the kernel's backing-disk capacity, so a pulled card
+        # whose node lingers is caught during the pre-copy hold too -- passively.
         return (
             volume_alive(source.device_node, source.mountpoint)
             and volume_alive(target.device_node, target.mountpoint)
@@ -561,10 +610,16 @@ class DeviceWatcher:
         return True
 
     def _current_partitions(self) -> list:
-        """All currently present, eligible USB volumes (partitions or disks)."""
+        """All currently present, eligible *and live* USB volumes.
+
+        ``volume_alive`` drops a node whose backing disk the kernel has zeroed --
+        a card pulled from a reader leaves the node lingering for several seconds,
+        and without this filter it would still be listed (and re-shown with its
+        old role) until the late ``remove``.
+        """
         result = []
         for device in self._context.list_devices(subsystem="block"):
-            if self._is_candidate(device):
+            if self._is_candidate(device) and volume_alive(device.device_node):
                 result.append(device)
         return result
 
@@ -588,6 +643,7 @@ class DeviceWatcher:
 
         media_dir = mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
+        has_media = has_dcim and _dcim_has_media(media_dir)
         return Probe(
             sys_name=dev.sys_name,
             device_node=dev.device_node,
@@ -597,7 +653,10 @@ class DeviceWatcher:
             capacity=capacity,
             free=free,
             name=self._volume_name(dev),
-            has_media=has_dcim and _dcim_has_media(media_dir),
+            has_media=has_media,
+            # Nothing to copy: the media folder is present but empty, OR the whole
+            # medium is blank (no real content at all).
+            is_empty=not has_media and (has_dcim or _medium_is_blank(mountpoint)),
         )
 
     def _restat(self, probe: Probe) -> Probe:
@@ -613,12 +672,14 @@ class DeviceWatcher:
             return probe
         media_dir = probe.mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
+        has_media = has_dcim and _dcim_has_media(media_dir)
         return replace(
             probe,
             capacity=stat.f_frsize * stat.f_blocks,
             free=stat.f_frsize * stat.f_bavail,
             has_dcim=has_dcim,
-            has_media=has_dcim and _dcim_has_media(media_dir),
+            has_media=has_media,
+            is_empty=not has_media and (has_dcim or _medium_is_blank(probe.mountpoint)),
         )
 
     @staticmethod

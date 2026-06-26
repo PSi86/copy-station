@@ -20,7 +20,12 @@ GB = 1024**3
 MIN_BYTES = 6 * GB
 
 
-def _probe(name, capacity, has_dcim, matched_source=True, free=None, has_media=True):
+def _probe(name, capacity, has_dcim, matched_source=True, free=None,
+           has_media=True, is_empty=None):
+    # Mirror the production rule: empty = no media AND (has a media folder OR the
+    # medium is blank). Tests for a blank medium (no DCIM) pass is_empty=True.
+    if is_empty is None:
+        is_empty = (not has_media) and has_dcim
     return Probe(
         sys_name=name,
         device_node=f"/dev/{name}",
@@ -31,6 +36,7 @@ def _probe(name, capacity, has_dcim, matched_source=True, free=None, has_media=T
         free=capacity if free is None else free,
         name=name,
         has_media=has_media,
+        is_empty=is_empty,
     )
 
 
@@ -153,8 +159,10 @@ def test_fill_fraction_clamps_and_handles_zero_capacity():
 
 
 def _probe_with_node(name, node):
+    # Mount on the node's parent (a real, existing dir in the tests) so the
+    # liveness checks in _both_present don't spuriously fail.
     return Probe(
-        sys_name=name, device_node=str(node), mountpoint=Path("/x"),
+        sys_name=name, device_node=str(node), mountpoint=Path(node).parent,
         has_dcim=True, matched_source=True, capacity=GB, free=0, name=name, has_media=True,
     )
 
@@ -413,6 +421,95 @@ def test_settle_returns_immediately_when_quiet():
     mon = _FakeMonitor([])  # bus already quiet
     w._settle(mon)
     assert mon.polls == 1
+
+
+# ----- Theme 2: junk-robust media / blank-medium / empty flag -------------------
+
+
+def test_dcim_has_media_ignores_junk(tmp_path):
+    from copystation.devices import _dcim_has_media
+
+    dcim = tmp_path / "DCIM"
+    (dcim / "100MEDIA").mkdir(parents=True)
+    (dcim / ".DS_Store").write_bytes(b"x")
+    (dcim / "100MEDIA" / "Thumbs.db").write_bytes(b"x")
+    assert _dcim_has_media(dcim) is False           # only junk -> nothing to copy
+    (dcim / "100MEDIA" / "clip.mp4").write_bytes(b"x")
+    assert _dcim_has_media(dcim) is True             # a real media file
+
+
+def test_medium_is_blank_ignores_junk(tmp_path):
+    from copystation.devices import _medium_is_blank
+
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    assert _medium_is_blank(mp) is True              # nothing at all
+    (mp / "System Volume Information").mkdir()
+    (mp / ".Trashes").mkdir()
+    assert _medium_is_blank(mp) is True              # only junk
+    (mp / "Photos").mkdir()
+    assert _medium_is_blank(mp) is False             # a real folder = content
+
+
+def test_device_views_blank_medium_is_empty():
+    # A completely blank card (no media folder, no real content) -> "empty",
+    # so it is never picked as a source.
+    blank = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    [view] = device_views([blank], MIN_BYTES)
+    assert view["role"] == "empty"
+
+
+def test_device_views_card_with_content_but_no_dcim_is_candidate():
+    # Content present but no media folder -> not "empty", a plain candidate.
+    card = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=False)
+    [view] = device_views([card], MIN_BYTES)
+    assert view["role"] == "candidate"
+
+
+# ----- Theme 1: the event set that drives re-evaluation -------------------------
+
+
+class _Event:
+    def __init__(self, action, **props):
+        self.action = action
+        self._props = props
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+
+def _polls_until_return(events):
+    w = _watcher()
+    mon = _FakeMonitor(events)
+    w._wait_for_change(mon)
+    return mon.polls
+
+
+def test_wait_for_change_triggers_on_the_right_events():
+    assert _polls_until_return([_Event("add")]) == 1
+    assert _polls_until_return([_Event("remove")]) == 1
+    # A pulled card in a reader shows up as a media-change, not a prompt remove.
+    assert _polls_until_return([_Event("change", DISK_MEDIA_CHANGE="1")]) == 1
+    # A benign change is skipped; the following remove is what returns.
+    assert _polls_until_return([_Event("change"), _Event("remove")]) == 2
+
+
+def test_current_partitions_filters_dead_lingering_nodes(monkeypatch):
+    import copystation.devices as dev
+
+    w = _watcher()
+    live = _FakeDevice("sdb1", DEVTYPE="partition", ID_BUS="usb", ID_FS_TYPE="exfat")
+    live.device_node = "/dev/sdb1"
+    dead = _FakeDevice("sdc1", DEVTYPE="partition", ID_BUS="usb", ID_FS_TYPE="exfat")
+    dead.device_node = "/dev/sdc1"  # node lingers, but the kernel zeroed it
+
+    class _Ctx:
+        def list_devices(self, **kw):
+            return [live, dead]
+
+    w._context = _Ctx()
+    monkeypatch.setattr(dev, "volume_alive", lambda node, *a, **k: node != "/dev/sdc1")
+    assert [d.sys_name for d in w._current_partitions()] == ["sdb1"]
 
 
 def test_configured_label_matches_vid_pid():

@@ -64,10 +64,10 @@ def _device_abort_check(
     Returns a labelled reason string so the failure says which side was unplugged,
     or None while both are still present. None if there is nothing to watch.
 
-    For each side it checks both the device node AND the mountpoint's liveness
-    (see :func:`volume_alive`): a pulled *target* often does not show as the node
-    vanishing, yet rsync keeps buffering writes into the page cache, so the
-    mountpoint probe is what catches it -- the data is going nowhere.
+    Each side is checked with :func:`volume_alive` (device node + the kernel's
+    backing-disk capacity), which catches both a whole device being unplugged and
+    a card pulled from a reader whose node lingers -- passively, without writing
+    to either volume.
     """
     watched = [(d, m, label) for d, m, label in
                ((source_device, source_root, "Source"),
