@@ -6,6 +6,20 @@ a **(micro) SD card**, verifies the transfer and then clears the source. Runs as
 a headless systemd service on a **Radxa Cubie A7S** (`radxa-a733-bullseye-cli-r6`)
 or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 
+## Contents
+
+* [Flow](#flow)
+* [Web interface](#web-interface-optional)
+* [E-Paper display](#e-paper-display-optional)
+* [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
+* [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
+* [Powering off safely](#powering-off-safely)
+  * [Shutdown button](#shutdown-button-optional)
+* [Development (without hardware)](#development-without-hardware-eg-windows)
+* [Deployment](#deployment)
+* [Source/target detection](#sourcetarget-detection)
+* [Configuration](#configuration)
+
 ## Flow
 
 ```
@@ -55,45 +69,6 @@ runtime -- no per-interface rebinding.
 The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API
 docs). Open `http://<device-ip>:8080/`.
-
-## Grove LED Bar v2.0 (optional)
-
-Add `grove_led_bar` to `status.backends` to drive a Seeed Grove LED Bar v2.0
-(MY9221) over two GPIO lines. During a copy the bar shows the proportional copy
-progress and blinks at 10 Hz. On detection it flashes the whole bar twice and
-then shows a **steady fill gauge** of the detected volume for **~3 s**, after
-which segment 2 blinks slowly while it waits (distinct from the steady idle
-segment 3; the gauge stays up until the copy starts). On an **error** (e.g. a device
-unplugged mid-copy) the **whole bar blinks** until the devices are removed; Ready
-is a single steady segment (3). When the **service starts** the bar wipes up once;
-when it **stops** every segment goes off. Set the `clock_line` / `data_line`
-offsets (from `gpioinfo`) in the config.
-
-## WS2812B / NeoPixel strip (optional)
-
-Add `ws2812` to `status.backends` to drive an addressable WS2812B / NeoPixel
-strip of **1-10 LEDs** over SPI (MOSI, each data bit encoded as three SPI bits).
-A newly detected volume flashes the whole strip green **twice**, then shows a
-**steady white gauge** of how full that volume is for **~3 s**; while it then
-waits for the second device the first LED gives a slow **magenta** pulse (clearly
-not the green idle), and once a copy is imminent the gauge stays up until the copy
-bar replaces it (no gap). During a copy the LEDs `1..N` form a **blue** progress
-bar that blinks at 10 Hz (the same activity pattern as the Grove LED Bar). On an
-**error** -- e.g. a device unplugged mid-copy -- **all LEDs blink red** until the
-devices are removed. Ready is a steady green first LED
-(Success = a short green blink). A source with nothing to copy holds the whole
-strip **blue** for a few seconds. When the **service starts** the strip wipes
-**cyan** once; when it **stops** all LEDs go off. Set `led_count`
-(1-10) and the `device` (e.g. `/dev/spidev0.0`) in
-the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
-Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
-MOSI (**BCM GPIO10 / pin 19**); the node is `/dev/spidev0.0`. On the **Cubie A7S**
-run **`sudo rsetup`** -> Overlays and enable **`spidev on SPI1`** (the backend needs
-a `/dev/spidev*` node), reboot, then wire DIN to **SPI1-MOSI = PD12, header pin 19**
--- only MOSI is used (MISO/CLK/CS stay unconnected); the node is **`/dev/spidev1.0`**
-(confirm with `ls /dev/spidev*`). Note that PD12/PD13 (pins 19/21) are the same pins
-the Grove LED Bar uses, so drive **either** the Grove bar **or** a WS2812 strip on
-them, not both.
 
 ## E-Paper display (optional)
 
@@ -147,19 +122,41 @@ accumulated ghosting. A freshly detected device drawn onto a blank area is a cle
 partial. When the service stops, the panel is left showing a clean
 `Copy_Station` / version / `Power off` frame and then deep-sleeps.
 
-**Wiring (standard Waveshare module → Raspberry Pi, BCM == line offset):**
+**Wiring.** On both boards the **GPIO number differs from the physical header
+pin** (e.g. on the Pi `MOSI` is GPIO10 but sits on pin 19). Each cell therefore
+reads **function name — header pin** (the number printed on the board), and for
+the three control lines you actually enter in the config also the libgpiod
+**line** — the number you put into `dc`/`rst`/`busy`. The SPI bus signals
+(DIN/CLK/CS) are owned by the SPI peripheral and never entered in the config, so
+they show only their SPI function and pin on both boards (the same reason the
+Cubie's MOSI isn't labelled with its `PD12` port name). For the control lines the
+line on the **Raspberry Pi** equals the GPIO/BCM number (GPIO25 on pin 22 →
+`line 25`); on the **Cubie A7S** it follows `(bank − 'A')·32 + pin` (PB10 on pin
+10 → `line 42`). CS is the SPI hardware chip-select on both boards, so leave `cs`
+unset. The Cubie column is the confirmed-working WeAct 2.9″ wiring from
+[config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml); confirm the
+lines with `gpioinfo`.
 
-| Module | Pi pin | Module | Pi pin |
-|--------|--------|--------|--------|
-| VCC → 3V3 | 1 | DC → BCM25 | 22 |
-| GND → GND | 6 | RST → BCM17 | 11 |
-| DIN → MOSI/BCM10 | 19 | BUSY → BCM24 | 18 |
-| CLK → SCLK/BCM11 | 23 | CS → CE0/BCM8 | 24 |
+| Signal | Raspberry Pi | Cubie A7S |
+|--------|-------------|-----------|
+| VCC (3V3) | 3V3 — pin 1 (or 17) | 3V3 — pin 1 (or 17) |
+| GND | GND — pin 6 (any GND) | GND — pin 6 (any GND) |
+| DIN (data in) | MOSI — pin 19 | SPI1-MOSI — pin 19 |
+| CLK (clock) | SCLK — pin 23 | SPI1-CLK — pin 23 |
+| CS (chip-select) | CE0 — pin 24 | SPI1-CS0 — pin 24 |
+| DC (data/command) | GPIO25 — pin 22 — line 25 | PB10 — pin 10 — line 42 |
+| RST (reset) | GPIO17 — pin 11 — line 17 | PJ25 — pin 18 — line 313 |
+| BUSY | GPIO24 — pin 18 — line 24 | PJ24 — pin 16 — line 312 |
 
-Enable SPI exactly as for the WS2812 above (`/dev/spidev0.0` on the Pi,
-`/dev/spidev1.0` on the Cubie A7S; set `dc`/`rst`/`busy` to free Allwinner offsets
-from `gpioinfo` on the Cubie). The renderer uses **Pillow** (`python3-pil` +
-`fonts-dejavu-core`, installed by `scripts/install.sh`).
+Enable SPI first -- on the **Raspberry Pi** via `sudo raspi-config` -> Interface
+Options -> SPI (or `dtparam=spi=on` in `/boot/firmware/config.txt`), giving
+`/dev/spidev0.0`; on the **Cubie A7S** via `sudo rsetup` -> Overlays -> enable
+`spidev on SPI1` and reboot, giving `/dev/spidev1.0` (confirm with
+`ls /dev/spidev*`). The Cubie's `dc`/`rst`/`busy` must be **plain, free** GPIO
+lines from `gpioinfo` -- not an SPI/DBI function pin -- or the kernel refuses the
+request (errno 517/16); the lines in the table are one confirmed set. The
+renderer uses **Pillow** (`python3-pil` + `fonts-dejavu-core`, installed by
+`scripts/install.sh`).
 
 > **Do not share the SPI bus with a WS2812 strip.** The ws2812 backend abuses the
 > MOSI line with strict timing and no chip-select, so it cannot coexist with the
@@ -169,6 +166,45 @@ The exact panel init/partial waveform and BUSY polarity may need confirming on
 your specific module (`busy_active_high`, `rotation`/`mirror`, `cs` for a panel
 that needs a GPIO chip-select). See [config.example.yaml](config.example.yaml)
 for the full `epaper` block.
+
+## WS2812B / NeoPixel strip (optional)
+
+Add `ws2812` to `status.backends` to drive an addressable WS2812B / NeoPixel
+strip of **1-10 LEDs** over SPI (MOSI, each data bit encoded as three SPI bits).
+A newly detected volume flashes the whole strip green **twice**, then shows a
+**steady white gauge** of how full that volume is for **~3 s**; while it then
+waits for the second device the first LED gives a slow **magenta** pulse (clearly
+not the green idle), and once a copy is imminent the gauge stays up until the copy
+bar replaces it (no gap). During a copy the LEDs `1..N` form a **blue** progress
+bar that blinks at 10 Hz (the same activity pattern as the Grove LED Bar). On an
+**error** -- e.g. a device unplugged mid-copy -- **all LEDs blink red** until the
+devices are removed. Ready is a steady green first LED
+(Success = a short green blink). A source with nothing to copy holds the whole
+strip **blue** for a few seconds. When the **service starts** the strip wipes
+**cyan** once; when it **stops** all LEDs go off. Set `led_count`
+(1-10) and the `device` (e.g. `/dev/spidev0.0`) in
+the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
+Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
+MOSI (**BCM GPIO10 / pin 19**); the node is `/dev/spidev0.0`. On the **Cubie A7S**
+run **`sudo rsetup`** -> Overlays and enable **`spidev on SPI1`** (the backend needs
+a `/dev/spidev*` node), reboot, then wire DIN to **SPI1-MOSI = PD12, header pin 19**
+-- only MOSI is used (MISO/CLK/CS stay unconnected); the node is **`/dev/spidev1.0`**
+(confirm with `ls /dev/spidev*`). Note that PD12/PD13 (pins 19/21) are the same pins
+the Grove LED Bar uses, so drive **either** the Grove bar **or** a WS2812 strip on
+them, not both.
+
+## Grove LED Bar v2.0 (optional)
+
+Add `grove_led_bar` to `status.backends` to drive a Seeed Grove LED Bar v2.0
+(MY9221) over two GPIO lines. During a copy the bar shows the proportional copy
+progress and blinks at 10 Hz. On detection it flashes the whole bar twice and
+then shows a **steady fill gauge** of the detected volume for **~3 s**, after
+which segment 2 blinks slowly while it waits (distinct from the steady idle
+segment 3; the gauge stays up until the copy starts). On an **error** (e.g. a device
+unplugged mid-copy) the **whole bar blinks** until the devices are removed; Ready
+is a single steady segment (3). When the **service starts** the bar wipes up once;
+when it **stops** every segment goes off. Set the `clock_line` / `data_line`
+offsets (from `gpioinfo`) in the config.
 
 ## Powering off safely
 
