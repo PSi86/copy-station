@@ -141,7 +141,8 @@ def _render_portrait(view: ViewModel, width: int, height: int):
     footer = view.show_progress and (view.speed_text or view.eta_text != "--")
     data_bottom = (height - m - _line_height(small_f) - 4) if footer else (height - m)
     items, overflow = _gauge_items(view)
-    y = _draw_gauges(draw, m, right, y, data_bottom, items, overflow, label_f, small_f, 9)
+    y = _draw_gauges(draw, m, right, y, data_bottom, items, overflow, label_f, small_f,
+                     9, with_bars=not view.show_progress)
 
     if footer:
         foot_y = height - m - _line_height(small_f)
@@ -194,7 +195,8 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
         y += max(9, height // 11) + 8
     items, overflow = _gauge_items(view)
-    _draw_gauges(draw, rx, x1, y, height - m, items, overflow, label_f, small_f, 9)
+    _draw_gauges(draw, rx, x1, y, height - m, items, overflow, label_f, small_f,
+                 9, with_bars=not view.show_progress)
     return img
 
 
@@ -260,21 +262,30 @@ def _gauge_items(view):
 
 
 def _stacked_item_height(label_f, small_f, bar_h):
-    return _line_height(label_f) + 1 + _line_height(small_f) + 2 + bar_h + 8
+    """Height of one stacked row: role line + name/value line, then the fill bar
+    (``bar_h``) or, when bars are suppressed (``bar_h == 0``), a small gap."""
+    base = _line_height(label_f) + 1 + _line_height(small_f) + 2
+    return base + (bar_h + 8 if bar_h else 6)
 
 
-def _draw_gauges(draw, x0, x1, y, bottom, items, overflow, label_f, small_f, bar_h):
+def _draw_gauges(draw, x0, x1, y, bottom, items, overflow, label_f, small_f,
+                 bar_h, with_bars=True):
     """Render the gauge rows, stacking the role onto its own line (role / name +
-    storage / bar) when the remaining vertical space fits every row that way;
-    otherwise fall back to the compact one-line layout."""
+    storage [/ bar]) when the remaining vertical space fits every row that way;
+    otherwise fall back to the compact one-line layout.
+
+    ``with_bars=False`` drops the per-device fill bar -- used during a copy, where
+    the transfer progress bar is already the live indicator, so the source/target
+    names still fit stacked beside it (the storage figure stays as text)."""
     if not items:
         return y
+    item_bar = bar_h if with_bars else 0
     stacked = (
-        len(items) * _stacked_item_height(label_f, small_f, bar_h) <= (bottom - y)
+        len(items) * _stacked_item_height(label_f, small_f, item_bar) <= (bottom - y)
     )
     for role, name, value, fraction, present in items:
         y = _draw_gauge_item(
-            draw, x0, x1, y, role, name, value, fraction, present,
+            draw, x0, x1, y, role, name, value, fraction, present and with_bars,
             label_f, small_f, bar_h, stacked,
         )
     if overflow > 0:
@@ -283,7 +294,7 @@ def _draw_gauges(draw, x0, x1, y, bottom, items, overflow, label_f, small_f, bar
     return y
 
 
-def _draw_gauge_item(draw, x0, x1, y, role, name, value, fraction, present,
+def _draw_gauge_item(draw, x0, x1, y, role, name, value, fraction, draw_bar,
                      label_f, small_f, bar_h, stacked):
     avail = x1 - x0
     if not stacked:
@@ -293,11 +304,11 @@ def _draw_gauge_item(draw, x0, x1, y, role, name, value, fraction, present,
         secondary = name if distinct else ""
         return _gauge_row(
             draw, x0, x1, y, primary, secondary, value, fraction,
-            label_f, small_f, draw_bar=present,
+            label_f, small_f, draw_bar=draw_bar,
         )
 
     # Stacked: the role gets its own line; the device name and the storage
-    # figure share the line above the fill bar.
+    # figure share the line above the (optional) fill bar.
     _text(draw, x0, y, role or name, label_f)
     y += _line_height(label_f) + 1
     show_name = bool(role) and bool(name) and name.lower() != role.lower()
@@ -308,11 +319,11 @@ def _draw_gauge_item(draw, x0, x1, y, role, name, value, fraction, present,
         if value:
             _text(draw, 0, y, value, small_f, anchor_right=x1)
         y += _line_height(small_f) + 2
-    if present:
+    if draw_bar:
         _bar(draw, x0, y, avail, bar_h, fraction)
         y += bar_h + 8
     else:
-        y += 4
+        y += 6
     return y
 
 

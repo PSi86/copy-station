@@ -143,6 +143,27 @@ def test_stacked_falls_back_to_compact_on_a_short_panel():
     assert _black_pixels(img) > 0
 
 
+def test_copying_shows_the_target_device_name():
+    # During a copy the source/target names must be visible (stacked, no per-device
+    # bar). Changing only the target name must change the rendered pixels -- proof
+    # the name is drawn rather than dropped.
+    from dataclasses import replace
+
+    base = _vm(67)
+    short = _black_pixels(render(replace(base, target=StorageView("SD", 120, 256)), 200, 200))
+    longer = _black_pixels(
+        render(replace(base, target=StorageView("SanDisk Extreme Pro", 120, 256)), 200, 200)
+    )
+    assert longer > short
+
+
+def test_stacked_height_excludes_a_suppressed_bar():
+    from copystation.status.epaper.layout import _font, _stacked_item_height
+
+    lf, sf = _font(12), _font(10)
+    assert _stacked_item_height(lf, sf, 0) < _stacked_item_height(lf, sf, 9)
+
+
 def test_stopped_frame():
     img = render_stopped("0.1.0", 200, 200)
     assert img.size == (200, 200)
