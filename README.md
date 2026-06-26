@@ -431,6 +431,23 @@ quiet for `settle_quiet_seconds` (default 1 s) before mounting, capped by
 `settle_seconds` (default 2 s). Reliability is unaffected -- a volume that appears
 later simply triggers another evaluation.
 
+**Caveat -- USB-C combo ports with DisplayPort alt-mode:** if the hub hangs off a
+USB-C port that doubles as a video output (DP alt-mode / HDMI), adding a device
+can trigger a **full re-enumeration of everything on that port**. The board's
+Type-C controller cuts and restores `VBUS` and the USB/DP mux re-negotiates, so
+*all* attached volumes disconnect and come back over several seconds. The station
+then briefly falls back to `Ready` and re-detects each device one by one. On the
+**Cubie A7S** this was observed in the kernel log as the on-board `husb311` TCPC
+cycling VBUS (`set vbus Off`/`On`) together with the `phy_switcher` flipping
+between `STATE_DP_D` and `STATE_USB`. A likely trigger: the hub first shares the
+port in (or alongside) DisplayPort alt-mode and then switches to plain USB once
+enough devices are attached -- some hubs renegotiate the link based on the number
+of downstream devices or an internal bandwidth limit -- which forces the port
+reset. This is **accepted for now and not worked around in software** (the empty
+window is too long to mask cleanly). To avoid it, prefer a **powered hub** and/or
+connect the hub to a **plain USB-A host port** rather than the DP combo port, and
+use a known-good cable.
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml). Without the file the defaults
