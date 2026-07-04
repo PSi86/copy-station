@@ -64,7 +64,8 @@ class Probe:
     free: int
     name: str
     has_media: bool = True   # media folder holds at least one real file
-    is_empty: bool = False   # nothing to copy: empty media folder OR blank medium
+    is_empty: bool = False   # effectively blank: no real file anywhere on the medium
+    no_media: bool = False   # nothing to copy, but the medium carries other data
     has_label: bool = False  # a user-configured label (identify.device_labels) matched
 
 
@@ -204,15 +205,19 @@ def device_views(
     shown as ``"candidate"`` rather than guessed, because the smaller/larger
     split is only known once two volumes are present.
 
-    ``role``: ``"target"`` | ``"empty"`` (nothing to copy: an empty media folder
-    OR a blank medium -> never used as source) | ``"source"`` | ``"candidate"``
-    (eligible, has content, undecided) | ``"unused"`` (eligible but not chosen,
-    e.g. a third volume) | ``"ignored"`` (below ``min_bytes``).
+    ``role``: ``"target"`` | ``"no_media"`` (nothing to copy, but the medium
+    carries other data -> never used as source) | ``"empty"`` (effectively blank
+    medium -> never used as source) | ``"source"`` | ``"candidate"`` (eligible,
+    has media, undecided) | ``"unused"`` (eligible but not chosen, e.g. a third
+    volume) | ``"ignored"`` (below ``min_bytes``).
 
-    Role precedence matters: ``target`` is checked BEFORE ``empty`` (a device used
-    as the target must never be flagged ``empty``, even if it carries no media),
-    and ``empty`` is checked BEFORE ``source`` (so once a source has been cleared
-    after a successful copy it flips from ``source`` to ``empty``).
+    Role precedence matters: ``target`` is checked BEFORE ``no_media``/``empty``
+    (a device used as the target must never be flagged either way, even if it
+    carries no media), ``no_media`` takes priority over ``empty`` (they are
+    disjoint by construction, see :func:`_content_flags`, so ``empty`` really
+    means blank), and both are checked BEFORE ``source`` (so once a source has
+    been cleared after a successful copy it flips from ``source`` to ``empty``
+    -- or to ``no_media`` if the card held unrelated files all along).
     """
     src_node = source.device_node if source else None
     tgt_node = target.device_node if target else None
@@ -223,14 +228,16 @@ def device_views(
             role = "ignored"
         elif p.device_node == tgt_node:
             role = "target"  # the chosen target -- emptiness is irrelevant here
+        elif p.no_media:
+            role = "no_media"  # carries data, but nothing to copy
         elif p.is_empty:
-            role = "empty"  # nothing to copy (empty media folder or blank medium)
+            role = "empty"  # effectively blank medium
         elif p.device_node == src_node:
             role = "source"
         elif src_node or tgt_node:
             role = "unused"  # eligible, but a different volume was chosen
         else:
-            role = "candidate"  # eligible, has content, no decision yet
+            role = "candidate"  # eligible, has media, no decision yet
         views.append(
             {
                 "name": p.name,
@@ -260,18 +267,19 @@ def _is_junk(name: str) -> bool:
     return n.startswith(".") or n in _JUNK_NAMES
 
 
-def _dcim_has_media(media_dir: Path) -> bool:
-    """True if the media folder holds at least one real (non-junk) file (any depth).
+def _has_real_file(root: Path) -> bool:
+    """True if ``root`` contains at least one real (non-junk) file, any depth.
 
     Hidden files and filesystem bookkeeping (.DS_Store, Thumbs.db, System Volume
-    Information, ...) are ignored, so a card the OS sprinkled junk onto still reads
-    as empty when there is nothing worth copying. Early-exits on the first hit.
+    Information, ...) are ignored, so a card the OS sprinkled junk onto still
+    reads as blank. Directories alone (however many) do not count as content.
+    Early-exits on the first hit, so a well-filled medium answers immediately.
     """
     try:
-        for entry in media_dir.rglob("*"):
+        for entry in root.rglob("*"):
             if not entry.is_file() or entry.is_symlink():
                 continue
-            rel = entry.relative_to(media_dir)
+            rel = entry.relative_to(root)
             if not any(_is_junk(part) for part in rel.parts):
                 return True
     except OSError:  # pragma: no cover - defensive (e.g. media vanished)
@@ -279,16 +287,23 @@ def _dcim_has_media(media_dir: Path) -> bool:
     return False
 
 
-def _medium_is_blank(mountpoint: Path) -> bool:
-    """True if the medium has no real (non-junk) entries at the top level.
+def _content_flags(mountpoint: Path, media_dir: Path, has_dcim: bool) -> tuple[bool, bool, bool]:
+    """``(has_media, is_empty, no_media)`` for a mounted volume.
 
-    Used to flag a completely empty card as "empty" even when it has no media
-    folder at all -- so it is shown as empty and never picked as a source.
+    * ``has_media`` -- the media folder holds at least one real file: a source.
+    * ``is_empty`` -- nothing to copy AND the whole medium is effectively blank
+      (no real file anywhere; junk and bare folders ignored).
+    * ``no_media`` -- nothing to copy, but the medium DOES carry real data
+      (a data stick without a media folder, or a card whose media folder is
+      empty next to unrelated files). Kept separate from ``is_empty`` so the
+      UIs never call a well-filled volume "empty".
+
+    Exactly one of ``is_empty``/``no_media`` is set when there is nothing to
+    copy; both are False for a volume with media.
     """
-    try:
-        return not any(not _is_junk(entry.name) for entry in mountpoint.iterdir())
-    except OSError:  # pragma: no cover - defensive
-        return False
+    has_media = has_dcim and _has_real_file(media_dir)
+    has_content = has_media or _has_real_file(mountpoint)
+    return has_media, not has_content, (not has_media and has_content)
 
 
 def _root_source_device() -> Optional[str]:
@@ -712,7 +727,7 @@ class DeviceWatcher:
 
         media_dir = mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
-        has_media = has_dcim and _dcim_has_media(media_dir)
+        has_media, is_empty, no_media = _content_flags(mountpoint, media_dir, has_dcim)
         return Probe(
             sys_name=dev.sys_name,
             device_node=dev.device_node,
@@ -723,9 +738,8 @@ class DeviceWatcher:
             free=free,
             name=self._volume_name(dev),
             has_media=has_media,
-            # Nothing to copy: the media folder is present but empty, OR the whole
-            # medium is blank (no real content at all).
-            is_empty=not has_media and (has_dcim or _medium_is_blank(mountpoint)),
+            is_empty=is_empty,
+            no_media=no_media,
             has_label=self._configured_label(dev) is not None,
         )
 
@@ -742,14 +756,15 @@ class DeviceWatcher:
             return probe
         media_dir = probe.mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
-        has_media = has_dcim and _dcim_has_media(media_dir)
+        has_media, is_empty, no_media = _content_flags(probe.mountpoint, media_dir, has_dcim)
         return replace(
             probe,
             capacity=stat.f_frsize * stat.f_blocks,
             free=stat.f_frsize * stat.f_bavail,
             has_dcim=has_dcim,
             has_media=has_media,
-            is_empty=not has_media and (has_dcim or _medium_is_blank(probe.mountpoint)),
+            is_empty=is_empty,
+            no_media=no_media,
         )
 
     @staticmethod

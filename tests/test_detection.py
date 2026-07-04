@@ -23,11 +23,12 @@ MIN_BYTES = 6 * GB
 
 
 def _probe(name, capacity, has_dcim, matched_source=True, free=None,
-           has_media=True, is_empty=None, has_label=False):
-    # Mirror the production rule: empty = no media AND (has a media folder OR the
-    # medium is blank). Tests for a blank medium (no DCIM) pass is_empty=True.
+           has_media=True, is_empty=None, no_media=False, has_label=False):
+    # Mirror the production rule for the common fixtures: a camera card whose
+    # media folder is empty and that carries nothing else is effectively blank
+    # -> empty. Sticks with unrelated data pass no_media=True explicitly.
     if is_empty is None:
-        is_empty = (not has_media) and has_dcim
+        is_empty = (not has_media) and has_dcim and not no_media
     return Probe(
         sys_name=name,
         device_node=f"/dev/{name}",
@@ -39,6 +40,7 @@ def _probe(name, capacity, has_dcim, matched_source=True, free=None,
         name=name,
         has_media=has_media,
         is_empty=is_empty,
+        no_media=no_media,
         has_label=has_label,
     )
 
@@ -417,7 +419,7 @@ def test_restat_reflects_free_and_media(tmp_path):
 
 
 def test_dcim_has_media(tmp_path):
-    from copystation.devices import _dcim_has_media
+    from copystation.devices import _has_real_file as _dcim_has_media
 
     dcim = tmp_path / "DCIM"
     dcim.mkdir()
@@ -477,7 +479,7 @@ def test_settle_returns_immediately_when_quiet():
 
 
 def test_dcim_has_media_ignores_junk(tmp_path):
-    from copystation.devices import _dcim_has_media
+    from copystation.devices import _has_real_file as _dcim_has_media
 
     dcim = tmp_path / "DCIM"
     (dcim / "100MEDIA").mkdir(parents=True)
@@ -488,17 +490,55 @@ def test_dcim_has_media_ignores_junk(tmp_path):
     assert _dcim_has_media(dcim) is True             # a real media file
 
 
-def test_medium_is_blank_ignores_junk(tmp_path):
-    from copystation.devices import _medium_is_blank
+def test_medium_blank_check_ignores_junk_and_bare_folders(tmp_path):
+    from copystation.devices import _has_real_file
 
     mp = tmp_path / "mnt"
     mp.mkdir()
-    assert _medium_is_blank(mp) is True              # nothing at all
+    assert _has_real_file(mp) is False               # nothing at all
     (mp / "System Volume Information").mkdir()
     (mp / ".Trashes").mkdir()
-    assert _medium_is_blank(mp) is True              # only junk
+    assert _has_real_file(mp) is False               # only junk
     (mp / "Photos").mkdir()
-    assert _medium_is_blank(mp) is False             # a real folder = content
+    assert _has_real_file(mp) is False               # bare folders are not content
+    (mp / "Photos" / "img.jpg").write_bytes(b"x")
+    assert _has_real_file(mp) is True                # a real file, any depth
+
+
+def test_content_flags_matrix(tmp_path):
+    # (has_media, is_empty, no_media) for the four medium shapes.
+    from copystation.devices import _content_flags
+
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    dcim = mp / "DCIM"
+
+    # Blank card, no media folder -> empty.
+    assert _content_flags(mp, dcim, False) == (False, True, False)
+
+    # Only an empty media folder (the cleared-source shape) -> still empty.
+    dcim.mkdir()
+    assert _content_flags(mp, dcim, True) == (False, True, False)
+
+    # Empty media folder NEXT TO unrelated data -> no_media, NOT empty.
+    (mp / "backup").mkdir()
+    (mp / "backup" / "doc.pdf").write_bytes(b"x")
+    assert _content_flags(mp, dcim, True) == (False, False, True)
+
+    # Media present -> a source; neither empty nor no_media.
+    (dcim / "100MEDIA").mkdir()
+    (dcim / "100MEDIA" / "clip.mp4").write_bytes(b"v")
+    assert _content_flags(mp, dcim, True) == (True, False, False)
+
+
+def test_content_flags_data_stick_without_dcim_is_no_media(tmp_path):
+    from copystation.devices import _content_flags
+
+    mp = tmp_path / "stick"
+    mp.mkdir()
+    (mp / "movies").mkdir()
+    (mp / "movies" / "film.mkv").write_bytes(b"m")
+    assert _content_flags(mp, mp / "DCIM", False) == (False, False, True)
 
 
 def test_device_views_blank_medium_is_empty():
@@ -509,11 +549,25 @@ def test_device_views_blank_medium_is_empty():
     assert view["role"] == "empty"
 
 
-def test_device_views_card_with_content_but_no_dcim_is_candidate():
-    # Content present but no media folder -> not "empty", a plain candidate.
-    card = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=False)
+def test_device_views_card_with_content_but_no_dcim_is_no_media():
+    # Content present but nothing to copy -> "no_media", never "empty" and no
+    # longer a bare "candidate".
+    card = _probe("sd", 256 * GB, has_dcim=False, has_media=False, no_media=True)
     [view] = device_views([card], MIN_BYTES)
-    assert view["role"] == "candidate"
+    assert view["role"] == "no_media"
+
+
+def test_device_views_no_media_beats_empty_and_target_beats_both():
+    # no_media has priority over empty ...
+    both = _probe("odd", 64 * GB, has_dcim=True, has_media=False,
+                  is_empty=True, no_media=True)
+    [view] = device_views([both], MIN_BYTES)
+    assert view["role"] == "no_media"
+    # ... and the chosen target is never relabelled.
+    src = _probe("cam", 23 * GB, has_dcim=True, has_media=True)
+    tgt = _probe("stick", 256 * GB, has_dcim=False, has_media=False, no_media=True)
+    v = {x["name"]: x for x in device_views([src, tgt], MIN_BYTES, src, tgt)}
+    assert v["stick"]["role"] == "target"
 
 
 # ----- Theme 1: the event set that drives re-evaluation -------------------------

@@ -22,6 +22,15 @@ from .model import ViewModel, usage_text
 # How many detected-device rows the panel shows before summarising the rest.
 MAX_DEVICE_ROWS = 3
 
+# Display text for a device's role chip; anything unlisted is just capitalised.
+_ROLE_LABELS = {"no_media": "No media"}
+
+
+def _role_label(role: str) -> str:
+    if not role:
+        return ""
+    return _ROLE_LABELS.get(role, role.capitalize())
+
 _WHITE = 1
 _BLACK = 0
 
@@ -251,7 +260,7 @@ def _gauge_items(view):
 
     shown = view.devices[:MAX_DEVICE_ROWS]
     items = [
-        (d.role.capitalize() if d.role else "",
+        (_role_label(d.role),
          d.name,
          usage_text(d.used, d.capacity) if d.present else "",
          d.fraction,

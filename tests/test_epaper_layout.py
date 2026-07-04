@@ -118,6 +118,24 @@ def test_gauge_items_device_rows_capitalise_role():
     assert [it[1] for it in items] == ["O4 Lite", "SDXC"]    # device name on its own
 
 
+def test_gauge_items_no_media_role_gets_readable_label():
+    # "no_media" must render as "No media", not the capitalised identifier.
+    from copystation.status.epaper.layout import _gauge_items
+
+    view = build_view(
+        {
+            "phase": "detecting",
+            "devices": [
+                {"name": "USB Stick", "role": "no_media",
+                 "capacity": 64_000_000_000, "free": 10_000_000_000},
+            ],
+        },
+        "0.1.0",
+    )
+    items, _ = _gauge_items(view)
+    assert items[0][0] == "No media"
+
+
 def test_detecting_with_decided_roles_renders_both_devices():
     base = {"phase": "detecting", "devices": [
         {"name": "O4 Lite", "role": "source",

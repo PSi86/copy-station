@@ -52,6 +52,7 @@ function renderDevices(el, devices) {
     source: "source",
     target: "target",
     empty: "empty",
+    no_media: "no media",
     candidate: "candidate",
     unused: "unused",
     ignored: "too small",
