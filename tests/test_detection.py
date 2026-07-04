@@ -602,3 +602,40 @@ def test_default_config_labels_o4_lite():
     parent = _FakeDevice("usb1", ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020")
     o4_disk = _FakeDevice("sdc", ID_FS_LABEL="InternalSto", parent=parent)
     assert w._volume_name(o4_disk) == "O4 Lite"
+
+
+def test_detecting_after_success_clears_stale_role_storage(monkeypatch):
+    # After a successful copy the SUCCESS view keeps source/target figures.
+    # Pulling the source must not leave them standing next to the DETECTING
+    # phase -- the panel would otherwise render the "Done" panes forever.
+    from copystation.config import Config
+    from copystation.state import StationState, StatusHub, StorageInfo
+    from copystation.status import State, StatusIndicator
+
+    state = StationState()
+    hub = StatusHub(state, StatusIndicator())
+    w = _watcher()
+    w._hub = hub
+    w._config = Config()
+    w._errored = False
+    w._armed = False                      # the copy for this set already ran
+    w._prev_nodes = {"/dev/cam", "/dev/sd"}
+    w._node_names = {"/dev/cam": "cam", "/dev/sd": "sd"}
+
+    hub.set_storage(
+        StorageInfo("cam", 23 * GB, 10 * GB, 13 * GB),
+        StorageInfo("sd", 256 * GB, 40 * GB, 216 * GB),
+    )
+    state.set_phase(State.SUCCESS)
+
+    sd = _probe("sd", 256 * GB, has_dcim=False)   # only the target remains
+    monkeypatch.setattr(DeviceWatcher, "_current_partitions", lambda self: [object()])
+    monkeypatch.setattr(DeviceWatcher, "_probe_device", lambda self, dev, base: sd)
+
+    w._evaluate()
+
+    snap = state.snapshot()
+    assert snap["phase"] == "detecting"
+    assert snap["source"]["capacity"] == 0        # stale roles are gone
+    assert snap["target"]["capacity"] == 0
+    assert [d["name"] for d in snap["devices"]] == ["sd"]

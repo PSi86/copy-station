@@ -8,13 +8,15 @@ an alternative factory for tests, so nothing here needs real hardware to test.
 from __future__ import annotations
 
 from .base import EpaperDriver
-from .ssd168x import Ssd168xDriver
+from .ssd168x import Ssd1680Driver, Ssd1681Driver, Ssd168xDriver  # noqa: F401
 from .ssd1677 import Ssd1677Driver
 
-# SSD1681 (1.54") shares the SSD1680 command set -> the same parameterised class.
+# SSD1681 (1.54") shares the SSD1680 command set; the subclasses only differ in
+# the 0x21 source-mode byte (B7 set on the SSD1680, clear on the SSD1681 --
+# see the note in ssd168x.py).
 DRIVER_CLASSES: dict[str, type[EpaperDriver]] = {
-    "ssd1680": Ssd168xDriver,
-    "ssd1681": Ssd168xDriver,
+    "ssd1680": Ssd1680Driver,
+    "ssd1681": Ssd1681Driver,
     "ssd1677": Ssd1677Driver,
 }
 

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .config import Config
-from .state import StatusHub
+from .state import StatusHub, StorageInfo
 from .status import Event, State
 from .status.effects import FILL_GAUGE_SECONDS
 from .transfer import TransferError, total_size, volume_alive
@@ -436,6 +436,17 @@ class DeviceWatcher:
         self._hub.reset_to_ready()
         self._hub.set_devices([])
 
+    def _clear_role_storage(self) -> None:
+        """Drop the source/target storage panes once the roles are stale.
+
+        After a copy the SUCCESS view keeps the final figures. When a device is
+        then removed, the phase falls back to DETECTING -- without this the UIs
+        (e-paper prefers the source/target rows over the detected-volume rows,
+        the web UI shows the storage cards) would keep rendering the finished
+        copy's panes next to the new phase.
+        """
+        self._hub.set_storage(StorageInfo(), StorageInfo())
+
     def _log_device_changes(self, eligible: list[Probe]) -> tuple[bool, bool]:
         """Emit 'detected'/'removed' events for the eligible-volume set.
 
@@ -505,6 +516,7 @@ class DeviceWatcher:
                 # Not enough to decide yet -- keep waiting and re-arm.
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
+                self._clear_role_storage()
                 self._hub.set_phase(State.DETECTING)
                 if added:
                     self._hub.log_event("Waiting for another device ...")
@@ -520,6 +532,7 @@ class DeviceWatcher:
             if not has_source(eligible):
                 self._armed = True
                 self._hub.set_devices(device_views(probes, min_bytes))
+                self._clear_role_storage()
                 self._hub.set_phase(State.DETECTING)
                 if added:
                     if has_empty_source(eligible):

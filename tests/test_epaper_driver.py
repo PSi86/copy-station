@@ -6,6 +6,9 @@ import pytest
 from copystation.status.epaper.drivers.ssd168x import (
     _UPDATE_FULL,
     _UPDATE_PARTIAL,
+    _UPDATE_PARTIAL_LUT,
+    Ssd1680Driver,
+    Ssd1681Driver,
     Ssd168xDriver,
 )
 
@@ -113,6 +116,97 @@ def test_data_is_chunked_for_large_frames():
     big = [x for x in spi.xfers if len(x) > 1]
     assert len(big) >= 3
     assert sum(len(x) for x in big) == 5000
+
+
+def _payload_after(payloads, cmd):
+    for i, p in enumerate(payloads):
+        if p == [cmd] and i + 1 < len(payloads):
+            return payloads[i + 1]
+    return None
+
+
+def test_ssd1681_keeps_source_mode_bit_clear():
+    # With B7 of 0x21 set, the SSD1681 only accepts RAM X windows up to 192 px
+    # and silently discards wider frames (seen on the Waveshare 1.54" V2.1 as a
+    # never-changing panel). The 1681 driver must keep byte B at 0x00.
+    spi, out, inp = _FakeSpi(), _FakeOut(), _FakeIn()
+    drv = Ssd1681Driver(width=200, height=200, spi=spi, gpio_out=out,
+                        gpio_in=inp, dc=25, rst=17, busy=24)
+    drv.init()
+    assert _payload_after(spi.xfers, 0x21) == [0x00, 0x00]
+
+
+def _ssd1681(width=200, height=200):
+    spi, out, inp = _FakeSpi(), _FakeOut(), _FakeIn()
+    drv = Ssd1681Driver(width=width, height=height, spi=spi, gpio_out=out,
+                        gpio_in=inp, dc=25, rst=17, busy=24)
+    return drv, spi
+
+
+def test_ssd1681_partial_loads_vendor_lut_and_uses_0xcf():
+    # The 1.54" partial path follows the vendor flow: first partial after a
+    # full frame loads the dedicated LUT (0x32), enables the ping-pong (0x37),
+    # switches the border and displays with 0xCF instead of the OTP 0xFF.
+    drv, spi = _ssd1681()
+    drv.init()
+    drv.display_full([0xFF] * drv.buffer_size)
+    spi.xfers.clear()
+    drv.display_partial([0x00] * drv.buffer_size)
+    assert _has(spi.xfers, 0x32)
+    assert _has(spi.xfers, 0x37)
+    assert _followed_by(spi.xfers, 0x22, _UPDATE_PARTIAL_LUT)
+    assert not _followed_by(spi.xfers, 0x22, _UPDATE_PARTIAL)
+
+
+def test_ssd1681_second_partial_skips_lut_and_previous_ram():
+    # Once in partial mode the ping-pong maintains the previous frame: no LUT
+    # reload and no 0x26 re-seed on subsequent partials.
+    drv, spi = _ssd1681()
+    drv.init()
+    drv.display_full([0xFF] * drv.buffer_size)
+    drv.display_partial([0x00] * drv.buffer_size)
+    spi.xfers.clear()
+    drv.display_partial([0xAA] * drv.buffer_size)
+    assert not _has(spi.xfers, 0x32)
+    assert [0x26] not in spi.xfers
+    assert _followed_by(spi.xfers, 0x22, _UPDATE_PARTIAL_LUT)
+
+
+def test_ssd1681_full_after_partial_reinitialises():
+    # A full refresh after partials must leave partial mode: init() re-runs
+    # (SWRESET restores LUT/border/voltage state) before the 0xF7 update.
+    drv, spi = _ssd1681()
+    drv.init()
+    drv.display_full([0xFF] * drv.buffer_size)
+    drv.display_partial([0x00] * drv.buffer_size)
+    spi.xfers.clear()
+    drv.display_full([0xFF] * drv.buffer_size)
+    assert _has(spi.xfers, 0x12)  # SWRESET from the re-init
+    assert _followed_by(spi.xfers, 0x22, _UPDATE_FULL)
+
+
+def test_ssd1680_partial_keeps_otp_path():
+    # The SSD1680 panels stay on the OTP mode-2 waveform with 0x26 seeding.
+    spi, out, inp = _FakeSpi(), _FakeOut(), _FakeIn()
+    drv = Ssd1680Driver(width=128, height=296, spi=spi, gpio_out=out,
+                        gpio_in=inp, dc=25, rst=17, busy=24)
+    drv.init()
+    drv.display_full([0xFF] * drv.buffer_size)
+    spi.xfers.clear()
+    drv.display_partial([0x00] * drv.buffer_size)
+    assert _has(spi.xfers, 0x26)
+    assert not _has(spi.xfers, 0x32)
+    assert _followed_by(spi.xfers, 0x22, _UPDATE_PARTIAL)
+
+
+def test_ssd1680_uses_s8_source_mode():
+    # The SSD1680 panels (2.9"/2.13") use the S8.. source window, matching the
+    # vendor reference code.
+    spi, out, inp = _FakeSpi(), _FakeOut(), _FakeIn()
+    drv = Ssd1680Driver(width=128, height=296, spi=spi, gpio_out=out,
+                        gpio_in=inp, dc=25, rst=17, busy=24)
+    drv.init()
+    assert _payload_after(spi.xfers, 0x21) == [0x00, 0x80]
 
 
 def test_sleep_sends_deep_sleep():
