@@ -448,8 +448,10 @@ size; if it does not fit, the cycle ends in `Error` and the source is untouched.
 **No source is not an error:** if no attached volume looks like a source --
 because every `DCIM` folder is empty, or none of the cards carries one at all
 (e.g. two completely blank cards) -- the station simply keeps **waiting** in
-`Detecting` and shows the volumes as `empty`. There is no red alarm and nothing
-to reset: plug in a card with media and the copy starts on its own.
+`Detecting` and shows the volumes as `empty` (effectively blank medium) or
+`no media` (the medium carries data, just nothing to copy). There is no red
+alarm and nothing to reset: plug in a card with media and the copy starts on
+its own.
 
 **Friendly names:** volumes are labelled in the web UI by their filesystem label
 or USB model. Because the O4's USB product string is only a serial, you can map a
