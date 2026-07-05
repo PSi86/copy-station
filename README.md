@@ -365,7 +365,21 @@ The installer:
 * enables and starts the `copystation` systemd service.
 
 The config file is created only if it does not exist yet; re-running the
-installer never overwrites your settings.
+installer never overwrites your settings without asking.
+
+Two optional arguments cover config deployment:
+
+```
+sudo bash scripts/install.sh my-config.yaml                 # full install with a prepared config
+sudo bash scripts/install.sh --config-only [my-config.yaml] # only (re)install the config
+```
+
+A prepared config is validated (YAML parse, legacy-key warning) and installed
+exactly as given -- the interactive web prompt is skipped. `--config-only`
+touches nothing but the config (and restarts the service if it is installed);
+without a file it resets to the board-matched example. Replacing an existing
+`/etc/copystation/config.yaml` asks for confirmation and keeps the old file as
+`<repo>/config.backup/config-<n>.yaml` with the next free number.
 
 ### 3. Configure the station
 
