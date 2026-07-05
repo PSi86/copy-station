@@ -75,21 +75,31 @@ web:
   host: 0.0.0.0
   port: 8080
 
-# Optional GPIO shutdown button for a clean poweroff.
+# Optional GPIO user button. Shutdown gesture (DJI style): short click, release,
+# then press and HOLD 3 s -- a plain long hold alone does nothing (intent check).
+# Single/double/triple clicks (after the same activation click) are bindable too.
 # Recommended pin: BCM GPIO3 (pin 5). Two independent functions on one button:
 #  * Power ON / wake from halt is a Pi FIRMWARE feature on GPIO3 -- it needs NO
 #    config and works even with enabled: false below.
 #  * Shutting down needs software: set enabled: true here (line: 3). Do NOT also
 #    use the OS overlay `dtoverlay=gpio-shutdown` on the same pin -- pick one.
 # Pin 5 has fixed on-board pull-ups, so `bias` is irrelevant there.
-power:
-  shutdown_button:
-    enabled: false        # set true to let this button trigger the shutdown
+buttons:
+  userbutton_1:
+    enabled: false        # set true to let this button trigger the actions below
     gpiochip: gpiochip0   # gpiochip4 on older Pi 5 images
     line: 3               # BCM GPIO3 (pin 5) -- doubles as wake-from-halt
     active_low: true
     bias: pull_up
-    hold_seconds: 1.0
-    action: poweroff
+    timing:
+      max_click_seconds: 0.6
+      min_gap_seconds: 0.2
+      max_gap_seconds: 1.0
+      hold_seconds: 3.0
+    actions:
+      hold: poweroff      # poweroff | reboot | none | {command: "..."}
+      single_click: none
+      double_click: none
+      triple_click: none
 
 settle_seconds: 2.0

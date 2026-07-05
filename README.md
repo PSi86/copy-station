@@ -14,7 +14,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 * [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
 * [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
 * [Powering off safely](#powering-off-safely)
-  * [Shutdown button](#shutdown-button-optional)
+  * [User button](#user-button-optional)
 * [Development (without hardware)](#development-without-hardware-eg-windows)
 * [Deployment](#deployment)
 * [Source/target detection](#sourcetarget-detection)
@@ -224,12 +224,30 @@ turned out to be a marginal microSD card -- if cold boot ever flakes, suspect th
 card first). The copy itself is safe against a sudden disconnect: the source is
 never cleared unless verification succeeded.
 
-### Shutdown button (optional)
+### User button (optional)
 
 Wire a momentary button between a GPIO line and GND and enable
-`power.shutdown_button` in the config. Holding it for `hold_seconds` (default 1 s)
-runs a clean `systemctl poweroff` -- so the headless station can be shut down
-without SSH. Keep `active_low: true` with `bias: pull_up` for a button to GND.
+`buttons.userbutton_1` in the config (`active_low: true` with `bias: pull_up`
+for a button to GND). Every gesture starts with a short **activation click**
+(< 0.6 s) followed by a 0.2-1.0 s release -- an intent check that is never
+counted, so a button squeezed in a bag can never do anything. After it:
+
+* **press and hold 3 s** runs a clean `systemctl poweroff` (DJI style: click,
+  release, hold) -- so the headless station can be shut down without SSH;
+* **1-3 further short clicks**, then >= 1 s of silence, fire the
+  `single_click` / `double_click` / `triple_click` actions (a triple click is
+  4 presses in total, counting the activation click).
+
+Each pattern is bindable in `actions` to `poweroff`, `reboot`, `none`, or an
+arbitrary shell command (`{command: "..."}`); all timings are tunable under
+`timing`. A plain long hold *without* the activation click does nothing, and
+the hold is only accepted as the first press after activation -- click-then-hold
+mixtures abort silently.
+
+**Migrating from `power.shutdown_button`:** that key is no longer supported
+(the daemon logs a warning if it is still present). Move the wiring fields to
+`buttons.userbutton_1` -- and note the gesture changed: a plain 1 s hold no
+longer powers off.
 
 It uses the same libgpiod v1/v2 layer as the LED backends, so it works on the
 **Cubie A7S** and on **Raspberry Pi 4 / 5**. Set `line` to the GPIO offset
@@ -247,14 +265,15 @@ mechanisms -- keep them apart:
   is in `config.yaml`.
 * **Shutting down** while the Pi is running is **not** automatic -- some software
   must react to the pin. Either:
-  * enable copy-station's `power.shutdown_button` with `line: 3` (what this
+  * enable copy-station's `buttons.userbutton_1` with `line: 3` (what this
     feature is for), **or**
   * use the OS-native overlay `dtoverlay=gpio-shutdown` in
-    `/boot/firmware/config.txt` (defaults to GPIO3).
+    `/boot/firmware/config.txt` (defaults to GPIO3). Note the overlay is a
+    plain-hold mechanism *without* the activation-click intent check.
 
   Use **only one** of the two for the shutdown side -- a GPIO line is exclusive,
   so enabling both on the same pin makes the second one fail to claim it. If you
-  rely on the OS overlay, leave `power.shutdown_button.enabled: false`.
+  rely on the OS overlay, leave `buttons.userbutton_1.enabled: false`.
 
 **Recommended pin -- Cubie A7S:** there is no documented wake-from-halt GPIO, so
 pick any free line from `gpioinfo`; the button only triggers shutdown, and you

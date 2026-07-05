@@ -78,9 +78,9 @@ if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
       [nN]*) WEB_ENABLED="false" ;;
       *)     WEB_ENABLED="true" ;;
     esac
-    # Flip ONLY web.enabled. The config also has power.shutdown_button.enabled,
+    # Flip ONLY web.enabled. The config also has buttons.userbutton_1.enabled,
     # so the substitution must stay inside the web: section (from `web:` to the
-    # next top-level key/comment) -- a file-wide sed would toggle the shutdown
+    # next top-level key/comment) -- a file-wide sed would toggle the user
     # button on too, which then warns about a missing 'line'.
     sed -i -E "/^web:/,/^[^[:space:]]/ s/^([[:space:]]*enabled:[[:space:]]*).*/\1${WEB_ENABLED}/" "${CONFIG_DIR}/config.yaml"
     echo "   -> web interface set to enabled=${WEB_ENABLED}."
