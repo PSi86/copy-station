@@ -229,20 +229,51 @@ never cleared unless verification succeeded.
 Wire a momentary button between a GPIO line and GND and enable
 `buttons.userbutton_1` in the config (`active_low: true` with `bias: pull_up`
 for a button to GND). Every gesture starts with a short **activation click**
-(< 0.6 s) followed by a 0.2-1.0 s release -- an intent check that is never
-counted, so a button squeezed in a bag can never do anything. After it:
+followed by a short release -- an intent check that is never counted, so a
+button squeezed in a bag can never do anything. After it the button
+distinguishes a **long hold** (DJI-style shutdown: click, release, hold) and
+**1-3 further clicks**, each bindable to its own action.
 
-* **press and hold 3 s** runs a clean `systemctl poweroff` (DJI style: click,
-  release, hold) -- so the headless station can be shut down without SSH;
-* **1-3 further short clicks**, then >= 1 s of silence, fire the
-  `single_click` / `double_click` / `triple_click` actions (a triple click is
-  4 presses in total, counting the activation click).
+With `C` = short press, `_` = release within the gap window, `H` = long hold:
 
-Each pattern is bindable in `actions` to `poweroff`, `reboot`, `none`, or an
-arbitrary shell command (`{command: "..."}`); all timings are tunable under
-`timing`. A plain long hold *without* the activation click does nothing, and
-the hold is only accepted as the first press after activation -- click-then-hold
-mixtures abort silently.
+| Gesture      | Pattern   | Presses | Action key     | Default    |
+|--------------|-----------|---------|----------------|------------|
+| Shutdown     | `C _ H`   | 2       | `hold`         | `poweroff` |
+| Single click | `C _ C`   | 2       | `single_click` | `none`     |
+| Double click | `C _ C _ C` | 3     | `double_click` | `none`     |
+| Triple click | `C _ C _ C _ C` | 4 | `triple_click` | `none`     |
+
+A click sequence fires once the button stays untouched for the gap window
+after the last click. The gesture is strict on purpose (poweroff is
+destructive): a plain long hold *without* the activation click does nothing,
+the hold is only accepted as the **first** press after activation
+(click-then-hold aborts silently), and a press between the click and hold
+thresholds cancels the sequence. An activation click with nothing after it
+simply times out.
+
+Each action is `poweroff`, `reboot`, `none`, or an arbitrary shell command:
+
+```yaml
+buttons:
+  userbutton_1:
+    enabled: true
+    gpiochip: gpiochip0
+    line: 3
+    actions:
+      hold: poweroff                          # C _ H   -> clean shutdown
+      single_click: { command: "rfkill toggle wlan" }   # C _ C
+      double_click: none
+      triple_click: none
+```
+
+All timings live under `timing` (defaults shown; the values above use them):
+
+| Key                 | Default | Meaning                                          |
+|---------------------|---------|--------------------------------------------------|
+| `max_click_seconds` | 0.6     | a press shorter than this counts as a click (`C`) |
+| `min_gap_seconds`   | 0.2     | shorter releases are treated as contact bounce    |
+| `max_gap_seconds`   | 1.0     | a longer release ends the click sequence (`_` window) |
+| `hold_seconds`      | 3.0     | held this long after activation -> `hold` (`H`)   |
 
 **Migrating from `power.shutdown_button`:** that key is no longer supported
 (the daemon logs a warning if it is still present). Move the wiring fields to
@@ -402,6 +433,15 @@ journalctl -u copystation -f          # follow the live log / errors
 
 If the service fails to start after an edit, the log above shows why (usually a
 YAML typo or a wrong GPIO line). Fix the file and restart again.
+
+**Deploying a prepared config from another machine:** copy it over and let the
+installer place it -- it validates the YAML, asks before overwriting, backs the
+old config up to `<repo>/config.backup/` and restarts the service:
+
+```
+scp my-config.yaml <user>@<device-ip>:/tmp/config.yaml
+ssh -t <user>@<device-ip> "cd ~/copy-station && sudo bash scripts/install.sh --config-only /tmp/config.yaml"
+```
 
 #### Web interface
 
