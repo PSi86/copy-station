@@ -122,17 +122,30 @@ DEFAULTS: dict[str, Any] = {
         "host": "0.0.0.0",  # all interfaces; robust to interfaces up/down
         "port": 8080,
     },
-    # Optional GPIO shutdown button (off by default). Held for hold_seconds it
-    # runs a clean `systemctl poweroff` -- the safe way to power the station down.
-    "power": {
-        "shutdown_button": {
+    # Optional GPIO user buttons (off by default). Every gesture starts with a
+    # short activation click (intent check, never counted); after it the button
+    # distinguishes a long hold (default: clean poweroff -- the safe way to
+    # power the station down) and 1-3 clicks, each bindable to an action.
+    "buttons": {
+        "userbutton_1": {
             "enabled": False,
             "gpiochip": "gpiochip0",
             "line": None,          # line offset of the button (BCM number on Pi)
             "active_low": True,    # pressed = pulled to GND (button to GND)
             "bias": "pull_up",     # pull_up | pull_down | disable | as_is
-            "hold_seconds": 1.0,   # must be held this long to trigger
-            "action": "poweroff",  # poweroff | reboot
+            "timing": {
+                "max_click_seconds": 0.6,  # a press shorter than this is a click
+                "min_gap_seconds": 0.2,    # shorter releases count as bounce
+                "max_gap_seconds": 1.0,    # longer releases end the sequence
+                "hold_seconds": 3.0,       # hold after activation -> hold action
+            },
+            "actions": {
+                # poweroff | reboot | none | {command: "..."}
+                "hold": "poweroff",
+                "single_click": "none",
+                "double_click": "none",
+                "triple_click": "none",
+            },
         },
     },
     # Hard upper bound (seconds) for how long detection waits after a udev add

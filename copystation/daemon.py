@@ -235,19 +235,19 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     return rc
 
 
-def _maybe_start_shutdown_button(config: Config):
-    """Start the optional GPIO shutdown button. Returns it, or None."""
+def _maybe_start_buttons(config: Config) -> list:
+    """Start the optional GPIO user buttons. Returns them (possibly empty)."""
     try:
-        from .power import build_shutdown_button
+        from .buttons import build_buttons
 
-        button = build_shutdown_button(config)
-        if button is not None:
+        buttons = build_buttons(config)
+        for button in buttons:
             button.start()
-            _LOG.info("Shutdown button active")
-        return button
+            _LOG.info("User button %s active", button.name)
+        return buttons
     except Exception as exc:
-        _LOG.warning("Shutdown button could not be started: %s", exc)
-        return None
+        _LOG.warning("User buttons could not be started: %s", exc)
+        return []
 
 
 def run_daemon(config: Config) -> int:
@@ -266,7 +266,7 @@ def run_daemon(config: Config) -> int:
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     _maybe_start_web(state, config)
-    button = _maybe_start_shutdown_button(config)
+    buttons = _maybe_start_buttons(config)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
     try:
@@ -274,7 +274,7 @@ def run_daemon(config: Config) -> int:
     except KeyboardInterrupt:  # pragma: no cover
         _LOG.info("Shutting down on request ...")
     finally:
-        if button is not None:
+        for button in buttons:
             button.close()
         hub.close()  # switches every LED off
     return 0

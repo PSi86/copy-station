@@ -14,7 +14,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 * [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
 * [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
 * [Powering off safely](#powering-off-safely)
-  * [Shutdown button](#shutdown-button-optional)
+  * [User button](#user-button-optional)
 * [Development (without hardware)](#development-without-hardware-eg-windows)
 * [Deployment](#deployment)
 * [Source/target detection](#sourcetarget-detection)
@@ -224,12 +224,61 @@ turned out to be a marginal microSD card -- if cold boot ever flakes, suspect th
 card first). The copy itself is safe against a sudden disconnect: the source is
 never cleared unless verification succeeded.
 
-### Shutdown button (optional)
+### User button (optional)
 
 Wire a momentary button between a GPIO line and GND and enable
-`power.shutdown_button` in the config. Holding it for `hold_seconds` (default 1 s)
-runs a clean `systemctl poweroff` -- so the headless station can be shut down
-without SSH. Keep `active_low: true` with `bias: pull_up` for a button to GND.
+`buttons.userbutton_1` in the config (`active_low: true` with `bias: pull_up`
+for a button to GND). Every gesture starts with a short **activation click**
+followed by a short release -- an intent check that is never counted, so a
+button squeezed in a bag can never do anything. After it the button
+distinguishes a **long hold** (DJI-style shutdown: click, release, hold) and
+**1-3 further clicks**, each bindable to its own action.
+
+With `C` = short press, `_` = release within the gap window, `H` = long hold:
+
+| Gesture      | Pattern   | Presses | Action key     | Default    |
+|--------------|-----------|---------|----------------|------------|
+| Shutdown     | `C _ H`   | 2       | `hold`         | `poweroff` |
+| Single click | `C _ C`   | 2       | `single_click` | `none`     |
+| Double click | `C _ C _ C` | 3     | `double_click` | `none`     |
+| Triple click | `C _ C _ C _ C` | 4 | `triple_click` | `none`     |
+
+A click sequence fires once the button stays untouched for the gap window
+after the last click. The gesture is strict on purpose (poweroff is
+destructive): a plain long hold *without* the activation click does nothing,
+the hold is only accepted as the **first** press after activation
+(click-then-hold aborts silently), and a press between the click and hold
+thresholds cancels the sequence. An activation click with nothing after it
+simply times out.
+
+Each action is `poweroff`, `reboot`, `none`, or an arbitrary shell command:
+
+```yaml
+buttons:
+  userbutton_1:
+    enabled: true
+    gpiochip: gpiochip0
+    line: 3
+    actions:
+      hold: poweroff                          # C _ H   -> clean shutdown
+      single_click: { command: "rfkill toggle wlan" }   # C _ C
+      double_click: none
+      triple_click: none
+```
+
+All timings live under `timing` (defaults shown; the values above use them):
+
+| Key                 | Default | Meaning                                          |
+|---------------------|---------|--------------------------------------------------|
+| `max_click_seconds` | 0.6     | a press shorter than this counts as a click (`C`) |
+| `min_gap_seconds`   | 0.2     | shorter releases are treated as contact bounce    |
+| `max_gap_seconds`   | 1.0     | a longer release ends the click sequence (`_` window) |
+| `hold_seconds`      | 3.0     | held this long after activation -> `hold` (`H`)   |
+
+**Migrating from `power.shutdown_button`:** that key is no longer supported
+(the daemon logs a warning if it is still present). Move the wiring fields to
+`buttons.userbutton_1` -- and note the gesture changed: a plain 1 s hold no
+longer powers off.
 
 It uses the same libgpiod v1/v2 layer as the LED backends, so it works on the
 **Cubie A7S** and on **Raspberry Pi 4 / 5**. Set `line` to the GPIO offset
@@ -247,14 +296,15 @@ mechanisms -- keep them apart:
   is in `config.yaml`.
 * **Shutting down** while the Pi is running is **not** automatic -- some software
   must react to the pin. Either:
-  * enable copy-station's `power.shutdown_button` with `line: 3` (what this
+  * enable copy-station's `buttons.userbutton_1` with `line: 3` (what this
     feature is for), **or**
   * use the OS-native overlay `dtoverlay=gpio-shutdown` in
-    `/boot/firmware/config.txt` (defaults to GPIO3).
+    `/boot/firmware/config.txt` (defaults to GPIO3). Note the overlay is a
+    plain-hold mechanism *without* the activation-click intent check.
 
   Use **only one** of the two for the shutdown side -- a GPIO line is exclusive,
   so enabling both on the same pin makes the second one fail to claim it. If you
-  rely on the OS overlay, leave `power.shutdown_button.enabled: false`.
+  rely on the OS overlay, leave `buttons.userbutton_1.enabled: false`.
 
 **Recommended pin -- Cubie A7S:** there is no documented wake-from-halt GPIO, so
 pick any free line from `gpioinfo`; the button only triggers shutdown, and you
@@ -346,7 +396,21 @@ The installer:
 * enables and starts the `copystation` systemd service.
 
 The config file is created only if it does not exist yet; re-running the
-installer never overwrites your settings.
+installer never overwrites your settings without asking.
+
+Two optional arguments cover config deployment:
+
+```
+sudo bash scripts/install.sh my-config.yaml                 # full install with a prepared config
+sudo bash scripts/install.sh --config-only [my-config.yaml] # only (re)install the config
+```
+
+A prepared config is validated (YAML parse, legacy-key warning) and installed
+exactly as given -- the interactive web prompt is skipped. `--config-only`
+touches nothing but the config (and restarts the service if it is installed);
+without a file it resets to the board-matched example. Replacing an existing
+`/etc/copystation/config.yaml` asks for confirmation and keeps the old file as
+`<repo>/config.backup/config-<n>.yaml` with the next free number.
 
 ### 3. Configure the station
 
@@ -369,6 +433,15 @@ journalctl -u copystation -f          # follow the live log / errors
 
 If the service fails to start after an edit, the log above shows why (usually a
 YAML typo or a wrong GPIO line). Fix the file and restart again.
+
+**Deploying a prepared config from another machine:** copy it over and let the
+installer place it -- it validates the YAML, asks before overwriting, backs the
+old config up to `<repo>/config.backup/` and restarts the service:
+
+```
+scp my-config.yaml <user>@<device-ip>:/tmp/config.yaml
+ssh -t <user>@<device-ip> "cd ~/copy-station && sudo bash scripts/install.sh --config-only /tmp/config.yaml"
+```
 
 #### Web interface
 

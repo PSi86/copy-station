@@ -102,15 +102,25 @@ web:
   host: 0.0.0.0
   port: 8080
 
-# Optional GPIO shutdown button for a clean poweroff (set the line from `gpioinfo`).
-power:
-  shutdown_button:
+# Optional GPIO user button (set the line from `gpioinfo`). Shutdown gesture
+# (DJI style): short click, release, then press and HOLD 3 s -- a plain long
+# hold alone does nothing (intent check). Clicks are bindable to actions too.
+buttons:
+  userbutton_1:
     enabled: false
     gpiochip: gpiochip0
     line: null            # line offset of the button (from `gpioinfo`)
     active_low: true
     bias: pull_up
-    hold_seconds: 1.0
-    action: poweroff      # reboot may hang on the A733 -- prefer poweroff
+    timing:
+      max_click_seconds: 0.6
+      min_gap_seconds: 0.2
+      max_gap_seconds: 1.0
+      hold_seconds: 3.0
+    actions:
+      hold: poweroff      # reboot may hang on the A733 -- prefer poweroff
+      single_click: none
+      double_click: none
+      triple_click: none
 
 settle_seconds: 2.0
