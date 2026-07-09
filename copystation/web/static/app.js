@@ -267,13 +267,26 @@ function renderJobs(jobs) {
       } else {
         right = `<span class="role ${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>`;
       }
+      const cancelable = j.status === "queued" || j.status === "running";
+      const cancel = cancelable
+        ? `<button class="btn tc-cancel" type="button" data-job="${j.id}" title="Cancel job">✕</button>`
+        : "";
       const bar =
         j.status === "running"
           ? `<div class="storage-track"><div class="storage-used" style="width:${j.percent || 0}%"></div></div>`
           : "";
-      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span>${right}</div>${bar}</li>`;
+      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span><span class="jobright">${right}${cancel}</span></div>${bar}</li>`;
     })
     .join("");
+}
+
+async function cancelJob(id) {
+  try {
+    await fetch(`/api/transcode/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (e) {
+    /* transient */
+  }
+  loadJobs();
 }
 
 async function loadJobs() {
@@ -368,6 +381,10 @@ async function initFeatures() {
 
   if (transcodeAvailable) {
     document.getElementById("transcode-card").hidden = false;
+    document.getElementById("tc-jobs").addEventListener("click", (e) => {
+      const btn = e.target.closest("button.tc-cancel[data-job]");
+      if (btn) cancelJob(btn.getAttribute("data-job"));
+    });
     await loadPresets();
     loadJobs();
     setInterval(loadJobs, 1500);

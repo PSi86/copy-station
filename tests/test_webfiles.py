@@ -152,6 +152,16 @@ def test_download_streams_file(tmp_path):
     assert res.content == b"hello card"
 
 
+def test_download_uses_real_content_type(tmp_path):
+    # A real MIME type (video/mp4), not octet-stream, so restricted clients name
+    # the saved file .mp4 instead of .bin.
+    client = _client(_FakeBrowse(Config(), _card(tmp_path)))
+    res = client.get("/api/files/download", params={"device": "sdb1", "path": "DCIM/clip.mp4"})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("video/mp4")
+    assert "clip.mp4" in res.headers.get("content-disposition", "")
+
+
 def test_download_traversal_is_403(tmp_path):
     client = _client(_FakeBrowse(Config(), _card(tmp_path)))
     res = client.get(

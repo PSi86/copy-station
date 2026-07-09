@@ -20,6 +20,7 @@ off by default, so existing status-only deployments are unaffected.
 
 from __future__ import annotations
 
+import mimetypes
 import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -173,9 +174,12 @@ def create_app(
                 target = browse.resolve_file(device, path)
             except BrowseError as exc:
                 raise _browse_http_error(exc) from exc
-            return FileResponse(
-                str(target), filename=target.name, media_type="application/octet-stream"
-            )
+            # Send a real content type derived from the extension (e.g. video/mp4)
+            # rather than a generic octet-stream: restricted clients like the
+            # captive-portal webview ignore Content-Disposition and name the file
+            # by MIME type, so octet-stream would save "clip.mp4" as ".bin".
+            media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            return FileResponse(str(target), filename=target.name, media_type=media_type)
 
     if transcode is not None:
 
