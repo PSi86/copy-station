@@ -107,6 +107,16 @@ Presets are configurable (`transcode.presets`): each sets a target `height`
 codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
 default set offers 1080p/720p H.264 and 720p H.265.
 
+**Speed (software encoding).** The `preset` field is libx264/libx265's
+speed/size trade-off and defaults to **`veryfast`** -- a good choice on an SBC,
+where software encoding is CPU-bound (much faster than `medium` for a modest size
+increase). Use `ultrafast` for the most speed (larger files) or `fast`/`medium`/
+`slow` for smaller files. On boards without a usable hardware encoder (Pi 5 and
+the Cubie A7S, which encodes on the CPU), a heavy source -- e.g. **4K60** drone
+footage -- is dominated by *decoding*, so expect well under real-time; a lower
+`height` and a faster `preset` are the levers that matter. (`preset` is ignored
+by hardware encoders, which are bitrate-controlled.)
+
 **Hardware acceleration.** `transcode.acceleration` controls the encoder, and the
 station picks the best one for the board automatically -- the three supported
 boards differ a lot in what they can encode in hardware:

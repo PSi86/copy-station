@@ -195,15 +195,19 @@ DEFAULTS: dict[str, Any] = {
         "ram_buffer_fraction": 2 / 3,  # use up to two thirds of the free RAM
         # Selectable presets (shown in the web UI). ``height`` downscales while
         # keeping the aspect ratio (width auto, even); ``height: 0`` keeps the
-        # source resolution. Argument construction lives in
-        # ``copystation/transcode.py``.
+        # source resolution. ``preset`` is the software (libx264/libx265) speed
+        # preset: ``veryfast`` is a good default on an SBC (much faster than
+        # ``medium`` for a modest size increase); use ``ultrafast`` for maximum
+        # speed / larger files, or ``fast``/``medium`` for smaller files. It does
+        # not apply to hardware encoders (they are bitrate-controlled). Argument
+        # construction lives in ``copystation/transcode.py``.
         "presets": [
             {"id": "1080p-h264", "label": "1080p H.264", "height": 1080,
-             "vcodec": "libx264", "crf": 20, "preset": "medium"},
+             "vcodec": "libx264", "crf": 21, "preset": "veryfast"},
             {"id": "720p-h264", "label": "720p H.264", "height": 720,
-             "vcodec": "libx264", "crf": 22, "preset": "medium"},
+             "vcodec": "libx264", "crf": 23, "preset": "veryfast"},
             {"id": "720p-h265", "label": "720p H.265", "height": 720,
-             "vcodec": "libx265", "crf": 26, "preset": "medium"},
+             "vcodec": "libx265", "crf": 28, "preset": "veryfast"},
         ],
     },
     # Optional GPIO user buttons (off by default). Every gesture starts with a

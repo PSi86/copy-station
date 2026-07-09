@@ -199,10 +199,13 @@ transcode:
   # is the software codec and picks the family (h264/hevc); `crf` drives software
   # quality, `bitrate` (optional) drives the hardware encoder (a height-based
   # default is used otherwise). A per-preset `accel:` overrides the global one.
+  # `preset` is the software speed preset -- `veryfast` is a good SBC default
+  # (much faster than `medium`); `ultrafast` = max speed / bigger files,
+  # `fast`/`medium`/`slow` = smaller files. Ignored by hardware encoders.
   presets:
-    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 20, preset: medium }
-    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 22, preset: medium }
-    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 26, preset: medium }
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast }
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast }
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
