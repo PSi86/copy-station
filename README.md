@@ -22,6 +22,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 * [Deployment](#deployment)
 * [Source/target detection](#sourcetarget-detection)
 * [Configuration](#configuration)
+* [Changelog](CHANGELOG.md)
 
 ## Flow
 
