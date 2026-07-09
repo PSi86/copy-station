@@ -275,7 +275,11 @@ function renderJobs(jobs) {
         j.status === "running"
           ? `<div class="storage-track"><div class="storage-used" style="width:${j.percent || 0}%"></div></div>`
           : "";
-      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span><span class="jobright">${right}${cancel}</span></div>${bar}</li>`;
+      const timing =
+        j.status === "running"
+          ? `<div class="muted jobtiming">Elapsed ${fmtDuration(j.elapsed_seconds)} · ETA ${fmtDuration(j.eta_seconds)}</div>`
+          : "";
+      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span><span class="jobright">${right}${cancel}</span></div>${bar}${timing}</li>`;
     })
     .join("");
 }

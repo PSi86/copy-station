@@ -54,6 +54,9 @@ def _signature(vm: ViewModel) -> tuple:
         vm.error_text,
         vm.show_progress,
         vm.ap_active,
+        vm.transcode_active,
+        vm.transcode_name,
+        vm.transcode_encoder,
     )
 
 

@@ -89,6 +89,10 @@ _STARTUP_COLOR = (0, 50, 50)  # cyan
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
 
+# Colour of the progress bar during a video transcode -- purple, so a transcode
+# (which overrides the copy status) is clearly not a copy.
+_TRANSCODE_COLOR = (40, 0, 60)  # purple
+
 # Colour of the fill gauge shown while detecting -- white, unmistakably different
 # from the green "ready" colour and the blue copy bar.
 _FILL_COLOR = (50, 50, 50)  # white
@@ -244,11 +248,14 @@ class Ws2812Backend(StatusIndicator):
                         self._fill_shown_at = now
                     fill_elapsed = now - self._fill_shown_at
 
-            if phase is State.COPYING:
-                # At least one LED so the very start of the copy (0 %) is not a
-                # dark strip that reads as a pause before the bar grows.
+            if phase in (State.COPYING, State.TRANSCODING):
+                # A blinking progress bar; a transcode uses purple so it is clearly
+                # distinct from the blue copy bar (it overrides the copy status).
+                color = _COPY_COLOR if phase is State.COPYING else _TRANSCODE_COLOR
+                # At least one LED so the very start (0 %) is not a dark strip that
+                # reads as a pause before the bar grows.
                 count = max(1, leds_for(progress, self._led_count))
-                pixels = self._bar(count, _COPY_COLOR) if blink_on else self._all_off()
+                pixels = self._bar(count, color) if blink_on else self._all_off()
                 self._render(pixels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle

@@ -16,6 +16,7 @@ _STATUS_TEXT = {
     "ready": "Ready",
     "detecting": "Detecting",
     "copying": "Copying",
+    "transcoding": "Transcoding",
     "error": "Error",
     "success": "Done",
 }
@@ -110,6 +111,10 @@ class ViewModel:
     error_text: str
     version: str
     ap_active: bool = False
+    transcode_active: bool = False
+    transcode_name: str = ""
+    transcode_encoder: str = ""
+    elapsed_text: str = ""
 
     def storage_line(self, storage: StorageView) -> str:
         """``used / capacity`` for a storage row (``--`` when absent)."""
@@ -139,8 +144,14 @@ def _device_view(raw: dict[str, Any]) -> DeviceView:
 def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
     """Project a StationState snapshot dict into a :class:`ViewModel`."""
     phase = str(snapshot.get("phase", "ready"))
-    percent = int(round(float(snapshot.get("percent", 0.0) or 0.0)))
-    show_progress = phase in ("copying", "success")
+    transcode = snapshot.get("transcode") or {}
+    tr_active = bool(transcode.get("active")) and phase == "transcoding"
+
+    if tr_active:
+        percent = int(round(float(transcode.get("percent", 0.0) or 0.0)))
+    else:
+        percent = int(round(float(snapshot.get("percent", 0.0) or 0.0)))
+    show_progress = tr_active or phase in ("copying", "success")
     speed = snapshot.get("speed_bytes")
     devices = tuple(_device_view(d) for d in (snapshot.get("devices", []) or []))
     return ViewModel(
@@ -154,8 +165,13 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         devices=devices,
         device_count=len(devices),
         speed_text=f"{fmt_bytes(speed)}/s" if speed else "",
-        eta_text=fmt_duration(snapshot.get("eta_seconds")),
+        eta_text=fmt_duration(transcode.get("eta_seconds")) if tr_active
+        else fmt_duration(snapshot.get("eta_seconds")),
         error_text=str(snapshot.get("error", "") or ""),
         version=version,
         ap_active=bool(snapshot.get("wifi_ap", False)),
+        transcode_active=tr_active,
+        transcode_name=str(transcode.get("name", "") or ""),
+        transcode_encoder=str(transcode.get("encoder", "") or ""),
+        elapsed_text=fmt_duration(transcode.get("elapsed_seconds")) if tr_active else "",
     )

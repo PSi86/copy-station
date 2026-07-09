@@ -70,6 +70,8 @@ class StationState:
         # Whether the WLAN access point is currently up. Independent of the copy
         # cycle (survives reset_to_ready), so the display keeps showing it.
         self._ap_active = False
+        # Current video transcode (overrides the copy status while active).
+        self._transcode: dict[str, Any] = {"active": False}
 
     # ----- mutators (single writer) --------------------------------------------
 
@@ -123,6 +125,31 @@ class StationState:
         """Record whether the WLAN access point is up (shown on display + web)."""
         with self._lock:
             self._ap_active = bool(active)
+
+    def begin_transcode(self, name: str) -> None:
+        """Mark a transcode as running (phase TRANSCODING overrides everything)."""
+        with self._lock:
+            self._transcode = {
+                "active": True,
+                "name": name,
+                "percent": 0.0,
+                "encoder": "",
+                "hw": False,
+                "started": time.monotonic(),
+            }
+            self._phase = State.TRANSCODING
+
+    def update_transcode(self, fraction: float, encoder: str = "", hw: bool = False) -> None:
+        with self._lock:
+            if self._transcode.get("active"):
+                self._transcode["percent"] = min(100.0, max(0.0, fraction * 100.0))
+                if encoder:
+                    self._transcode["encoder"] = encoder
+                    self._transcode["hw"] = hw
+
+    def finish_transcode(self) -> None:
+        with self._lock:
+            self._transcode = {"active": False}
 
     def log_event(self, message: str, level: str = "info") -> None:
         """Append a timestamped entry to the action log (kept across cycles)."""
@@ -203,8 +230,30 @@ class StationState:
                 "target": self._target.as_dict(),
                 "devices": list(self._devices),
                 "wifi_ap": self._ap_active,
+                "transcode": self._transcode_snapshot_locked(),
                 "events": list(reversed(self._events)),  # newest first
             }
+
+    def _transcode_snapshot_locked(self) -> dict[str, Any]:
+        """Transcode block for the snapshot (elapsed/ETA from percent + wall clock)."""
+        tr = self._transcode
+        if not tr.get("active"):
+            return {"active": False}
+        percent = float(tr.get("percent", 0.0))
+        started = tr.get("started")
+        elapsed = (time.monotonic() - started) if started is not None else None
+        eta = None
+        if elapsed is not None and percent > 0:
+            eta = max(0.0, elapsed * (100.0 - percent) / percent)
+        return {
+            "active": True,
+            "name": tr.get("name", ""),
+            "percent": round(percent, 1),
+            "encoder": tr.get("encoder", ""),
+            "hw": bool(tr.get("hw", False)),
+            "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
 
 
 class StatusHub:
@@ -264,6 +313,21 @@ class StatusHub:
 
     def set_ap_active(self, active: bool) -> None:
         self._state.set_ap_active(active)
+
+    def begin_transcode(self, name: str) -> None:
+        """Enter the TRANSCODING phase: overrides the copy status on every backend."""
+        self._state.begin_transcode(name)
+        self._indicator.set_state(State.TRANSCODING)
+        self._indicator.set_progress(0.0)
+
+    def set_transcode_progress(self, fraction: float, encoder: str = "", hw: bool = False) -> None:
+        self._state.update_transcode(fraction, encoder, hw)
+        self._indicator.set_progress(fraction)
+
+    def finish_transcode(self, restore_phase: State) -> None:
+        """Leave the transcode phase and restore whatever phase was showing before."""
+        self._state.finish_transcode()
+        self.set_phase(restore_phase)
 
     def log_event(self, message: str, level: str = "info") -> None:
         self._state.log_event(message, level)

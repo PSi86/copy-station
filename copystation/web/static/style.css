@@ -49,6 +49,7 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .badge.ready { background: var(--ready); color: #06210f; }
 .badge.detecting { background: var(--detecting); color: #2a2300; }
 .badge.copying { background: var(--copying); color: #042036; }
+.badge.transcoding { background: #8a5cff; color: #120a2e; }
 .badge.error { background: var(--error); color: #2a0a05; }
 .badge.success { background: var(--ready); color: #06210f; }
 
@@ -167,6 +168,7 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .btn.tc-cancel { padding: 0.05rem 0.45rem; font-size: 0.85rem; line-height: 1.2; }
 .btn.tc-cancel:hover { border-color: var(--error); color: var(--error); }
 .filelist .file .storage-track { height: 6px; margin-top: 0.35rem; width: 100%; }
+.filelist .jobtiming { margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .role.queued { background: #3a4250; color: var(--fg); }
 .role.running { background: var(--copying); color: #042036; }
 .role.done { background: var(--ready); color: #06210f; }

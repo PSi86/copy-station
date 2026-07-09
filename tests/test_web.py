@@ -51,3 +51,23 @@ def test_ap_status_in_status_endpoint():
     assert _client(state).get("/api/status").json()["wifi_ap"] is False
     state.set_ap_active(True)
     assert _client(state).get("/api/status").json()["wifi_ap"] is True
+
+
+def test_transcode_phase_and_block_in_snapshot():
+    state = StationState()
+    assert state.snapshot()["transcode"] == {"active": False}
+
+    state.begin_transcode("DJI_0219.MP4")
+    snap = state.snapshot()
+    assert snap["phase"] == "transcoding"  # overrides the copy phase
+    tr = snap["transcode"]
+    assert tr["active"] is True and tr["name"] == "DJI_0219.MP4"
+
+    state.update_transcode(0.5, "cpu", False)
+    tr = state.snapshot()["transcode"]
+    assert tr["percent"] == 50.0
+    assert tr["encoder"] == "cpu"
+    assert tr["elapsed_seconds"] is not None
+
+    state.finish_transcode()
+    assert state.snapshot()["transcode"] == {"active": False}

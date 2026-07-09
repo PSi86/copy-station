@@ -27,6 +27,7 @@ _PATTERN: dict[State, tuple[bool, bool, bool, bool]] = {
     State.READY: (True, False, False, False),
     State.DETECTING: (True, True, False, True),
     State.COPYING: (False, True, False, True),
+    State.TRANSCODING: (False, True, False, True),  # busy (like a copy) on 3 LEDs
     State.SUCCESS: (True, False, False, True),   # green, blinking (vs. READY steady)
     State.ERROR: (False, False, True, True),
 }

@@ -22,6 +22,7 @@ class State(enum.Enum):
     READY = "ready"
     DETECTING = "detecting"
     COPYING = "copying"
+    TRANSCODING = "transcoding"  # a video transcode job is running (blocks copying)
     ERROR = "error"
     SUCCESS = "success"  # short confirmation pulse after a successful transfer
 

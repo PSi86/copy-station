@@ -10,7 +10,9 @@ import pytest
 
 import copystation.transcode as tc
 from copystation.mounts import NotFound, UnknownVolume
+from copystation.status import State, StatusIndicator
 from copystation.transcode import (
+    TranscodeBusy,
     TranscodeManager,
     TranscodeUnavailable,
     UnknownPreset,
@@ -26,7 +28,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from copystation.config import Config  # noqa: E402
-from copystation.state import StationState  # noqa: E402
+from copystation.state import StationState, StatusHub  # noqa: E402
 from copystation.web.app import create_app  # noqa: E402
 
 
@@ -113,8 +115,12 @@ def _card(tmp_path, name="clip.mp4"):
     return card
 
 
-def _mgr(browse, available=True):
-    mgr = TranscodeManager(Config(), StationState(), browse)
+def _hub():
+    return StatusHub(StationState(), StatusIndicator())
+
+
+def _mgr(browse, available=True, hub=None):
+    mgr = TranscodeManager(Config(), hub or _hub(), browse)
     mgr._available = available
     return mgr
 
@@ -137,6 +143,23 @@ def test_submit_unknown_volume(monkeypatch):
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     with pytest.raises(UnknownVolume):
         mgr.submit("sdX", "clip.mp4", "720p-h264")
+
+
+def test_submit_blocked_while_copying(monkeypatch):
+    hub = _hub()
+    hub.state.set_phase(State.COPYING)
+    mgr = _mgr(_FakeBrowse(), hub=hub)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    with pytest.raises(TranscodeBusy):
+        mgr.submit("sdb1", "clip.mp4", "720p-h264")
+
+
+def test_submit_blocked_when_a_job_is_active(monkeypatch):
+    mgr = _mgr(_FakeBrowse())
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    mgr.submit("sdb1", "clip.mp4", "720p-h264")  # queued
+    with pytest.raises(TranscodeBusy):
+        mgr.submit("sdb1", "clip.mp4", "720p-h264")  # second one refused
 
 
 def test_submit_queues_job(monkeypatch):
@@ -200,6 +223,46 @@ def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
     assert browse.ops.index("release:sdb1") < browse.ops.index("mount_rw:sdb1")
     # Same device -> no separate read-only input mount (read from the rw mount).
     assert "mount_ro:sdb1" not in browse.ops
+
+
+def test_process_takes_over_phase_and_restores_it(tmp_path, monkeypatch):
+    class _RecInd(StatusIndicator):
+        def __init__(self):
+            self.states = []
+
+        def set_state(self, s):
+            self.states.append(s)
+
+    card = _card(tmp_path)
+    ind = _RecInd()
+    hub = StatusHub(StationState(), ind)
+    hub.state.set_phase(State.DETECTING)  # a card was detected before the transcode
+    mgr = _mgr(_FakeBrowse({"sdb1": card}), hub=hub)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["out_time=00:00:05.000000\n", "progress=end\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"x")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    assert State.TRANSCODING in ind.states       # took over every indicator
+    assert hub.state.phase is State.DETECTING     # ...and restored the phase after
+    assert mgr.snapshot()["jobs"][0]["status"] == "done"
 
 
 def test_process_different_devices_mount_each_side(tmp_path, monkeypatch):
@@ -457,6 +520,8 @@ class _FakeManager:
     def submit(self, device, path, preset, output_device=None):
         if not self._available:
             raise TranscodeUnavailable("no ffmpeg")
+        if preset == "busy":
+            raise TranscodeBusy("a copy is in progress")
         if preset == "bad":
             raise UnknownPreset("bad")
         if device == "sdX":
@@ -490,6 +555,12 @@ def test_api_transcode_errors():
     client = _client(_FakeManager())
     assert client.post("/api/transcode", json={"device": "sdb1", "path": "c", "preset": "bad"}).status_code == 400
     assert client.post("/api/transcode", json={"device": "sdX", "path": "c", "preset": "720p-h264"}).status_code == 404
+
+
+def test_api_transcode_busy_is_409():
+    client = _client(_FakeManager())
+    res = client.post("/api/transcode", json={"device": "sdb1", "path": "c", "preset": "busy"})
+    assert res.status_code == 409
 
 
 def test_api_transcode_unavailable_is_501():

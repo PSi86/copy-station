@@ -38,7 +38,7 @@ from ..mounts import (
     PathEscapesVolume,
     UnknownVolume,
 )
-from ..transcode import TranscodeError, TranscodeUnavailable, UnknownPreset
+from ..transcode import TranscodeBusy, TranscodeError, TranscodeUnavailable, UnknownPreset
 
 
 class TranscodeRequest(BaseModel):
@@ -193,6 +193,8 @@ def create_app(
                 job = transcode.submit(req.device, req.path, req.preset, req.output_device)
             except TranscodeUnavailable as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except TranscodeBusy as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except UnknownPreset as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except BrowseError as exc:

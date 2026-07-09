@@ -163,11 +163,25 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y = _draw_wrapped(draw, m, y, right, view.error_text, label_f)
 
     if view.show_progress:
-        _text(draw, m, y, "Transfer", label_f)
+        _text(draw, m, y, "Transcode" if view.transcode_active else "Transfer", label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=right)
         y += _line_height(label_f) + 2
         _bar(draw, m, y, width - 2 * m, max(10, height // 18), view.progress_fraction)
         y += max(10, height // 18) + 8
+
+    if view.transcode_active:
+        # A transcode shows the file + encoder, and elapsed/ETA in the footer --
+        # not the source/target storage gauges.
+        _text(draw, m, y, _fit_label(draw, view.transcode_name, label_f, right - m), label_f)
+        y += _line_height(label_f) + 3
+        if view.transcode_encoder:
+            _text(draw, m, y, view.transcode_encoder, small_f)
+        foot_y = height - m - _line_height(small_f)
+        _text(draw, m, foot_y, f"Elapsed {view.elapsed_text}", small_f)
+        if view.eta_text and view.eta_text != "--":
+            _text(draw, 0, foot_y, f"ETA {view.eta_text}", small_f, anchor_right=right)
+        return img
+
     footer = view.show_progress and (view.speed_text or view.eta_text != "--")
     data_bottom = (height - m - _line_height(small_f) - 4) if footer else (height - m)
     items, overflow = _gauge_items(view)
@@ -207,7 +221,10 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         big_f = _fit_font(draw, f"{view.percent}%", left_w, max(14, height // 6))
         _text(draw, m, sy, f"{view.percent}%", big_f)
         sy += _line_height(big_f) + 1
-        if view.speed_text:
+        if view.transcode_active:
+            _text(draw, m, sy, f"Elapsed {view.elapsed_text}", small_f)
+            sy += _line_height(small_f)
+        elif view.speed_text:
             _text(draw, m, sy, view.speed_text, small_f)
             sy += _line_height(small_f)
         if view.eta_text and view.eta_text != "--":
@@ -224,6 +241,21 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         # Drop the right column below the top-right WiFi badge so a right-aligned
         # value (e.g. the copy "67%") never lands under it.
         y = m + _line_height(small_f) + 4
+
+    if view.transcode_active:
+        # The right column shows the progress bar (like a copy) plus the file and
+        # encoder, instead of the storage gauges.
+        _text(draw, rx, y, "Transcode", label_f)
+        _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=x1)
+        y += _line_height(label_f) + 2
+        _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
+        y += max(9, height // 11) + 8
+        _text(draw, rx, y, _fit_label(draw, view.transcode_name, small_f, x1 - rx), small_f)
+        y += _line_height(small_f) + 2
+        if view.transcode_encoder:
+            _text(draw, rx, y, view.transcode_encoder, small_f)
+        return img
+
     if view.show_progress:
         _text(draw, rx, y, "Transfer", label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=x1)

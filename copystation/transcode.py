@@ -32,6 +32,7 @@ from .encoders import (
     select_encoders,
 )
 from .mounts import BrowseError, NotFound, safe_resolve
+from .status import State
 
 _LOG = logging.getLogger("copystation.transcode")
 
@@ -51,6 +52,10 @@ class TranscodeUnavailable(TranscodeError):
 
 class UnknownPreset(TranscodeError):
     """The requested preset id is not configured."""
+
+
+class TranscodeBusy(TranscodeError):
+    """Refused because a copy or another transcode is in progress (mapped to 409)."""
 
 
 class _Canceled(TranscodeError):
@@ -146,11 +151,12 @@ def progress_seconds(line: str) -> Optional[float]:
 class TranscodeManager:
     """Single-worker transcode job queue backed by ffmpeg."""
 
-    def __init__(self, config: Any, state: Any, browse: Any) -> None:
+    def __init__(self, config: Any, hub: Any, browse: Any) -> None:
         if browse is None:
             raise TranscodeError("transcoding requires the file browser (mounts)")
         self._config = config
-        self._state = state
+        self._hub = hub
+        self._state = hub.state  # StationState (shared operation_lock + snapshot)
         self._browse = browse
         tc = config.get("transcode", {}) or {}
         self._output_dirname = str(tc.get("output_dirname", "Transcoded"))
@@ -204,9 +210,14 @@ class TranscodeManager:
                 return preset
         raise UnknownPreset(f"unknown preset {preset_id!r}")
 
-    def snapshot(self) -> dict:
+    def _has_active_job(self) -> bool:
         with self._lock:
-            jobs = [dict(self._jobs[i]) for i in reversed(self._order)]
+            return any(j["status"] in ("queued", "running") for j in self._jobs.values())
+
+    def snapshot(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            jobs = [self._public_job(self._jobs[i], now) for i in reversed(self._order)]
         return {
             "available": self._available,
             "output_dirname": self._output_dirname,
@@ -218,6 +229,21 @@ class TranscodeManager:
             ],
             "jobs": jobs,
         }
+
+    @staticmethod
+    def _public_job(job: dict, now: float) -> dict:
+        """Copy of a job for the API, with live elapsed/ETA for a running one."""
+        j = dict(job)
+        started = j.pop("started", None)
+        j["elapsed_seconds"] = None
+        j["eta_seconds"] = None
+        if j["status"] == "running" and started is not None:
+            elapsed = max(0.0, now - started)
+            j["elapsed_seconds"] = round(elapsed, 1)
+            percent = float(j.get("percent") or 0)
+            if percent > 0:
+                j["eta_seconds"] = round(max(0.0, elapsed * (100 - percent) / percent), 1)
+        return j
 
     # ----- submission -----------------------------------------------------------
 
@@ -231,6 +257,12 @@ class TranscodeManager:
         if not self._available:
             raise TranscodeUnavailable("ffmpeg is not installed on the station")
         self._preset(preset_id)  # validate early -> UnknownPreset
+        # Copy and transcode are mutually exclusive, and only one transcode runs at
+        # a time: refuse up front rather than silently queueing behind a copy.
+        if self._state.phase is State.COPYING:
+            raise TranscodeBusy("a copy is in progress -- try again once it finishes")
+        if self._has_active_job():
+            raise TranscodeBusy("a transcode is already in progress")
         # Validate the input up front (mounts read-only) so a bad file/volume is
         # reported immediately instead of failing asynchronously.
         self._browse.resolve_input(input_device, input_path)
@@ -251,6 +283,7 @@ class TranscodeManager:
                 "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
                 "hw": False,           # True if a hardware encoder was used
                 "error": None,
+                "started": None,       # wall clock (time.monotonic) when it starts running
             }
             self._jobs[job_id] = job
             self._order.append(job_id)
@@ -309,13 +342,21 @@ class TranscodeManager:
             output_device = job["output_device"]
             preset_id = job["preset"]
 
-        # Serialise with the copy daemon: no concurrent mount/write of a volume.
+        # Serialise with the copy daemon (no concurrent mount/write of a volume)
+        # AND take over every status indicator for the duration (phase TRANSCODING
+        # overrides ready/detecting/copying on the LEDs, e-paper and web). The
+        # previous phase is restored at the end so device detection resumes.
         with self._state.operation_lock:
-            self._set(job_id, status="running")
+            started = time.monotonic()
+            self._set(job_id, status="running", started=started)
             out_name = output_name(Path(input_path).name, preset_id)
             out_rel = f"{self._output_dirname}/{out_name}"
             self._set(job_id, filename=out_name, output_path=out_rel)
             same_device = input_device == output_device
+            prev_phase = self._state.phase
+            if prev_phase is State.TRANSCODING:  # defensive: never restore to ourselves
+                prev_phase = State.READY
+            self._hub.begin_transcode(Path(input_path).name)
             try:
                 # A block device can't be mounted read-only and read-write at once
                 # (shared superblock -> the read-only one wins), so drop any browse
@@ -339,26 +380,23 @@ class TranscodeManager:
                     self._browse.umount_rw(output_device)
                     if not same_device:
                         self._browse.release(input_device)
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job is not None and job["status"] == "running":
+                        job["status"] = "done"
+                        job["percent"] = 100
+                _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
             except _Canceled:
                 self._set(job_id, status="canceled")
                 _LOG.info("Transcode #%d canceled", job_id)
-                return
             except BrowseError as exc:
                 self._fail(job_id, exc)
-                return
             except TranscodeError as exc:
                 self._fail(job_id, exc)
-                return
             except Exception as exc:  # pragma: no cover - defensive
                 self._fail(job_id, exc, crash=True)
-                return
-
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is not None and job["status"] == "running":
-                job["status"] = "done"
-                job["percent"] = 100
-        _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
+            finally:
+                self._hub.finish_transcode(prev_phase)
 
     def _ram_budget(self) -> int:
         """RAM the buffer may use this job (0 disables buffering)."""
@@ -438,6 +476,8 @@ class TranscodeManager:
         last_exc: Optional[TranscodeError] = None
         for idx, enc in enumerate(encoders):
             self._set(job_id, encoder=enc.name, hw=enc.is_hardware, percent=0)
+            # Record the encoder on the shared state too (shown on the display).
+            self._hub.set_transcode_progress(0.0, enc.name, enc.is_hardware)
             _LOG.info("Transcode #%d: encoding with %s (%s)", job_id, enc.name, enc.kind)
             cmd = build_ffmpeg_cmd(enc, preset, src, dst)
             try:
@@ -480,6 +520,7 @@ class TranscodeManager:
                 if secs is not None and duration and duration > 0:
                     pct = max(0, min(99, int(secs / duration * 100)))
                     self._set(job_id, percent=pct)
+                    self._hub.set_transcode_progress(pct / 100.0)  # drives LEDs + display
             proc.wait()
         finally:
             with self._lock:

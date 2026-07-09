@@ -179,7 +179,7 @@ def perform_transfer(
     return dest
 
 
-def _maybe_start_web(state: StationState, config: Config) -> bool:
+def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
     """Start the web interface if enabled. Returns True if it was started."""
     web_cfg = config.get("web", {})
     if not web_cfg.get("enabled"):
@@ -187,9 +187,9 @@ def _maybe_start_web(state: StationState, config: Config) -> bool:
     try:
         from .web import start_web_server
 
-        browse, transcode = _build_web_features(state, config)
+        browse, transcode = _build_web_features(hub, config)
         start_web_server(
-            state,
+            hub.state,
             web_cfg.get("host", "0.0.0.0"),
             int(web_cfg.get("port", 8080)),
             config=config,
@@ -202,7 +202,7 @@ def _maybe_start_web(state: StationState, config: Config) -> bool:
         return False
 
 
-def _build_web_features(state: StationState, config: Config):
+def _build_web_features(hub: StatusHub, config: Config):
     """Construct the optional file-browser and transcode managers.
 
     Each is best-effort: a missing dependency (pyudev, ffmpeg) or a disabled
@@ -231,7 +231,7 @@ def _build_web_features(state: StationState, config: Config):
         try:
             from .transcode import TranscodeManager
 
-            transcode = TranscodeManager(config, state, browse)
+            transcode = TranscodeManager(config, hub, browse)
         except Exception as exc:  # pragma: no cover - defensive
             _LOG.warning("Transcoding unavailable: %s", exc)
 
@@ -243,7 +243,7 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     """Run a transfer with local folders (development/test)."""
     state = StationState()
     hub = StatusHub(state, build_indicator(config, state=state))
-    web_running = _maybe_start_web(state, config)
+    web_running = _maybe_start_web(hub, config)
 
     source = Path(args.source)
     target = Path(args.target)
@@ -403,7 +403,7 @@ def run_daemon(config: Config) -> int:
     # interfaces) before the slower AP bring-up. The captive-portal DNS drop-in is
     # written before the AP is raised, so NetworkManager's dnsmasq reads it. Then
     # raise the AP.
-    web_up = _maybe_start_web(state, config)
+    web_up = _maybe_start_web(hub, config)
     portal = _maybe_start_captive_portal(config)
     if _maybe_start_wifi_ap(config):
         hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started

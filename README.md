@@ -131,9 +131,15 @@ boards differ a lot in what they can encode in hardware:
 
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
-the same card at once -- while a job runs, device detection simply pauses until
-it finishes. Jobs run one at a time and can be **canceled from the UI** (the ✕ on
-a queued/running row), which stops ffmpeg and removes the partial output. Without
+the same card at once. **No transcode starts while a copy is running** (the submit
+is refused with a clear message) and **no copy starts while a transcode is
+running** (device detection pauses until it finishes). While a job runs it
+**takes over the status display** -- a dedicated `Transcoding` phase with its own
+**progress bar on the LEDs** (purple on a WS2812 strip, so it is clearly not a
+copy) and on the **e-paper panel** (bar, file name, encoder and elapsed/ETA), and
+in the web UI the phase badge plus **elapsed and remaining time** on the running
+job. Jobs run one at a time and can be **canceled from the UI** (the ✕ on a
+queued/running row), which stops ffmpeg and removes the partial output. Without
 ffmpeg the feature is a no-op and the endpoint returns a clear error.
 
 **RAM buffering.** When the input and output are on the **same card** (the common
