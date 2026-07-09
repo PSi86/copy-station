@@ -185,6 +185,26 @@ buttons:
       triple_click: wifi_ap   # toggle the WiFi access point
 ```
 
+**Reaching the web UI over the AP.** The AP only serves the web interface if the
+**web interface is enabled** -- they are independent switches. If
+`http://10.42.0.1:8080/` is *refused* after joining the AP, the usual cause is
+`web.enabled: false` (nothing is listening); set it `true` and restart. The
+daemon logs a warning for exactly this case and prints the reachable URL at
+startup (`journalctl -u copystation`). Quick checks on the device:
+`sudo ss -ltnp | grep 8080` (uvicorn listening on `0.0.0.0:8080`?) and
+`nmcli connection show --active` / `ip -4 addr` (is `10.42.0.1/24` on the Wi-Fi
+interface?).
+
+**Captive portal (optional).** Set `wifi_ap.captive_portal: true` so a device that
+joins **auto-opens the web UI** (the OS "Sign in to network" prompt) and stays on
+the AP. Without it, phones detect "no internet" on the AP and route to mobile
+data, so even the manual URL can fail. The portal points all DNS at the AP (a
+NetworkManager `dnsmasq-shared.d` drop-in) and runs a small redirect server on
+**port 80** that sends every request to `http://10.42.0.1:8080/`. It needs
+`web.enabled: true` and a free port 80; AP clients then get **no general internet**
+through the station (expected for a field AP that only serves this UI). Disabling
+it again removes the DNS drop-in on the next start.
+
 ## E-Paper display (optional)
 
 Add `epaper` to `status.backends` to drive a black/white SPI e-paper panel that

@@ -124,6 +124,7 @@ wifi_ap:
   channel: 6
   ipv4_address: 10.42.0.1/24
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
+  captive_portal: false   # true -> auto-open the web UI on join (needs port 80)
 
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by

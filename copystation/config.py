@@ -156,6 +156,11 @@ DEFAULTS: dict[str, Any] = {
         "ipv4_address": "10.42.0.1/24",  # NM "shared" serves DHCP+NAT in this /24
         "autoconnect": True,
         "ifname": "",            # empty -> NM picks the Wi-Fi interface
+        # Optional captive portal: point all DNS at the AP and redirect port 80 to
+        # the web UI, so a joining device auto-opens the interface and stays on the
+        # AP (phones otherwise route to mobile data). Needs web.enabled + port 80.
+        "captive_portal": False,
+        "captive_portal_port": 80,
     },
     # Optional video transcoding / resolution change via ffmpeg. Jobs are
     # submitted from the web interface; the output is written to a folder on the

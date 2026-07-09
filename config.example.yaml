@@ -157,6 +157,13 @@ wifi_ap:
   ipv4_address: 10.42.0.1/24
   autoconnect: true
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
+  # Captive portal: point all DNS at the AP and redirect port 80 to the web UI,
+  # so a joining device auto-opens the interface ("Sign in to network") and stays
+  # on the AP instead of falling back to mobile data. Needs web.enabled and port
+  # 80 free. Note: AP clients then get no general internet (expected for a field
+  # AP that only serves this UI).
+  captive_portal: false
+  captive_portal_port: 80
 
 # Optional video transcoding / resolution change via ffmpeg. Jobs are submitted
 # from the web interface (Files -> the ⚙ button on a video). The output is

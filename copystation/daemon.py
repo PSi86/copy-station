@@ -294,6 +294,43 @@ def _maybe_start_wifi_ap(config: Config) -> bool:
         return False
 
 
+def _maybe_start_captive_portal(config: Config):
+    """Set up the optional captive portal (DNS hijack + port-80 redirect).
+
+    Returns the running :class:`CaptivePortal` or ``None``. The DNS drop-in is
+    written before the AP is raised (so NetworkManager's shared dnsmasq reads it),
+    and is removed again when the feature is disabled so stale config never
+    lingers. Best-effort: any failure is logged and the AP still works.
+    """
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    try:
+        from .captive_portal import remove_dnsmasq_hijack, write_dnsmasq_hijack, CaptivePortal
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("Captive portal module unavailable: %s", exc)
+        return None
+
+    if not ap_cfg.get("captive_portal"):
+        remove_dnsmasq_hijack()  # clean up if it was enabled before
+        return None
+
+    web_cfg = config.get("web", {}) or {}
+    if not web_cfg.get("enabled"):
+        _LOG.warning("captive_portal is set but web.enabled is false -- no page to redirect to.")
+        remove_dnsmasq_hijack()
+        return None
+
+    try:
+        ip = str(ap_cfg.get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+        write_dnsmasq_hijack(ip)
+        portal = CaptivePortal(ip, int(web_cfg.get("port", 8080)),
+                               int(ap_cfg.get("captive_portal_port", 80)))
+        portal.start()
+        return portal
+    except Exception as exc:
+        _LOG.warning("Captive portal could not be started: %s", exc)
+        return None
+
+
 def _wifi_ap_bound_to_button(config: Config) -> bool:
     """True if any enabled user button binds the ``wifi_ap`` toggle action."""
     for entry in (config.get("buttons") or {}).values():
@@ -363,8 +400,11 @@ def run_daemon(config: Config) -> int:
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
     # Start the web server first so it is already listening (on 0.0.0.0, all
-    # interfaces) before the slower AP bring-up; then raise the AP.
+    # interfaces) before the slower AP bring-up. The captive-portal DNS drop-in is
+    # written before the AP is raised, so NetworkManager's dnsmasq reads it. Then
+    # raise the AP.
     web_up = _maybe_start_web(state, config)
+    portal = _maybe_start_captive_portal(config)
     if _maybe_start_wifi_ap(config):
         hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started
     _check_ap_web_reachability(config, web_up)
@@ -378,6 +418,8 @@ def run_daemon(config: Config) -> int:
     finally:
         for button in buttons:
             button.close()
+        if portal is not None:
+            portal.stop()
         hub.close()  # switches every LED off
     return 0
 

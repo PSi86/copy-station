@@ -96,6 +96,7 @@ wifi_ap:
   band: bg
   channel: 6
   ipv4_address: 10.42.0.1/24
+  captive_portal: false   # true -> auto-open the web UI on join (needs port 80)
 
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by
