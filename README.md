@@ -115,15 +115,16 @@ boards differ a lot in what they can encode in hardware:
 |-------|-----------------|-------------|
 | Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
 | Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
-| Radxa Cubie A7S | H.264 4K@30 in the SoC, but **only via GStreamer OpenMAX** (`omxh264videoenc`) -- **not** exposed to ffmpeg | CPU (`libx264`/`libx265`) |
+| Radxa Cubie A7S | H.264 **and H.265** 4K@30 in the SoC, but **only via GStreamer OpenMAX** (`omxh264videoenc` / `omxhevcvideoenc`) -- **not** exposed to ffmpeg | CPU (`libx264`/`libx265`) |
 
-> **Cubie A7S note.** The Allwinner A733 *does* have a hardware H.264 encoder
-> (up to 4K@30; H.265 encode is not exposed), but on the current Radxa images it
-> is reachable **only through GStreamer's OpenMAX element `omxh264videoenc`**, not
+> **Cubie A7S note.** The Allwinner A733 has hardware H.264 **and H.265** encoders
+> (up to 4K@30), but on the Radxa images they are reachable **only through
+> GStreamer's OpenMAX elements** (`omxh264videoenc` / `omxhevcvideoenc`), not
 > through ffmpeg's V4L2 M2M. So this ffmpeg-based transcoder falls back to the CPU
-> on the Cubie (which is expected, and why `auto` resolves to CPU there). Check
-> what your image exposes with `gst-inspect-1.0 | grep omx`. A GStreamer
-> hardware-encode path is a possible future addition.
+> on the Cubie (which is expected, and why `auto` resolves to CPU there). Install
+> and check with `sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-bad`
+> then `gst-inspect-1.0 | grep omx`. A GStreamer hardware-encode path is a
+> possible future addition.
 
 * `acceleration: auto` (default) uses the board's hardware encoder **when the
   installed ffmpeg actually has it**, otherwise software.
