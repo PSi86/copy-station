@@ -14,6 +14,7 @@ feature is a no-op with a clear error when ffmpeg is not installed.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import re
@@ -27,9 +28,12 @@ from typing import Any, List, Optional
 from .encoders import (
     Encoder,
     available_encoders,
+    available_gst_elements,
     build_ffmpeg_cmd,
+    build_gstreamer_cmd,
     default_bitrate,
     detect_board,
+    gst_can_handle,
     select_encoders,
 )
 from .mounts import BrowseError, NotFound, safe_resolve
@@ -39,6 +43,13 @@ _LOG = logging.getLogger("copystation.transcode")
 
 # Keep at most this many finished/failed jobs in the visible history.
 MAX_HISTORY = 20
+
+# Kill a GStreamer encode that produces no output at all for this long: the
+# Allwinner OMX stack can wedge on a bad decoder->encoder handoff, and a stuck
+# hardware job must not hang the (headless) station. A healthy pipeline emits a
+# ``progressreport`` line every 2 s, so a long silence means it is stuck; the
+# kill surfaces as a normal failure and falls back to the CPU encoder.
+GST_STALL_SECONDS = 90
 
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -144,6 +155,57 @@ def probe_duration(src: Any) -> Optional[float]:
         return None
 
 
+def probe_video_info(src: Any) -> dict:
+    """Video codec, dimensions, container and audio of ``src`` via ffprobe.
+
+    Feeds ``encoders.gst_can_handle`` / ``build_gstreamer_cmd`` (the hardware
+    GStreamer path needs the source codec to pick the HW decoder, the dimensions
+    to compute the downscaled width, and the audio codec to decide whether it can
+    stream-copy the audio). Best-effort: on any error the fields stay at their
+    empty defaults, which makes ``gst_can_handle`` return False (CPU fallback).
+    """
+    info: dict = {
+        "vcodec": None, "width": 0, "height": 0, "fps": 0.0,
+        "has_audio": False, "acodec": None,
+        "container": Path(str(src)).suffix.lower().lstrip("."),
+    }
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate"
+             ":stream_disposition=attached_pic",
+             "-of", "json", str(src)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for st in json.loads(out).get("streams", []):
+            kind = st.get("codec_type")
+            if kind == "video" and info["vcodec"] is None:
+                # Skip embedded cover art / thumbnails (e.g. the DJI MJPEG preview).
+                if (st.get("disposition") or {}).get("attached_pic"):
+                    continue
+                info["vcodec"] = st.get("codec_name")
+                info["width"] = int(st.get("width") or 0)
+                info["height"] = int(st.get("height") or 0)
+                info["fps"] = _parse_fps(st.get("avg_frame_rate")) or \
+                    _parse_fps(st.get("r_frame_rate"))
+            elif kind == "audio" and not info["has_audio"]:
+                info["has_audio"] = True
+                info["acodec"] = st.get("codec_name")
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+        pass
+    return info
+
+
+def _parse_fps(rate: Any) -> float:
+    """Frames/second from an ffprobe ``num/den`` rate string (0.0 if unknown)."""
+    try:
+        num, den = str(rate).split("/")
+        num, den = float(num), float(den)
+        return num / den if den else 0.0
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def _hms_to_seconds(value: str) -> Optional[float]:
     try:
         h, m, s = value.split(":")
@@ -173,6 +235,38 @@ def progress_seconds(line: str) -> Optional[float]:
     return None
 
 
+# A ``progressreport`` line looks like:
+#   progressreport0 (00:00:12): 7 / 56 seconds (12.5 %)
+_GST_PERCENT = re.compile(r"\(\s*([0-9]+(?:\.[0-9]+)?)\s*%\)")
+_GST_POSITION = re.compile(r"(\d+)\s*/\s*\d+\s*seconds")
+
+
+def gst_progress_percent(line: str) -> Optional[float]:
+    """Percent complete from one GStreamer ``progressreport`` line, else ``None``."""
+    m = _GST_PERCENT.search(line)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def gst_progress_position(line: str) -> Optional[int]:
+    """Output seconds processed so far from a ``progressreport`` line, else ``None``.
+
+    GStreamer's ``progressreport`` reports no encode rate, so the transcoder
+    derives speed/fps from this position over the elapsed wall time.
+    """
+    m = _GST_POSITION.search(line)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 class TranscodeManager:
     """Single-worker transcode job queue backed by ffmpeg."""
 
@@ -195,7 +289,11 @@ class TranscodeManager:
         # Detect the board and probe which encoders ffmpeg actually has, once at
         # startup, so hardware acceleration can be picked per job without re-probing.
         self._board = detect_board()
-        self._encoders_avail = available_encoders() if self._available else set()
+        # Probe both ffmpeg encoders and GStreamer elements: the Cubie's hardware
+        # H.264 encoder is a GStreamer OMX element, not an ffmpeg encoder.
+        self._encoders_avail = (
+            available_encoders() | available_gst_elements() if self._available else set()
+        )
         self._queue: "queue.Queue[int]" = queue.Queue()
         self._lock = threading.Lock()
         self._jobs: dict[int, dict] = {}
@@ -517,15 +615,32 @@ class TranscodeManager:
         if duration is None:
             duration = probe_duration(src)
         encoders = self._encoders_for(preset)
-        last_exc: Optional[TranscodeError] = None
+        info: Optional[dict] = None  # source media info, probed once if a GStreamer
+        last_exc: Optional[TranscodeError] = None  # encoder is among the candidates
         for idx, enc in enumerate(encoders):
+            if enc.is_gstreamer:
+                if info is None:
+                    info = probe_video_info(src)
+                if not gst_can_handle(info):
+                    _LOG.info(
+                        "Transcode #%d: %s cannot handle this source "
+                        "(codec=%s %sx%s container=%s audio=%s) -- skipping to next",
+                        job_id, enc.name, info.get("vcodec"), info.get("width"),
+                        info.get("height"), info.get("container"),
+                        info.get("acodec") if info.get("has_audio") else "none",
+                    )
+                    continue
+                cmd = build_gstreamer_cmd(enc, preset, src, dst, info)
+            else:
+                cmd = build_ffmpeg_cmd(enc, preset, src, dst)
             self._set(job_id, encoder=enc.name, hw=enc.is_hardware, percent=0)
             # Record the encoder on the shared state too (shown on the display).
             self._hub.set_transcode_progress(0.0, enc.name, enc.is_hardware)
-            _LOG.info("Transcode #%d: encoding with %s (%s)", job_id, enc.name, enc.kind)
-            cmd = build_ffmpeg_cmd(enc, preset, src, dst)
+            _LOG.info("Transcode #%d: encoding with %s (%s, %s)",
+                      job_id, enc.name, enc.kind, enc.engine)
+            src_fps = info.get("fps") if (enc.is_gstreamer and info) else None
             try:
-                self._run_ffmpeg(job_id, cmd, duration)
+                self._run_encode(job_id, cmd, duration, enc.engine, src_fps=src_fps)
                 return
             except _Canceled:
                 _cleanup(dst)
@@ -546,21 +661,77 @@ class TranscodeManager:
         # Unreachable (the loop always returns or raises), but be explicit.
         raise last_exc or TranscodeError("no encoder available")
 
-    def _run_ffmpeg(self, job_id: int, cmd: List[str], duration: Optional[float]) -> None:
+    def _run_encode(self, job_id: int, cmd: List[str], duration: Optional[float],
+                    engine: str = "ffmpeg", src_fps: Optional[float] = None) -> None:
+        """Run one encoder subprocess, tracking progress and honouring cancel.
+
+        ``engine`` selects how progress is read: ffmpeg's ``-progress`` stream, or
+        a GStreamer ``progressreport``. ffmpeg reports its own fps/speed; GStreamer
+        does not, so for the GStreamer path speed is derived from the output
+        position over the elapsed wall time and fps from ``src_fps`` * speed. A
+        GStreamer job also gets a stall watchdog (the OMX stack can wedge; see
+        ``GST_STALL_SECONDS``). GStreamer's stderr is merged into stdout so the
+        ``progressreport`` lines are captured regardless of the chatty OMX output.
+        """
+        is_gst = engine == "gstreamer"
+        stderr = subprocess.STDOUT if is_gst else subprocess.DEVNULL
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                cmd, stdout=subprocess.PIPE, stderr=stderr, text=True
             )
         except OSError as exc:
-            raise TranscodeError(f"ffmpeg could not start: {exc}") from exc
+            raise TranscodeError(f"{engine} could not start: {exc}") from exc
 
         with self._lock:
             self._current_proc = proc
             self._current_id = job_id
+
+        last_line = [time.monotonic()]
+        wd_stop = threading.Event()
+        watchdog: Optional[threading.Thread] = None
+        if is_gst:
+            def _watch() -> None:
+                while not wd_stop.wait(5.0):
+                    if time.monotonic() - last_line[0] > GST_STALL_SECONDS:
+                        _LOG.warning(
+                            "Transcode #%d: GStreamer produced no output for %ds -- killing",
+                            job_id, GST_STALL_SECONDS,
+                        )
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        return
+            watchdog = threading.Thread(
+                target=_watch, name="copystation-gst-watchdog", daemon=True
+            )
+            watchdog.start()
+
         try:
             assert proc.stdout is not None
+            t0 = time.monotonic()  # encode start, for the GStreamer speed estimate
             for raw in proc.stdout:
+                now = time.monotonic()
+                last_line[0] = now
                 line = raw.strip()
+                if is_gst:
+                    pct = gst_progress_percent(line)
+                    if pct is not None:
+                        p = max(0, min(99, int(pct)))
+                        self._set(job_id, percent=p)
+                        self._hub.set_transcode_progress(p / 100.0)  # LEDs + display
+                    pos = gst_progress_position(line)
+                    if pos is not None:
+                        elapsed = now - t0
+                        if elapsed > 0.5:  # let the first second settle
+                            speed = pos / elapsed
+                            self._set(job_id, speed=f"{speed:.2f}x")
+                            if src_fps and src_fps > 0:
+                                fps = speed * src_fps
+                                self._set(job_id, fps=round(fps, 1))
+                                self._state.set_transcode_meta(fps=fps)
+                    continue
                 secs = progress_seconds(line)
                 if secs is not None and duration and duration > 0:
                     pct = max(0, min(99, int(secs / duration * 100)))
@@ -580,6 +751,9 @@ class TranscodeManager:
                         self._set(job_id, speed=speed)
             proc.wait()
         finally:
+            wd_stop.set()
+            if watchdog is not None:
+                watchdog.join(timeout=1.0)
             with self._lock:
                 self._current_proc = None
                 self._current_id = None
@@ -587,7 +761,7 @@ class TranscodeManager:
         if self._is_canceled(job_id):
             raise _Canceled("canceled")
         if proc.returncode != 0:
-            raise TranscodeError(f"ffmpeg exited with code {proc.returncode}")
+            raise TranscodeError(f"{engine} exited with code {proc.returncode}")
 
     def _is_canceled(self, job_id: int) -> bool:
         with self._lock:

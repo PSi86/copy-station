@@ -5,11 +5,14 @@ import pytest
 from copystation.encoders import (
     Encoder,
     available_encoders,
+    available_gst_elements,
     build_ffmpeg_cmd,
+    build_gstreamer_cmd,
     cpu_encoder,
     default_bitrate,
     detect_board,
     family_of,
+    gst_can_handle,
     select_encoders,
 )
 
@@ -100,9 +103,20 @@ def test_auto_pi5_has_no_hardware_encoder():
     assert _names(chain) == ["cpu"]
 
 
-def test_auto_cubie_hevc_uses_hardware():
-    chain = select_encoders(H265, board="cubie", available={"hevc_v4l2m2m", "libx265"})
-    assert _names(chain) == ["hevc_v4l2m2m", "cpu"]
+def test_auto_cubie_h264_uses_gstreamer_omx_then_cpu():
+    # The A733's H.264 encoder is a GStreamer OMX element, not an ffmpeg encoder.
+    chain = select_encoders(H264, board="cubie", available={"omxh264videoenc", "libx264"})
+    assert _names(chain) == ["omxh264videoenc", "cpu"]
+    assert chain[0].is_hardware and chain[0].is_gstreamer
+    assert chain[0].rate_mode == "bitrate"
+    assert chain[1].kind == "sw" and chain[1].codec == "libx264"
+
+
+def test_auto_cubie_hevc_output_has_no_hardware_encoder():
+    # The A733 exposes no H.265 hardware *encoder* -> H.265 output is CPU-only
+    # (H.265 *input* is still hardware-decoded inside build_gstreamer_cmd).
+    chain = select_encoders(H265, board="cubie", available={"omxh264videoenc", "libx265"})
+    assert _names(chain) == ["cpu"]
 
 
 def test_auto_skips_hardware_when_ffmpeg_lacks_it():
@@ -189,3 +203,101 @@ def test_build_keeps_resolution_when_height_zero():
     cmd = build_ffmpeg_cmd(cpu_encoder("libx265"), {"height": 0}, "a", "b")
     assert "-vf" not in cmd
     assert cmd[cmd.index("-c:v") + 1] == "libx265"
+
+
+# --------------------------------------------------------------------------- #
+# GStreamer (Allwinner OpenMAX) hardware path -- Cubie A7S
+# --------------------------------------------------------------------------- #
+
+def test_available_gst_elements_parsing():
+    sample = (
+        "omx:  omxh264videoenc: OpenMAX H.264 Video Encoder\n"
+        "omx:  omxh264dec: OpenMAX H.264 Video Decoder\n"
+        "omx:  omxhevcvideodec: OpenMAX H.265 Video Decoder\n"
+        "coreelements:  queue: Queue\n"
+        "\n"
+        "Total count: 4 features\n"
+    )
+
+    class _R:
+        stdout = sample
+
+    got = available_gst_elements(run=lambda *a, **k: _R())
+    assert {"omxh264videoenc", "omxh264dec", "omxhevcvideodec", "queue"} <= got
+    assert not any(x.startswith("Total") for x in got)  # summary line ignored
+
+
+def test_available_gst_elements_empty_on_error():
+    def boom(*a, **k):
+        raise FileNotFoundError("no gst-inspect")
+
+    assert available_gst_elements(run=boom) == set()
+
+
+# A 4K H.264 mp4 with no audio (the DJI drone case).
+INFO_4K_H264 = {
+    "vcodec": "h264", "width": 3840, "height": 2160,
+    "has_audio": False, "acodec": None, "container": "mp4",
+}
+
+
+def _omx_encoder():
+    return select_encoders(
+        {"height": 1080, "vcodec": "libx264"}, board="cubie",
+        available={"omxh264videoenc", "libx264"},
+    )[0]
+
+
+def test_gst_can_handle_accepts_h264_mp4_no_audio():
+    assert gst_can_handle(INFO_4K_H264) is True
+
+
+def test_gst_can_handle_accepts_hevc_and_aac_audio():
+    assert gst_can_handle(dict(INFO_4K_H264, vcodec="hevc", has_audio=True, acodec="aac"))
+
+
+def test_gst_can_handle_rejects_non_aac_audio():
+    # Non-AAC audio can't be stream-copied here -> CPU path (which handles it).
+    assert gst_can_handle(dict(INFO_4K_H264, has_audio=True, acodec="ac3")) is False
+
+
+def test_gst_can_handle_rejects_unknown_codec_container_or_dims():
+    assert gst_can_handle(dict(INFO_4K_H264, vcodec="vp9")) is False
+    assert gst_can_handle(dict(INFO_4K_H264, container="avi")) is False
+    assert gst_can_handle(dict(INFO_4K_H264, width=0)) is False
+
+
+def test_build_gstreamer_cmd_video_only():
+    preset = {"id": "1080p-h264", "height": 1080, "vcodec": "libx264"}
+    cmd = build_gstreamer_cmd(_omx_encoder(), preset, "/in/a.mp4", "/out/b.mp4", INFO_4K_H264)
+    assert cmd[0] == "gst-launch-1.0"
+    assert "location=/in/a.mp4" in cmd
+    assert "qtdemux" in cmd and "omxh264dec" in cmd and "omxh264videoenc" in cmd
+    assert "control-rate=variable" in cmd
+    assert "target-bitrate=8000000" in cmd            # 1080p default 8M -> bits/s
+    # Aspect-preserving hardware downscale 3840x2160 -> 1920x1080.
+    assert "output-width=1920" in cmd and "output-height=1080" in cmd
+    assert cmd[-1] == "location=/out/b.mp4"
+    assert "aacparse" not in cmd and "name=d" not in cmd   # no audio -> linear pipeline
+
+
+def test_build_gstreamer_cmd_hevc_source_uses_hevc_decoder():
+    info = dict(INFO_4K_H264, vcodec="hevc")
+    cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 720, "vcodec": "libx264"}, "a", "b", info)
+    assert "h265parse" in cmd and "omxhevcvideodec" in cmd
+    assert "omxh264videoenc" in cmd                   # output is still H.264
+    assert "output-height=720" in cmd
+
+
+def test_build_gstreamer_cmd_carries_aac_audio_through_named_mux():
+    info = dict(INFO_4K_H264, has_audio=True, acodec="aac")
+    cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 1080, "vcodec": "libx264"}, "a", "b", info)
+    assert "name=d" in cmd and cmd.count("mux.") == 2  # video + audio into one muxer
+    assert "aacparse" in cmd
+
+
+def test_build_gstreamer_cmd_keeps_resolution_when_height_zero():
+    cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 0, "vcodec": "libx264"}, "a", "b", INFO_4K_H264)
+    assert not any(x.startswith("output-width") for x in cmd)
+    assert not any(x.startswith("output-height") for x in cmd)
+    assert "target-bitrate=16000000" in cmd           # default_bitrate(0) = 16M

@@ -112,11 +112,13 @@ default set offers 1080p/720p H.264 and 720p H.265.
 speed/size trade-off and defaults to **`veryfast`** -- a good choice on an SBC,
 where software encoding is CPU-bound (much faster than `medium` for a modest size
 increase). Use `ultrafast` for the most speed (larger files) or `fast`/`medium`/
-`slow` for smaller files. On boards without a usable hardware encoder (Pi 5 and
-the Cubie A7S, which encodes on the CPU), a heavy source -- e.g. **4K60** drone
-footage -- is dominated by *decoding*, so expect well under real-time; a lower
-`height` and a faster `preset` are the levers that matter. (`preset` is ignored
-by hardware encoders, which are bitrate-controlled.)
+`slow` for smaller files. Software encoding matters on a board without a usable
+hardware encoder for the chosen output -- the Pi 5, or the Cubie A7S when an
+**H.265 output** preset is picked (its H.265 encoder is not exposed; H.264 output
+*is* hardware-accelerated). There a heavy source -- e.g. **4K60** drone footage
+-- is dominated by *decoding*, so expect well under real-time; a lower `height`
+and a faster `preset` are the levers that matter. (`preset` is ignored by
+hardware encoders, which are bitrate-controlled.)
 
 **Hardware acceleration.** `transcode.acceleration` controls the encoder, and the
 station picks the best one for the board automatically -- the three supported
@@ -126,16 +128,22 @@ boards differ a lot in what they can encode in hardware:
 |-------|-----------------|-------------|
 | Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
 | Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
-| Radxa Cubie A7S | H.264 **and H.265** 4K@30 in the SoC, but **only via GStreamer OpenMAX** (`omxh264videoenc` / `omxhevcvideoenc`) -- **not** exposed to ffmpeg | CPU (`libx264`/`libx265`) |
+| Radxa Cubie A7S | H.264 in the SoC via **GStreamer OpenMAX** (`omxh264videoenc`); hardware H.264/H.265 **decode** too (`omxh264dec`/`omxhevcvideodec`). No H.265 hardware *encoder*. | hardware H.264 (GStreamer), CPU for H.265 output |
 
-> **Cubie A7S note.** The Allwinner A733 has hardware H.264 **and H.265** encoders
-> (up to 4K@30), but on the Radxa images they are reachable **only through
-> GStreamer's OpenMAX elements** (`omxh264videoenc` / `omxhevcvideoenc`), not
-> through ffmpeg's V4L2 M2M. So this ffmpeg-based transcoder falls back to the CPU
-> on the Cubie (which is expected, and why `auto` resolves to CPU there). Install
-> and check with `sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-bad`
-> then `gst-inspect-1.0 | grep omx`. A GStreamer hardware-encode path is a
-> possible future addition.
+> **Cubie A7S note.** The Allwinner A733 encodes H.264 in hardware, but **not
+> through ffmpeg** -- only through GStreamer's Allwinner OpenMAX element
+> `omxh264videoenc` (driving `/dev/cedar_dev`). The station therefore runs a
+> **GStreamer pipeline** on the Cubie: it hardware-**decodes** the source
+> (`omxh264dec` / `omxhevcvideodec`, so even a 4K clip never hits the CPU),
+> downscales **inside** the encoder (`output-width`/`output-height`, no CPU
+> scaler) and hardware-encodes H.264 -- a 4K60 clip transcodes with the CPU
+> essentially idle. There is **no H.265 hardware *encoder*** exposed in userspace,
+> so H.265 *output* stays on the CPU (H.265 *input* is still hardware-decoded).
+> The OMX plugin is present on Radxa images; check with
+> `gst-inspect-1.0 | grep omx`. The daemon runs as root, so it can open the VPU's
+> root-only device nodes (`/dev/cedar_dev`, `/dev/dma_heap`). A source with
+> non-AAC audio or an unusual container is handled by the CPU path instead (audio
+> is stream-copied on the hardware path, so it must already be AAC).
 
 * `acceleration: auto` (default) uses the board's hardware encoder **when the
   installed ffmpeg actually has it**, otherwise software.
@@ -178,10 +186,10 @@ with `RAM`, and the journal logs `buffering output in RAM ...`.
 
 **Trade-off / how to check it.** RAM buffering helps when the *card I/O* is the
 bottleneck (interleaved read+write seeking stalls the encode). When the *encode*
-is the bottleneck instead -- e.g. **software encoding on the Cubie A7S** -- the
-extra bulk input/output copies are serial time that does **not** overlap the
-encode, so the total can be a little *slower*. Measure it on your board and pick
-what fits:
+is the bottleneck instead -- e.g. **CPU encoding on the Pi 5**, or an H.265-output
+preset on the Cubie -- the extra bulk input/output copies are serial time that
+does **not** overlap the encode, so the total can be a little *slower*. Measure it
+on your board and pick what fits:
 
 * Confirm RAM is actually used: while a job runs, `mount | grep transcode-work`
   (a `tmpfs` appears) and `free -m` (used RAM rises by roughly the file size);

@@ -175,13 +175,17 @@ transcode:
   enabled: false
   output_dirname: Transcoded
   max_jobs: 1
-  # Hardware acceleration. `auto` uses the board's hardware encoder when the
-  # installed ffmpeg supports it and falls back to the CPU otherwise:
-  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware)
+  # Hardware acceleration. `auto` uses the board's hardware encoder when it is
+  # present and falls back to the CPU otherwise:
+  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware, via ffmpeg)
   #   * Raspberry Pi 5  -> no hardware encoder exists -> CPU (libx264/libx265)
-  #   * Radxa Cubie A7S -> the A733 HW H.264/H.265 encoders are only reachable via
-  #                        GStreamer OpenMAX (omxh264videoenc / omxhevcvideoenc),
-  #                        NOT ffmpeg, so auto resolves to CPU here.
+  #   * Radxa Cubie A7S -> H.264 in hardware via GStreamer OpenMAX
+  #                        (omxh264videoenc), with hardware H.264/H.265 *decode*
+  #                        (omxh264dec / omxhevcvideodec) so even 4K input is
+  #                        offloaded. H.265 *output* has no hardware encoder and
+  #                        stays on the CPU. Needs the gstreamer1.0 OMX plugin
+  #                        (present on Radxa images); the daemon runs as root, so
+  #                        it can open the /dev/cedar_dev + /dev/dma_heap nodes.
   # Set `cpu` to force software, or a specific ffmpeg encoder name (e.g.
   # h264_v4l2m2m) to force hardware. `fallback_to_cpu` retries on the CPU if the
   # hardware encoder fails at runtime.

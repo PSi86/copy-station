@@ -6,13 +6,22 @@ The three target boards differ a lot in what they can encode in hardware:
   ``h264_v4l2m2m`` (V4L2 mem2mem, ``/dev/video11``). No HEVC *encode*.
 * **Raspberry Pi 5** -- the H.264 encoder block was **removed**; the Pi 5 has no
   hardware video encoder at all (HEVC decode only). So it must encode on the CPU.
-* **Radxa Cubie A7S (Allwinner A733)** -- the Cedar VPU can encode H.264 (and,
-  depending on the ffmpeg build, HEVC) via ``h264_v4l2m2m`` / ``hevc_v4l2m2m``.
+* **Radxa Cubie A7S (Allwinner A733)** -- the Cedar VPU encodes H.264 in
+  hardware, but **not through ffmpeg**: it is reachable only via GStreamer's
+  Allwinner OpenMAX element ``omxh264videoenc`` (driving ``/dev/cedar_dev``). The
+  VPU also *decodes* H.264 and H.265 in hardware (``omxh264dec`` /
+  ``omxhevcvideodec``), which we use to offload the 4K decode, but there is **no
+  HEVC hardware *encoder*** exposed in userspace, so H.265 *output* stays on the
+  CPU. These encoders therefore run as a **GStreamer pipeline** (see
+  ``build_gstreamer_cmd``), not an ffmpeg command.
 
 This module maps ``(board, codec-family) -> preferred hardware encoder``, probes
-which encoders the installed ffmpeg actually has, and produces an **ordered list
-of candidates** to try (hardware first, then software) so the transcoder can
-fall back automatically when a hardware encode fails at runtime.
+which encoders the installed ffmpeg (``-encoders``) and GStreamer
+(``gst-inspect-1.0``) actually have, and produces an **ordered list of
+candidates** to try (hardware first, then software) so the transcoder can fall
+back automatically when a hardware encode fails at runtime. Each ``Encoder``
+carries an ``engine`` (``ffmpeg`` | ``gstreamer``) telling the transcoder how to
+build and run it.
 
 Everything here is pure/deterministic given its inputs (board string, the set of
 available encoder names), so it is fully unit-testable without any hardware.
@@ -21,6 +30,7 @@ available encoder names), so it is fully unit-testable without any hardware.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,25 +44,34 @@ class Encoder:
     """One concrete way to encode: an ffmpeg ``-c:v`` codec plus how to drive it."""
 
     name: str                        # shown in the UI / logs (e.g. "cpu", "h264_v4l2m2m")
-    codec: str                       # ffmpeg -c:v value
+    codec: str                       # ffmpeg -c:v value, or the GStreamer element name
     kind: str                        # "hw" | "sw"
-    rate_mode: str                   # "crf" (software) | "bitrate" (V4L2 M2M hardware)
+    rate_mode: str                   # "crf" (software) | "bitrate" (hardware)
     format_filter: Optional[str] = None   # appended to -vf (e.g. "format=yuv420p")
     extra_args: tuple = field(default_factory=tuple)
+    engine: str = "ffmpeg"           # "ffmpeg" | "gstreamer" -- how to build/run it
 
     @property
     def is_hardware(self) -> bool:
         return self.kind == "hw"
 
+    @property
+    def is_gstreamer(self) -> bool:
+        return self.engine == "gstreamer"
+
 
 # board -> codec family -> preferred hardware encoder (None = no HW encode).
 # Only well-known boards get a hardware default; an unknown board stays on the
-# CPU unless the user forces an encoder via `transcode.acceleration`.
+# CPU unless the user forces an encoder via `transcode.acceleration`. The Pi
+# encoders are ffmpeg V4L2 M2M; the Cubie's is a GStreamer OpenMAX element (see
+# the module docstring) -- both are handled uniformly via the Encoder.engine.
 _HW_ENCODERS = {
     "pi4": {"h264": "h264_v4l2m2m", "hevc": None},
     "pi": {"h264": "h264_v4l2m2m", "hevc": None},   # other/older Pi with the encoder
     "pi5": {"h264": None, "hevc": None},            # Pi 5 dropped the HW encoder
-    "cubie": {"h264": "h264_v4l2m2m", "hevc": "hevc_v4l2m2m"},
+    # Allwinner A733: H.264 encode via GStreamer OMX; HEVC encode not exposed
+    # (decode is, but that is the input side, handled in build_gstreamer_cmd).
+    "cubie": {"h264": "omxh264videoenc", "hevc": None},
     "generic": {"h264": None, "hevc": None},
 }
 
@@ -106,6 +125,30 @@ def available_encoders(run=subprocess.run) -> Set[str]:
     return names
 
 
+# ``gst-inspect-1.0`` lists one element per line as ``plugin:  element: Description``.
+_GST_ELEMENT_RE = re.compile(r"^\s*[\w.+-]+:\s+([\w.+-]+):\s")
+
+
+def available_gst_elements(run=subprocess.run) -> Set[str]:
+    """Names of the GStreamer elements installed (empty when gst-inspect is absent).
+
+    Used to detect the Allwinner OpenMAX encoder/decoder elements (``omx*``) that
+    expose the Cubie's hardware codec. ``run`` is injectable for tests.
+    """
+    try:
+        out = run(
+            ["gst-inspect-1.0"], capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    names: Set[str] = set()
+    for line in out.splitlines():
+        m = _GST_ELEMENT_RE.match(line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def family_of(vcodec: str) -> str:
     """Codec family ('h264' | 'hevc') of a software codec / encoder name."""
     v = (vcodec or "").lower()
@@ -135,6 +178,10 @@ def cpu_encoder(vcodec: str) -> Encoder:
 
 
 def _hw_encoder(name: str) -> Encoder:
+    # Allwinner OpenMAX elements are driven as a GStreamer pipeline (bitrate-based).
+    if name.startswith("omx"):
+        return Encoder(name=name, codec=name, kind="hw", rate_mode="bitrate",
+                       engine="gstreamer")
     # V4L2 mem2mem encoders are bitrate-controlled and want a plain yuv420p input.
     if name.endswith("_v4l2m2m"):
         return Encoder(name=name, codec=name, kind="hw", rate_mode="bitrate",
@@ -172,9 +219,11 @@ def select_encoders(
         return [cpu]
 
     hw_name: Optional[str] = None
-    if accel == "auto":
+    if accel in ("auto", "hw", "hardware"):
+        # The board's preferred hardware encoder for this codec family (ffmpeg
+        # V4L2 M2M or a GStreamer OMX element, decided by the board map).
         hw_name = _HW_ENCODERS.get(board, {}).get(family)
-    elif accel in ("v4l2m2m", "hw", "hardware"):
+    elif accel == "v4l2m2m":
         hw_name = {"h264": "h264_v4l2m2m", "hevc": "hevc_v4l2m2m"}.get(family)
     else:
         # Explicit ffmpeg encoder name -- only honoured if it matches the family.
@@ -232,4 +281,106 @@ def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
 
     cmd += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
     cmd += ["-progress", "pipe:1", "-nostats", str(dst)]
+    return cmd
+
+
+# --------------------------------------------------------------------------- #
+# GStreamer (Allwinner OpenMAX) hardware path -- Cubie A7S
+# --------------------------------------------------------------------------- #
+
+# Container (by lowercase file extension) -> GStreamer demuxer. Only the
+# well-tested ones; anything else routes to the CPU/ffmpeg path (which handles
+# every container) via ``gst_can_handle`` returning False.
+_GST_DEMUX = {
+    "mp4": "qtdemux", "mov": "qtdemux", "m4v": "qtdemux",
+    "mkv": "matroskademux", "webm": "matroskademux",
+}
+
+# Source video codecs the Cubie can hardware-*decode* (omxh264dec / omxhevcvideodec).
+_GST_DECODERS = {
+    "h264": ("h264parse", "omxh264dec"),
+    "hevc": ("h265parse", "omxhevcvideodec"),
+    "h265": ("h265parse", "omxhevcvideodec"),
+}
+
+
+def _bitrate_bps(value) -> int:
+    """Bits/second from an ffmpeg-style bitrate ('8M', '2500k', 8000000)."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value or "").strip().lower()
+    if not s:
+        return 0
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    try:
+        return int(float(s) * mult)
+    except ValueError:
+        return 0
+
+
+def gst_can_handle(info: dict) -> bool:
+    """Whether the GStreamer OMX pipeline can transcode a source with this info.
+
+    ``info`` is what ``transcode.probe_video_info`` returns. The pipeline needs a
+    hardware-decodable video codec with known dimensions in a demuxable container;
+    audio, if present, is stream-copied and so must already be AAC. Anything else
+    falls back to the CPU/ffmpeg path (which handles it), rather than failing after
+    a wasted encode.
+    """
+    vcodec = str(info.get("vcodec") or "").lower()
+    if vcodec not in _GST_DECODERS:
+        return False
+    if not (int(info.get("width") or 0) > 0 and int(info.get("height") or 0) > 0):
+        return False
+    if str(info.get("container") or "").lower() not in _GST_DEMUX:
+        return False
+    if info.get("has_audio") and str(info.get("acodec") or "").lower() != "aac":
+        return False
+    return True
+
+
+def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) -> List[str]:
+    """``gst-launch-1.0`` argv for one hardware encode with an OMX ``encoder`` (pure).
+
+    Builds a **HW-decode -> HW-scale -> HW-encode** pipeline: the source is
+    demuxed, hardware-decoded (``omx*dec``), downscaled *inside* the encoder via
+    its ``output-width``/``output-height`` (no CPU scaler -- the 4K frame never
+    touches the CPU), and hardware-encoded to H.264 at the preset's target
+    bitrate. Present AAC audio is stream-copied through an ``mp4mux``. Progress is
+    emitted by a ``progressreport`` element. Assumes ``gst_can_handle(info)``.
+    """
+    src, dst = str(src), str(dst)
+    height = int(preset.get("height", 0) or 0)
+    bps = _bitrate_bps(preset.get("bitrate") or default_bitrate(height))
+    container = str(info.get("container") or "mp4").lower()
+    demux = _GST_DEMUX.get(container, "qtdemux")
+    vcodec = str(info.get("vcodec") or "h264").lower()
+    parse, decoder = _GST_DECODERS.get(vcodec, ("h264parse", "omxh264dec"))
+
+    enc: List[str] = [encoder.codec, "control-rate=variable", f"target-bitrate={bps}"]
+    src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
+    if height > 0 and src_w > 0 and src_h > 0:
+        out_w = int(round(src_w * height / src_h))
+        out_w -= out_w % 2  # the encoder wants even dimensions
+        enc += [f"output-width={out_w}", f"output-height={height}"]
+
+    has_audio = bool(info.get("has_audio")) and str(info.get("acodec") or "").lower() == "aac"
+
+    cmd: List[str] = ["gst-launch-1.0", "-e", "filesrc", f"location={src}", "!"]
+    if has_audio:
+        # Named demux/mux so the audio can be carried alongside the re-encoded video.
+        cmd += [demux, "name=d",
+                "d.", "!", "queue", "!", parse, "!", decoder, "!", "queue", "!",
+                *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
+                "!", "queue", "!", "mux.",
+                "d.", "!", "queue", "!", "aacparse", "!", "queue", "!", "mux.",
+                "mp4mux", "name=mux", "!", "filesink", f"location={dst}"]
+    else:
+        cmd += [demux, "!", parse, "!", decoder, "!", "queue", "!",
+                *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
+                "!", "mp4mux", "!", "filesink", f"location={dst}"]
     return cmd

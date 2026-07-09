@@ -171,9 +171,10 @@ DEFAULTS: dict[str, Any] = {
         "output_dirname": "Transcoded",
         "max_jobs": 1,
         # Video encoder selection:
-        #   auto     -> use the board's hardware encoder when ffmpeg has it
-        #               (Pi 4: h264_v4l2m2m; Cubie A7S: h264/hevc_v4l2m2m; the
-        #               Pi 5 has no HW encoder -> CPU), else software.
+        #   auto     -> use the board's hardware encoder when it is present
+        #               (Pi 4: ffmpeg h264_v4l2m2m; Cubie A7S: GStreamer
+        #               omxh264videoenc for H.264 -- HEVC output stays on the CPU;
+        #               Pi 5 has no HW encoder), else software.
         #   cpu      -> always software (libx264/libx265).
         #   <name>   -> force a specific ffmpeg encoder (e.g. h264_v4l2m2m).
         # A per-preset ``accel`` overrides this. See copystation/encoders.py.

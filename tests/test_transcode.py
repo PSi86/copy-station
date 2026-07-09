@@ -17,9 +17,12 @@ from copystation.transcode import (
     TranscodeUnavailable,
     UnknownPreset,
     estimate_output_bytes,
+    gst_progress_percent,
+    gst_progress_position,
     mem_available_bytes,
     output_name,
     parse_bitrate,
+    probe_video_info,
     progress_seconds,
     ram_budget,
     sanitize_component,
@@ -56,6 +59,67 @@ def test_output_name_and_sanitize():
 )
 def test_progress_seconds(line, expected):
     assert progress_seconds(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("progressreport0 (00:00:12): 7 / 56 seconds (12.5 %)", 12.5),
+        ("progressreport0 (00:00:02): 1 / 56 seconds ( 1.8 %)", 1.8),
+        ("progressreport0 (00:00:56): 56 / 56 seconds (100.0 %)", 100.0),
+        ("Setting pipeline to PLAYING ...", None),
+        ("some ( bogus ) line", None),
+    ],
+)
+def test_gst_progress_percent(line, expected):
+    assert gst_progress_percent(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("progressreport0 (00:00:12): 7 / 56 seconds (12.5 %)", 7),
+        ("progressreport0 (00:00:40): 23 / 23 seconds (100.0 %)", 23),
+        ("Setting pipeline to PLAYING ...", None),
+    ],
+)
+def test_gst_progress_position(line, expected):
+    assert gst_progress_position(line) == expected
+
+
+def test_probe_video_info_skips_attached_pic_and_finds_audio(monkeypatch):
+    import json as _json
+    payload = {
+        "streams": [
+            # embedded thumbnail first -> must be skipped, not chosen as the video
+            {"codec_type": "video", "codec_name": "mjpeg", "width": 1280, "height": 720,
+             "disposition": {"attached_pic": 1}},
+            {"codec_type": "video", "codec_name": "h264", "width": 3840, "height": 2160,
+             "avg_frame_rate": "60000/1001", "r_frame_rate": "60000/1001",
+             "disposition": {"attached_pic": 0}},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ]
+    }
+
+    class _R:
+        stdout = _json.dumps(payload)
+
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: _R())
+    info = probe_video_info("clip.MP4")
+    assert info["vcodec"] == "h264"
+    assert (info["width"], info["height"]) == (3840, 2160)
+    assert round(info["fps"], 2) == 59.94
+    assert info["has_audio"] is True and info["acodec"] == "aac"
+    assert info["container"] == "mp4"
+
+
+def test_probe_video_info_defaults_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("no ffprobe")
+
+    monkeypatch.setattr(tc.subprocess, "run", boom)
+    info = probe_video_info("clip.mkv")
+    assert info["vcodec"] is None and info["container"] == "mkv"
 
 
 # --------------------------------------------------------------------------- #
@@ -383,6 +447,93 @@ def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
     assert "h264_v4l2m2m" in calls[0]
     assert "libx264" in calls[1]
     assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
+
+
+def test_process_cubie_uses_gstreamer_hardware(tmp_path, monkeypatch):
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    # A Cubie whose GStreamer has the OMX H.264 encoder/decoder.
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "h264", "width": 3840, "height": 2160,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            # The GStreamer sink is `filesink location=<dst>` (last token).
+            self._dst = Path(cmd[-1].split("location=", 1)[-1])
+            self.returncode = None
+            self.stdout = iter(["progressreport0 (00:00:05): 5 / 10 seconds (50.0 %)\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"hw-encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert result["encoder"] == "omxh264videoenc" and result["hw"] is True
+    # A single GStreamer attempt (no fallback), driving the OMX encoder.
+    assert len(calls) == 1
+    assert calls[0][0] == "gst-launch-1.0" and "omxh264videoenc" in calls[0]
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"hw-encoded"
+
+
+def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    # A container/codec the OMX pipeline can't take (VP9) -> must skip to the CPU.
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "vp9", "width": 3840, "height": 2160,
+        "has_audio": False, "acodec": None, "container": "webm"})
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"cpu-encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    # The GStreamer candidate was skipped up front (no wasted encode); CPU ran once.
+    assert result["encoder"] == "cpu" and result["hw"] is False
+    assert len(calls) == 1 and calls[0][0] == "ffmpeg"
 
 
 def test_cancel_during_encode_does_not_fall_back(tmp_path, monkeypatch):
