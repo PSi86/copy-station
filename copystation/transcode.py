@@ -28,6 +28,7 @@ from .encoders import (
     Encoder,
     available_encoders,
     build_ffmpeg_cmd,
+    default_bitrate,
     detect_board,
     select_encoders,
 )
@@ -82,14 +83,38 @@ def ram_budget(free_bytes: int, fraction: float) -> int:
     return max(0, int(free_bytes * float(fraction)))
 
 
-def fits_in_ram(input_size: int, budget: int) -> bool:
-    """True if input plus an equal-sized output headroom fit the RAM budget.
+def parse_bitrate(value: Any) -> int:
+    """Bits/second from an ffmpeg-style bitrate ('8M', '2500k', 8000000)."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value or "").strip().lower()
+    if not s:
+        return 0
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    try:
+        return int(float(s) * mult)
+    except ValueError:
+        return 0
 
-    A downscale/transcode output is normally no larger than the input, so
-    reserving ``2 * input_size`` keeps the tmpfs from overflowing in the common
-    case; larger inputs stream on the card instead.
+
+def estimate_output_bytes(duration: Optional[float], preset: dict,
+                          audio_bps: int = 128_000, safety: float = 1.5) -> int:
+    """Rough transcoded-file size (bytes) for sizing the RAM output buffer.
+
+    Only the *output* is buffered in RAM (the input streams from the card), so
+    this -- not the input size -- decides whether the buffer is used. Uses the
+    preset's ``bitrate`` (or a height-based default) plus audio, with headroom.
+    Returns 0 when the duration is unknown (then we stream to the card).
     """
-    return input_size > 0 and budget > 0 and 2 * input_size <= budget
+    if not duration or duration <= 0:
+        return 0
+    height = int(preset.get("height", 0) or 0)
+    vbps = parse_bitrate(preset.get("bitrate") or default_bitrate(height))
+    return int((vbps + audio_bps) / 8 * duration * safety)
 
 
 def sanitize_component(name: str) -> str:
@@ -418,43 +443,43 @@ class TranscodeManager:
         return ram_budget(mem_available_bytes(), self._ram_buffer_fraction)
 
     def _encode(self, job_id: int, src: Path, final_dst: Path, preset: dict) -> None:
-        """Encode ``src`` to ``final_dst``, buffering through RAM when it fits.
+        """Encode ``src`` to ``final_dst``, buffering the OUTPUT through RAM.
 
-        When the input (plus output headroom) fits the RAM budget, the input is
-        copied once into a size-capped tmpfs, the encode runs entirely in RAM, and
-        the result is copied back to the card in one go -- so the card is not read
-        and written at the same time. Otherwise it encodes straight to the card.
+        Only the output is staged in a size-capped tmpfs: the input **streams from
+        the card** (sequential reads are card-friendly), the encode writes into
+        RAM, and the finished file is copied back to the card in one bulk write --
+        so the card is never read and written at the same time. Because the input
+        is not held in RAM, its size is irrelevant; even large inputs are buffered
+        as long as the (usually much smaller) output fits the budget. Falls back to
+        streaming straight to the card when the output would not fit (or the
+        duration is unknown, or buffering is disabled).
         """
         budget = self._ram_budget()
-        try:
-            input_size = src.stat().st_size
-        except OSError:
-            input_size = 0
+        duration = probe_duration(src)
+        est_out = estimate_output_bytes(duration, preset)
 
-        if not fits_in_ram(input_size, budget):
-            if budget > 0 and input_size > 0:
+        if budget <= 0 or est_out <= 0 or est_out > budget:
+            if budget > 0 and est_out > budget:
                 _LOG.info(
-                    "Transcode #%d: input %d MB does not fit the RAM buffer "
-                    "(budget %d MB) -- encoding directly on the card.",
-                    job_id, input_size // (1024 * 1024), budget // (1024 * 1024),
+                    "Transcode #%d: est. output %d MB exceeds the RAM budget %d MB "
+                    "-- streaming to the card.",
+                    job_id, est_out // (1024 * 1024), budget // (1024 * 1024),
                 )
             self._set(job_id, ram_buffered=False)
-            self._encode_with_fallback(job_id, src, final_dst, preset)
+            self._encode_with_fallback(job_id, src, final_dst, preset, duration=duration)
             return
 
         self._set(job_id, ram_buffered=True)
-
         work = Path(self._work_base) / f"job{job_id}"
         self._mount_tmpfs(work, budget)
         try:
-            tmp_in = work / ("input" + src.suffix)
-            _LOG.info(
-                "Transcode #%d: buffering through RAM (tmpfs cap %d MB, input %d MB)",
-                job_id, budget // (1024 * 1024), input_size // (1024 * 1024),
-            )
-            shutil.copy2(src, tmp_in)                 # bulk read: card -> RAM
             tmp_out = work / final_dst.name
-            self._encode_with_fallback(job_id, tmp_in, tmp_out, preset)
+            _LOG.info(
+                "Transcode #%d: buffering output in RAM (tmpfs cap %d MB, est output %d MB)",
+                job_id, budget // (1024 * 1024), est_out // (1024 * 1024),
+            )
+            # Input streams from the card; output is written into RAM.
+            self._encode_with_fallback(job_id, src, tmp_out, preset, duration=duration)
             shutil.copy2(tmp_out, final_dst)          # bulk write: RAM -> card
         finally:
             self._umount_tmpfs(work)
@@ -478,16 +503,19 @@ class TranscodeManager:
         except OSError:  # pragma: no cover - best effort
             pass
 
-    def _encode_with_fallback(self, job_id: int, src: Path, dst: Path, preset: dict) -> None:
+    def _encode_with_fallback(self, job_id: int, src: Path, dst: Path, preset: dict,
+                              duration: Optional[float] = None) -> None:
         """Try each candidate encoder in turn; fall back to the next on failure.
 
         Hardware first (when configured/available), then software. A hardware
         encode that fails at runtime (missing device node, unsupported input,
         driver error) does not abort the job -- the partial output is removed and
         the next candidate (ultimately the CPU) is tried. A cancel aborts without
-        falling back.
+        falling back. ``duration`` (seconds) may be passed to avoid a second
+        ffprobe when the caller already measured it.
         """
-        duration = probe_duration(src)
+        if duration is None:
+            duration = probe_duration(src)
         encoders = self._encoders_for(preset)
         last_exc: Optional[TranscodeError] = None
         for idx, enc in enumerate(encoders):

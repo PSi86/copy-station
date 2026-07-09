@@ -16,9 +16,10 @@ from copystation.transcode import (
     TranscodeManager,
     TranscodeUnavailable,
     UnknownPreset,
-    fits_in_ram,
+    estimate_output_bytes,
     mem_available_bytes,
     output_name,
+    parse_bitrate,
     progress_seconds,
     ram_budget,
     sanitize_component,
@@ -438,16 +439,30 @@ def test_mem_available_bytes_missing_or_absent(tmp_path):
     assert mem_available_bytes(str(tmp_path / "nope")) == 0
 
 
-def test_ram_budget_and_fit():
+def test_ram_budget():
     assert ram_budget(3000, 2 / 3) == 2000
     assert ram_budget(0, 0.5) == 0
-    assert fits_in_ram(400, 1000) is True    # 2*400 <= 1000
-    assert fits_in_ram(600, 1000) is False   # 2*600 > 1000
-    assert fits_in_ram(0, 1000) is False
-    assert fits_in_ram(100, 0) is False
 
 
-def test_encode_buffers_through_ram_when_it_fits(tmp_path, monkeypatch):
+def test_parse_bitrate():
+    assert parse_bitrate("8M") == 8_000_000
+    assert parse_bitrate("2500k") == 2_500_000
+    assert parse_bitrate(8_000_000) == 8_000_000
+    assert parse_bitrate("") == 0
+    assert parse_bitrate("bogus") == 0
+
+
+def test_estimate_output_bytes_uses_bitrate_and_duration():
+    # 8 Mbit/s video + 128 kbit/s audio over 60 s, x1.5 headroom.
+    est = estimate_output_bytes(60.0, {"height": 1080, "bitrate": "8M"})
+    approx = (8_000_000 + 128_000) / 8 * 60 * 1.5
+    assert abs(est - approx) < 2
+    # unknown duration -> 0 (stream to the card, do not buffer)
+    assert estimate_output_bytes(None, {"height": 720}) == 0
+    assert estimate_output_bytes(0, {"height": 720}) == 0
+
+
+def test_encode_buffers_output_in_ram_when_it_fits(tmp_path, monkeypatch):
     import shutil as _sh
 
     card = tmp_path / "card"
@@ -459,29 +474,31 @@ def test_encode_buffers_through_ram_when_it_fits(tmp_path, monkeypatch):
     final_dst = out_dir / "clip_720p.mp4"
 
     mgr = _mgr(_FakeBrowse({"sdb1": card}))
-    monkeypatch.setattr(mgr, "_ram_budget", lambda: 10 ** 9)  # plenty
+    monkeypatch.setattr(tc, "probe_duration", lambda s: 60.0)   # known duration
+    monkeypatch.setattr(mgr, "_ram_budget", lambda: 10 ** 9)     # plenty
     monkeypatch.setattr(mgr, "_work_base", str(tmp_path / "work"))
     monkeypatch.setattr(mgr, "_mount_tmpfs", lambda path, size: path.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(mgr, "_umount_tmpfs", lambda path: _sh.rmtree(path, ignore_errors=True))
 
     seen = {}
 
-    def fake_encode(job_id, s, d, preset):
+    def fake_encode(job_id, s, d, preset, duration=None):
         seen["src"] = Path(s)
+        seen["dst"] = Path(d)
         Path(d).write_bytes(b"encoded")
 
     monkeypatch.setattr(mgr, "_encode_with_fallback", fake_encode)
 
-    mgr._encode(1, src, final_dst, {"id": "720p-h264"})
+    mgr._encode(1, src, final_dst, {"id": "720p-h264", "height": 720})
 
-    # ffmpeg read/wrote in the RAM work dir (not the card), and the result was
-    # copied back to the card.
-    assert str(tmp_path / "work") in str(seen["src"])
-    assert seen["src"].name == "input.mp4"
+    # Input streams straight from the card; only the OUTPUT is in the RAM work dir,
+    # then copied back to the card.
+    assert seen["src"] == src
+    assert str(tmp_path / "work") in str(seen["dst"])
     assert final_dst.read_bytes() == b"encoded"
 
 
-def test_encode_stays_on_card_when_input_too_large(tmp_path, monkeypatch):
+def test_encode_streams_to_card_when_output_too_large(tmp_path, monkeypatch):
     card = tmp_path / "card"
     card.mkdir()
     src = card / "clip.mp4"
@@ -491,20 +508,21 @@ def test_encode_stays_on_card_when_input_too_large(tmp_path, monkeypatch):
     final_dst = out_dir / "out.mp4"
 
     mgr = _mgr(_FakeBrowse({"sdb1": card}))
-    monkeypatch.setattr(mgr, "_ram_budget", lambda: 100)  # < 2 * input -> no buffer
+    monkeypatch.setattr(tc, "probe_duration", lambda s: 3600.0)  # long -> big output
+    monkeypatch.setattr(mgr, "_ram_budget", lambda: 1000)        # tiny budget
     monkeypatch.setattr(mgr, "_mount_tmpfs",
                         lambda *a: (_ for _ in ()).throw(AssertionError("must not mount")))
 
     seen = {}
 
-    def fake_encode(job_id, s, d, preset):
+    def fake_encode(job_id, s, d, preset, duration=None):
         seen["src"] = Path(s)
         Path(d).write_bytes(b"e")
 
     monkeypatch.setattr(mgr, "_encode_with_fallback", fake_encode)
 
-    mgr._encode(1, src, final_dst, {"id": "720p-h264"})
-    assert seen["src"] == src  # encoded straight from the card
+    mgr._encode(1, src, final_dst, {"id": "720p-h264", "height": 720})
+    assert seen["src"] == src           # encoded straight from the card
     assert final_dst.read_bytes() == b"e"
 
 

@@ -154,13 +154,15 @@ ffmpeg the feature is a no-op and the endpoint returns a clear error.
 case -- a clip transcoded into that card's `Transcoded/` folder), reading the
 input and writing the output at the same time makes the SD card seek constantly,
 which is slow and wears it. With `transcode.ram_buffer` on (default), the station
-instead stages the job through **RAM**: it reads the input once into a
-size-capped `tmpfs`, runs the whole encode in RAM, and writes the result back to
-the card in one go -- so during the encode the card only reads, and the write is a
-single bulk copy at the end. The tmpfs is capped at `ram_buffer_fraction` of the
-**free** RAM (default ~two thirds), so it never fills memory; a file too large to
-fit falls back to streaming directly on the card. The web job row tags a
-RAM-buffered job with `RAM`, and the journal logs `buffering through RAM ...`.
+buffers the **output** through **RAM**: the input **streams from the card**
+(sequential reads are card-friendly), the encode writes into a size-capped
+`tmpfs`, and the finished file is copied back to the card in one bulk write -- so
+during the encode the card only reads, and the write is a single bulk copy at the
+end. Because the input is **not** held in RAM, its size is irrelevant: even a
+file much larger than RAM is buffered, as long as the (usually much smaller)
+**output** fits `ram_buffer_fraction` of the **free** RAM (default ~two thirds);
+otherwise it streams straight to the card. The web job row tags a RAM-buffered job
+with `RAM`, and the journal logs `buffering output in RAM ...`.
 
 **Trade-off / how to check it.** RAM buffering helps when the *card I/O* is the
 bottleneck (interleaved read+write seeking stalls the encode). When the *encode*

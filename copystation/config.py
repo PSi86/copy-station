@@ -180,14 +180,17 @@ DEFAULTS: dict[str, Any] = {
         "acceleration": "auto",
         # Fall back to CPU encoding if the hardware encoder fails at runtime.
         "fallback_to_cpu": True,
-        # Buffer the transcode through RAM (a tmpfs) instead of reading and
-        # writing the same card at once: the input is read once into RAM, the
-        # encode runs entirely in RAM, and the result is written back in one go.
-        # This avoids the constant read/write seeking that is slow and wears an SD
-        # card. Used only when the input fits (with room for the output) within
-        # ``ram_buffer_fraction`` of the *free* RAM; otherwise it streams on the
-        # card as before. The tmpfs is size-capped, so it never exceeds that
-        # fraction of free RAM.
+        # Buffer the transcode OUTPUT through RAM (a tmpfs): the input streams from
+        # the card (sequential reads are fine), the encode writes into RAM, and the
+        # finished file is copied back to the card in one bulk write -- so the card
+        # is never read and written at once (the seeking that is slow and wears an
+        # SD card). Because the input is not held in RAM, its size is irrelevant;
+        # even large inputs are buffered as long as the (usually much smaller)
+        # output fits ``ram_buffer_fraction`` of the *free* RAM. The tmpfs is
+        # size-capped, so it never exceeds that fraction. NOTE: for CPU-bound
+        # encodes (e.g. the Cubie A7S) the final bulk write is serial time that
+        # doesn't overlap the encode, so buffering can be marginally slower --
+        # measure and set false if streaming is faster for you (see README).
         "ram_buffer": True,
         "ram_buffer_fraction": 2 / 3,  # use up to two thirds of the free RAM
         # Selectable presets (shown in the web UI). ``height`` downscales while
