@@ -33,6 +33,9 @@ state:
   connected but there is nothing to copy". (Distinct from the copy colour, which
   is a *partial, blinking* progress bar rather than a solid hold.)
 * ``SERVICE_STARTED``: a quick cyan wipe up the strip when the daemon starts.
+* ``AP_ENABLED`` / ``AP_DISABLED``: three quick flashes when the WLAN access point
+  is toggled from a user button -- cyan for on, amber for off, so the two are
+  unmistakable (and read on a single LED as well as on a full strip).
 
 On shutdown ``close()`` switches every LED off.
 
@@ -99,6 +102,12 @@ _DETECTING_COLOR = (50, 0, 50)  # magenta
 _SUCCESS_COLOR = (0, 90, 0)   # bright green -- transfer done
 _DETECT_COLOR = (0, 90, 0)    # bright green -- one-shot "device detected" flash
 _EMPTY_COLOR = (0, 0, 90)     # bright blue  -- one-shot "source empty" hold
+
+# WiFi AP toggle (three quick flashes, see effects.AP_FLASHES). Two distinct
+# colours so activation and deactivation can never be confused: cyan = AP on,
+# amber = AP off. Both flash the whole strip, so they read on a single LED too.
+_AP_ON_COLOR = (0, 80, 80)    # cyan  -- one-shot "access point enabled"
+_AP_OFF_COLOR = (90, 45, 0)   # amber -- one-shot "access point disabled"
 
 
 def leds_for(progress: float, led_count: int) -> int:
@@ -307,6 +316,10 @@ class Ws2812Backend(StatusIndicator):
             return [_EMPTY_COLOR if lit else _OFF] * self._led_count
         if event is Event.SERVICE_STARTED:
             return self._bar(startup_sweep_count(elapsed, self._led_count), _STARTUP_COLOR)
+        if event is Event.AP_ENABLED:
+            return [_AP_ON_COLOR if lit else _OFF] * self._led_count
+        if event is Event.AP_DISABLED:
+            return [_AP_OFF_COLOR if lit else _OFF] * self._led_count
         return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:

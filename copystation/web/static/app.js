@@ -87,6 +87,8 @@ function apply(data) {
   badge.textContent = phase || "--";
   badge.className = "badge " + phase;
 
+  document.getElementById("ap").hidden = !data.wifi_ap;
+
   document.getElementById("progress-bar").style.width = `${data.percent || 0}%`;
   document.getElementById("percent").textContent = `${data.percent || 0}%`;
   document.getElementById("transfer-name").textContent = data.transfer_name || "";

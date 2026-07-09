@@ -44,6 +44,8 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
   background: #2a2f3a;
   text-transform: capitalize;
 }
+.badges { display: flex; align-items: center; gap: 0.5rem; }
+.badge.ap { background: var(--copying); color: #042036; }
 .badge.ready { background: var(--ready); color: #06210f; }
 .badge.detecting { background: var(--detecting); color: #2a2300; }
 .badge.copying { background: var(--copying); color: #042036; }

@@ -245,36 +245,47 @@ def command_action(command: str) -> Action:
     return _run
 
 
-def wifi_ap_toggle_action(config=None) -> Action:
-    """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`)."""
+def wifi_ap_toggle_action(config=None, hub=None) -> Action:
+    """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`).
+
+    After flipping the AP it updates the shared state (so the display shows the
+    WiFi status) and fires the matching one-shot signal, so the WS2812 strip plays
+    a distinct blink code for activation vs deactivation.
+    """
 
     def _run() -> None:
+        from .status import Event
         from .wifi_ap import toggle
 
         ap_cfg = (config.get("wifi_ap") if config is not None else None) or {}
-        toggle(ap_cfg)
+        active = toggle(ap_cfg)
+        if hub is not None:
+            hub.set_ap_active(active)
+            hub.signal(Event.AP_ENABLED if active else Event.AP_DISABLED)
 
     return _run
 
 
-def _resolve_action(button: str, key: str, raw, config=None) -> Optional[Action]:
+def _resolve_action(button: str, key: str, raw, config=None, hub=None) -> Optional[Action]:
     if raw is None or raw == "none":
         return None
     if raw in ("poweroff", "reboot"):
         return systemctl_action(raw)
     if raw == "wifi_ap":
-        return wifi_ap_toggle_action(config)
+        return wifi_ap_toggle_action(config, hub)
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return command_action(raw["command"])
     _LOG.warning("Button %s: unknown action %r for %s -- ignored", button, raw, key)
     return None
 
 
-def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None) -> list:
+def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None, hub=None) -> list:
     """Build all configured user buttons; disabled/misconfigured ones are skipped.
 
     ``action_overrides`` is an injection point for tests: a ready-made
     event->Action mapping used instead of resolving ``actions`` from config.
+    ``hub`` is the :class:`~copystation.state.StatusHub`; passed so the ``wifi_ap``
+    action can update the display status and fire the AP blink code.
     """
     if (config.get("power") or {}).get("shutdown_button"):
         _LOG.warning(
@@ -299,7 +310,7 @@ def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None) 
             raw = cfg.get("actions") or {}
             actions = {}
             for event, key in EVENT_CONFIG_KEYS.items():
-                action = _resolve_action(name, key, raw.get(key), config)
+                action = _resolve_action(name, key, raw.get(key), config, hub)
                 if action is not None:
                     actions[event] = action
         if not actions:

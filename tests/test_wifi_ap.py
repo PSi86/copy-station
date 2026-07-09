@@ -82,28 +82,57 @@ def test_start_ap_creates_and_brings_up(monkeypatch):
     assert ["nmcli", "connection", "up"] in verbs
 
 
-def test_toggle_down_when_active(monkeypatch):
+def test_toggle_down_when_active_returns_false(monkeypatch):
     monkeypatch.setattr(ap, "is_active", lambda cfg: True)
     seen = {}
     monkeypatch.setattr(ap, "down", lambda cfg: seen.setdefault("down", True))
     monkeypatch.setattr(ap, "start_ap", lambda cfg: seen.setdefault("up", True))
-    ap.toggle(FULL)
+    assert ap.toggle(FULL) is False  # now down
     assert seen == {"down": True}
 
 
-def test_toggle_up_when_inactive(monkeypatch):
+def test_toggle_up_when_inactive_returns_true(monkeypatch):
     monkeypatch.setattr(ap, "is_active", lambda cfg: False)
     seen = {}
     monkeypatch.setattr(ap, "down", lambda cfg: seen.setdefault("down", True))
-    monkeypatch.setattr(ap, "start_ap", lambda cfg: seen.setdefault("up", True))
-    ap.toggle(FULL)
+    monkeypatch.setattr(ap, "start_ap", lambda cfg: seen.setdefault("up", True) or True)
+    assert ap.toggle(FULL) is True  # now up
     assert seen == {"up": True}
 
 
 def test_button_wifi_ap_action_toggles(monkeypatch):
     seen = {}
-    monkeypatch.setattr(ap, "toggle", lambda cfg: seen.setdefault("cfg", cfg))
-    action = _resolve_action("b", "single_click", "wifi_ap", {"wifi_ap": FULL})
+    monkeypatch.setattr(ap, "toggle", lambda cfg: seen.setdefault("cfg", cfg) or True)
+    action = _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL})
     assert callable(action)
     action()
     assert seen["cfg"] == FULL
+
+
+def test_button_wifi_ap_action_reports_to_hub(monkeypatch):
+    from copystation.status import Event
+
+    class _FakeHub:
+        def __init__(self):
+            self.ap = None
+            self.signals = []
+
+        def set_ap_active(self, active):
+            self.ap = active
+
+        def signal(self, event):
+            self.signals.append(event)
+
+    # AP came up -> hub told active + AP_ENABLED blink code.
+    hub = _FakeHub()
+    monkeypatch.setattr(ap, "toggle", lambda cfg: True)
+    _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub)()
+    assert hub.ap is True
+    assert hub.signals == [Event.AP_ENABLED]
+
+    # AP went down -> hub told inactive + AP_DISABLED blink code.
+    hub2 = _FakeHub()
+    monkeypatch.setattr(ap, "toggle", lambda cfg: False)
+    _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub2)()
+    assert hub2.ap is False
+    assert hub2.signals == [Event.AP_DISABLED]

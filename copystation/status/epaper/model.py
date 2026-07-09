@@ -109,6 +109,7 @@ class ViewModel:
     eta_text: str
     error_text: str
     version: str
+    ap_active: bool = False
 
     def storage_line(self, storage: StorageView) -> str:
         """``used / capacity`` for a storage row (``--`` when absent)."""
@@ -156,4 +157,5 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         eta_text=fmt_duration(snapshot.get("eta_seconds")),
         error_text=str(snapshot.get("error", "") or ""),
         version=version,
+        ap_active=bool(snapshot.get("wifi_ap", False)),
     )

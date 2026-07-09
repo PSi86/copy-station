@@ -213,12 +213,14 @@ buttons:
       hold_seconds: 3.0        # hold after the activation click -> hold action
     actions:
       # poweroff | reboot | wifi_ap | none | {command: "..."}
-      #   wifi_ap toggles the WLAN access point (see wifi_ap: above).
+      #   wifi_ap toggles the WLAN access point (see wifi_ap: above); on a WS2812
+      #   strip it plays a distinct blink code (cyan = on, amber = off) and the
+      #   e-paper shows a "WiFi" badge while the AP is up.
       #   (reboot may hang on the A733 -- prefer poweroff.)
       hold: poweroff
-      single_click: none       # e.g. wifi_ap to toggle the access point
+      single_click: none
       double_click: none
-      triple_click: none
+      triple_click: wifi_ap    # 3 clicks (after the activation click) toggle the AP
 
 # Settle time (seconds) after device detection before mounting. This is the hard
 # upper bound for how long detection waits for a device's volumes to enumerate.

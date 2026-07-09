@@ -294,12 +294,16 @@ def _maybe_start_wifi_ap(config: Config) -> bool:
         return False
 
 
-def _maybe_start_buttons(config: Config) -> list:
-    """Start the optional GPIO user buttons. Returns them (possibly empty)."""
+def _maybe_start_buttons(config: Config, hub: StatusHub) -> list:
+    """Start the optional GPIO user buttons. Returns them (possibly empty).
+
+    ``hub`` is passed through so a ``wifi_ap`` button action can update the
+    display status and fire the WS2812 AP blink code.
+    """
     try:
         from .buttons import build_buttons
 
-        buttons = build_buttons(config)
+        buttons = build_buttons(config, hub=hub)
         for button in buttons:
             button.start()
             _LOG.info("User button %s active", button.name)
@@ -324,9 +328,10 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
-    _maybe_start_wifi_ap(config)
+    if _maybe_start_wifi_ap(config):
+        hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started
     _maybe_start_web(state, config)
-    buttons = _maybe_start_buttons(config)
+    buttons = _maybe_start_buttons(config, hub)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
     try:

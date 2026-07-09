@@ -158,12 +158,15 @@ def start_ap(cfg: Any) -> bool:
 
 
 def toggle(cfg: Any) -> bool:
-    """Flip the AP: down if it is active, otherwise ensure it and bring it up.
+    """Flip the AP and return whether it is **active afterwards**.
 
-    Bound to a user button via the ``wifi_ap`` action keyword.
+    Down if it was active, otherwise ensure the profile and bring it up. The
+    return value (True = now up, False = now down) lets the caller show the right
+    indication. Bound to a user button via the ``wifi_ap`` action keyword.
     """
     if is_active(cfg):
         _LOG.info("WiFi AP toggle: bringing '%s' down", con_name(cfg))
-        return down(cfg)
+        down(cfg)
+        return False
     _LOG.info("WiFi AP toggle: bringing '%s' up", con_name(cfg))
-    return start_ap(cfg)
+    return bool(start_ap(cfg))

@@ -67,6 +67,9 @@ class StationState:
         self._devices: list[dict[str, Any]] = []
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._event_seq = 0
+        # Whether the WLAN access point is currently up. Independent of the copy
+        # cycle (survives reset_to_ready), so the display keeps showing it.
+        self._ap_active = False
 
     # ----- mutators (single writer) --------------------------------------------
 
@@ -115,6 +118,11 @@ class StationState:
         """Replace the list of currently detected volumes (web UI display)."""
         with self._lock:
             self._devices = list(devices)
+
+    def set_ap_active(self, active: bool) -> None:
+        """Record whether the WLAN access point is up (shown on display + web)."""
+        with self._lock:
+            self._ap_active = bool(active)
 
     def log_event(self, message: str, level: str = "info") -> None:
         """Append a timestamped entry to the action log (kept across cycles)."""
@@ -188,6 +196,7 @@ class StationState:
                 "source": self._source.as_dict(),
                 "target": self._target.as_dict(),
                 "devices": list(self._devices),
+                "wifi_ap": self._ap_active,
                 "events": list(reversed(self._events)),  # newest first
             }
 
@@ -246,6 +255,9 @@ class StatusHub:
 
     def set_devices(self, devices: list[dict]) -> None:
         self._state.set_devices(devices)
+
+    def set_ap_active(self, active: bool) -> None:
+        self._state.set_ap_active(active)
 
     def log_event(self, message: str, level: str = "info") -> None:
         self._state.log_event(message, level)

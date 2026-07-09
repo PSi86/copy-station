@@ -154,8 +154,8 @@ buttons:
     actions:
       # poweroff | reboot | wifi_ap | none | {command: "..."}
       hold: poweroff      # reboot may hang on the A733 -- prefer poweroff
-      single_click: none  # e.g. wifi_ap to toggle the access point
+      single_click: none
       double_click: none
-      triple_click: none
+      triple_click: wifi_ap   # toggle the WLAN access point (see wifi_ap: above)
 
 settle_seconds: 2.0

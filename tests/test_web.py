@@ -44,3 +44,10 @@ def test_settings_placeholder():
     res = _client(StationState()).get("/api/settings")
     assert res.status_code == 200
     assert res.json()["editable"] is False
+
+
+def test_ap_status_in_status_endpoint():
+    state = StationState()
+    assert _client(state).get("/api/status").json()["wifi_ap"] is False
+    state.set_ap_active(True)
+    assert _client(state).get("/api/status").json()["wifi_ap"] is True

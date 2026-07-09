@@ -53,6 +53,7 @@ def _signature(vm: ViewModel) -> tuple:
         tuple((d.name, d.role, round(d.fraction, 2)) for d in vm.devices),
         vm.error_text,
         vm.show_progress,
+        vm.ap_active,
     )
 
 
@@ -62,6 +63,8 @@ def _requires_clear(prev: ViewModel, new: ViewModel) -> bool:
         return True
     if new.progress_fraction < prev.progress_fraction - _SHRINK_EPS:
         return True
+    if prev.ap_active and not new.ap_active:
+        return True  # the WiFi badge must go white again -> only a full erases it
     for old, cur in ((prev.source, new.source), (prev.target, new.target)):
         if old.present and not cur.present:
             return True

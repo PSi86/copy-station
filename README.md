@@ -161,8 +161,29 @@ leaves the AP down (logged). It needs **NetworkManager** -- the default network
 stack on Raspberry Pi OS Bookworm and current Radxa images. The installer is not
 allowed to force-install it (it can clash with an existing `dhcpcd`/`networkd`
 setup), so if `nmcli` is missing it prints a note; install `network-manager` by
-hand to use the AP. The AP can also be **toggled from a user button** via the
-`wifi_ap` action (see below). Verify with `nmcli connection show --active`.
+hand to use the AP. Verify with `nmcli connection show --active`.
+
+**Turning the AP on/off from the button.** Bind the `wifi_ap` action to a user
+button gesture to toggle the access point on demand -- the recommended binding is
+**`triple_click`** (see [User button](#user-button-optional)). Each press flips
+the AP based on its current state (on if it was off, off if it was on), with
+clear feedback:
+
+* the **e-paper display** shows a **`WiFi`** badge in the top-right corner while
+  the AP is up (also reflected as a badge in the web header), and
+* a **WS2812 strip** plays a distinct blink code -- **three cyan flashes** on
+  enable, **three amber flashes** on disable -- so activation and deactivation are
+  unmistakable (it reads on a single LED as well as on a full strip).
+
+```yaml
+buttons:
+  userbutton_1:
+    enabled: true
+    line: 3
+    actions:
+      hold: poweroff          # clean shutdown
+      triple_click: wifi_ap   # toggle the WiFi access point
+```
 
 ## E-Paper display (optional)
 
@@ -275,7 +296,9 @@ bar that blinks at 10 Hz (the same activity pattern as the Grove LED Bar). On an
 devices are removed. Ready is a steady green first LED
 (Success = a short green blink). A source with nothing to copy holds the whole
 strip **blue** for a few seconds. When the **service starts** the strip wipes
-**cyan** once; when it **stops** all LEDs go off. Set `led_count`
+**cyan** once; when it **stops** all LEDs go off. Toggling the **WiFi access
+point** from a button plays a dedicated code: **three cyan flashes** when it comes
+up, **three amber flashes** when it goes down. Set `led_count`
 (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
 the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
 Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
@@ -345,8 +368,10 @@ the hold is only accepted as the **first** press after activation
 thresholds cancels the sequence. An activation click with nothing after it
 simply times out.
 
-Each action is `poweroff`, `reboot`, `wifi_ap` (toggle the WLAN access point),
-`none`, or an arbitrary shell command:
+Each action is `poweroff`, `reboot`, `wifi_ap` (toggle the WLAN access point --
+with a display badge and a WS2812 blink code, see
+[WiFi access point](#wifi-access-point-optional)), `none`, or an arbitrary shell
+command:
 
 ```yaml
 buttons:
@@ -356,9 +381,9 @@ buttons:
     line: 3
     actions:
       hold: poweroff                          # C _ H   -> clean shutdown
-      single_click: wifi_ap                   # C _ C   -> toggle the WiFi AP
-      double_click: { command: "rfkill toggle wlan" } # C _ C _ C
-      triple_click: none
+      single_click: { command: "rfkill toggle wlan" }   # C _ C
+      double_click: none                      # C _ C _ C
+      triple_click: wifi_ap                   # C _ C _ C _ C -> toggle the WiFi AP
 ```
 
 All timings live under `timing` (defaults shown; the values above use them):
