@@ -33,6 +33,9 @@ state:
   connected but there is nothing to copy". (Distinct from the copy colour, which
   is a *partial, blinking* progress bar rather than a solid hold.)
 * ``SERVICE_STARTED``: a quick cyan wipe up the strip when the daemon starts.
+* ``AP_ENABLED`` / ``AP_DISABLED``: three quick flashes when the WLAN access point
+  is toggled from a user button -- cyan for on, amber for off, so the two are
+  unmistakable (and read on a single LED as well as on a full strip).
 
 On shutdown ``close()`` switches every LED off.
 
@@ -86,6 +89,10 @@ _STARTUP_COLOR = (0, 50, 50)  # cyan
 # Colour of the progress bar during a copy.
 _COPY_COLOR = (0, 0, 60)  # blue
 
+# Colour of the progress bar during a video transcode -- purple, so a transcode
+# (which overrides the copy status) is clearly not a copy.
+_TRANSCODE_COLOR = (40, 0, 60)  # purple
+
 # Colour of the fill gauge shown while detecting -- white, unmistakably different
 # from the green "ready" colour and the blue copy bar.
 _FILL_COLOR = (50, 50, 50)  # white
@@ -99,6 +106,12 @@ _DETECTING_COLOR = (50, 0, 50)  # magenta
 _SUCCESS_COLOR = (0, 90, 0)   # bright green -- transfer done
 _DETECT_COLOR = (0, 90, 0)    # bright green -- one-shot "device detected" flash
 _EMPTY_COLOR = (0, 0, 90)     # bright blue  -- one-shot "source empty" hold
+
+# WiFi AP toggle (three quick flashes, see effects.AP_FLASHES). Two distinct
+# colours so activation and deactivation can never be confused: cyan = AP on,
+# amber = AP off. Both flash the whole strip, so they read on a single LED too.
+_AP_ON_COLOR = (0, 80, 80)    # cyan  -- one-shot "access point enabled"
+_AP_OFF_COLOR = (90, 45, 0)   # amber -- one-shot "access point disabled"
 
 
 def leds_for(progress: float, led_count: int) -> int:
@@ -235,11 +248,14 @@ class Ws2812Backend(StatusIndicator):
                         self._fill_shown_at = now
                     fill_elapsed = now - self._fill_shown_at
 
-            if phase is State.COPYING:
-                # At least one LED so the very start of the copy (0 %) is not a
-                # dark strip that reads as a pause before the bar grows.
+            if phase in (State.COPYING, State.TRANSCODING):
+                # A blinking progress bar; a transcode uses purple so it is clearly
+                # distinct from the blue copy bar (it overrides the copy status).
+                color = _COPY_COLOR if phase is State.COPYING else _TRANSCODE_COLOR
+                # At least one LED so the very start (0 %) is not a dark strip that
+                # reads as a pause before the bar grows.
                 count = max(1, leds_for(progress, self._led_count))
-                pixels = self._bar(count, _COPY_COLOR) if blink_on else self._all_off()
+                pixels = self._bar(count, color) if blink_on else self._all_off()
                 self._render(pixels)
                 blink_on = not blink_on
                 time.sleep(0.05)  # 10 Hz toggle
@@ -307,6 +323,10 @@ class Ws2812Backend(StatusIndicator):
             return [_EMPTY_COLOR if lit else _OFF] * self._led_count
         if event is Event.SERVICE_STARTED:
             return self._bar(startup_sweep_count(elapsed, self._led_count), _STARTUP_COLOR)
+        if event is Event.AP_ENABLED:
+            return [_AP_ON_COLOR if lit else _OFF] * self._led_count
+        if event is Event.AP_DISABLED:
+            return [_AP_OFF_COLOR if lit else _OFF] * self._led_count
         return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:

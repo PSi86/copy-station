@@ -53,6 +53,10 @@ def _signature(vm: ViewModel) -> tuple:
         tuple((d.name, d.role, round(d.fraction, 2)) for d in vm.devices),
         vm.error_text,
         vm.show_progress,
+        vm.ap_active,
+        vm.transcode_active,
+        vm.transcode_name,
+        vm.transcode_encoder,
     )
 
 
@@ -62,6 +66,8 @@ def _requires_clear(prev: ViewModel, new: ViewModel) -> bool:
         return True
     if new.progress_fraction < prev.progress_fraction - _SHRINK_EPS:
         return True
+    if prev.ap_active and not new.ap_active:
+        return True  # the WiFi badge must go white again -> only a full erases it
     for old, cur in ((prev.source, new.source), (prev.target, new.target)):
         if old.present and not cur.present:
             return True
@@ -95,6 +101,10 @@ def decide(
     # No visible change -> de-dup, just like the LED backends skip equal frames.
     if _signature(new) == _signature(prev):
         return Decision.SKIP
+    # The WiFi AP was just switched on (a deliberate button press): show the badge
+    # on the next tick rather than waiting out the partial cadence.
+    if new.ap_active and not prev.ap_active:
+        return Decision.PARTIAL
     # Additive change pending, but hold partials to the configured cadence.
     if seconds_since_last < partial_min_interval:
         return Decision.SKIP

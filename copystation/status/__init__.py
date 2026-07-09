@@ -22,6 +22,7 @@ class State(enum.Enum):
     READY = "ready"
     DETECTING = "detecting"
     COPYING = "copying"
+    TRANSCODING = "transcoding"  # a video transcode job is running (blocks copying)
     ERROR = "error"
     SUCCESS = "success"  # short confirmation pulse after a successful transfer
 
@@ -37,6 +38,8 @@ class Event(enum.Enum):
     DEVICE_DETECTED = "device_detected"  # a new eligible volume was recognised
     SOURCE_EMPTY = "source_empty"        # a source is connected but has nothing to copy
     SERVICE_STARTED = "service_started"  # the daemon just started -> a brief boot sweep
+    AP_ENABLED = "ap_enabled"            # the WLAN access point was just switched on
+    AP_DISABLED = "ap_disabled"          # the WLAN access point was just switched off
 
 
 class StatusIndicator:

@@ -10,7 +10,10 @@
   <main>
     <header>
       <h1>Copy_Station</h1>
-      <span id="phase" class="badge">--</span>
+      <div class="badges">
+        <span id="ap" class="badge ap" hidden>WiFi AP</span>
+        <span id="phase" class="badge">--</span>
+      </div>
     </header>
 
     <section id="transfer" class="card">
@@ -33,6 +36,27 @@
     <section class="card">
       <h2>Detected devices</h2>
       <div id="devices"></div>
+    </section>
+
+    <section id="files-card" class="card" hidden>
+      <h2>Files</h2>
+      <div class="row files-toolbar">
+        <select id="file-volume" class="select"></select>
+        <button id="file-refresh" class="btn" type="button">Refresh</button>
+      </div>
+      <div id="file-path" class="breadcrumb muted"></div>
+      <ul id="file-list" class="filelist"></ul>
+    </section>
+
+    <section id="transcode-card" class="card" hidden>
+      <h2>Transcode</h2>
+      <div class="row files-toolbar">
+        <select id="tc-preset" class="select"></select>
+        <label class="tc-out muted">→&nbsp;<select id="tc-output" class="select"></select></label>
+      </div>
+      <div class="muted tc-hint">Pick a video in Files and press ⚙ to transcode it to the chosen volume.</div>
+      <div id="tc-info" class="muted"></div>
+      <ul id="tc-jobs" class="filelist"></ul>
     </section>
 
     <section class="card">

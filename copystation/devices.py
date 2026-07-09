@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import volumes
 from .config import Config
 from .state import StatusHub, StorageInfo
 from .status import Event, State
@@ -306,41 +306,6 @@ def _content_flags(mountpoint: Path, media_dir: Path, has_dcim: bool) -> tuple[b
     return has_media, not has_content, (not has_media and has_content)
 
 
-def _root_source_device() -> Optional[str]:
-    """Determine the kernel name (e.g. 'mmcblk0') of the device that holds '/'.
-
-    This device must never be used as source/target.
-    """
-    try:
-        out = subprocess.run(
-            ["findmnt", "-n", "-o", "SOURCE", "/"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    # e.g. /dev/mmcblk0p2 -> base device mmcblk0
-    name = Path(out).name
-    return _strip_partition(name)
-
-
-def _strip_partition(devname: str) -> str:
-    """Reduce a partition name to its base device.
-
-    sda1 -> sda ; mmcblk0p2 -> mmcblk0 ; nvme0n1p1 -> nvme0n1
-    """
-    # Devices whose base name ends in a digit use a 'p' before the partition
-    # number (mmcblk0p2, nvme0n1p1, loop0p1); plain disks use a bare digit (sda1).
-    m = re.match(r"^(.*\d)p(\d+)$", devname)
-    if m:
-        return m.group(1)
-    m = re.match(r"^([a-zA-Z]+)\d+$", devname)
-    if m:
-        return m.group(1)
-    return devname
-
-
 class DeviceWatcher:
     """Listens for USB block devices and orchestrates transfers."""
 
@@ -357,7 +322,7 @@ class DeviceWatcher:
         self._hub = hub
         self._transfer = transfer
         self._context = pyudev.Context()
-        self._root_dev = _root_source_device()
+        self._root_dev = volumes.root_source_device()
         # ``_armed`` guards against re-running a transfer for a device set that
         # was already handled. It is cleared when a transfer starts and re-armed
         # once fewer than two eligible volumes remain (i.e. one was removed).
@@ -483,7 +448,18 @@ class DeviceWatcher:
         return bool(added), bool(removed)
 
     def _evaluate(self) -> None:
-        """Probe all present volumes; wait, or transfer once two are eligible."""
+        """Probe all present volumes; wait, or transfer once two are eligible.
+
+        Serialised with video transcode jobs through the shared ``operation_lock``
+        so the daemon never mounts/writes a removable volume while a transcode is
+        writing one (and vice versa). Both run as threads in this process, so the
+        in-process lock is sufficient. A transcode in flight simply defers the
+        next evaluation until it finishes.
+        """
+        with self._hub.state.operation_lock:
+            self._evaluate_impl()
+
+    def _evaluate_impl(self) -> None:
         ident = self._config.get("identify", {})
         min_bytes = int(ident.get("min_partition_gb", 6)) * 1024**3
         require_smaller = bool(ident.get("require_source_smaller_than_target", True))
@@ -668,30 +644,10 @@ class DeviceWatcher:
     def _is_candidate(self, device) -> bool:
         """True if the device is a mountable USB volume (not root).
 
-        Accepts two shapes:
-        * a USB *partition* (``sda1``, ``sdc1`` ...), and
-        * a USB *whole disk* that carries a filesystem directly, with no
-          partition table (``sdc`` with no ``sdc1``). The DJI O4 Air Unit
-          exposes its storage this way ("superfloppy"), so without this it would
-          never be detected. Disks that DO have a partition table are skipped
-          here -- their partitions are handled individually.
+        Thin wrapper around :func:`copystation.volumes.is_usb_volume`, which is
+        the shared source of truth used by the web file browser too.
         """
-        if device.get("ID_BUS") != "usb":
-            return False
-        devtype = device.get("DEVTYPE")
-        if devtype == "partition":
-            pass
-        elif devtype == "disk":
-            if device.get("ID_PART_TABLE_TYPE"):
-                return False  # partitioned -> its partitions are the candidates
-            if not device.get("ID_FS_TYPE"):
-                return False  # no directly-mountable filesystem
-        else:
-            return False
-        base = _strip_partition(device.sys_name)
-        if self._root_dev and base == self._root_dev:
-            return False
-        return True
+        return volumes.is_usb_volume(device, self._root_dev)
 
     def _current_partitions(self) -> list:
         """All currently present, eligible *and live* USB volumes.
@@ -769,26 +725,8 @@ class DeviceWatcher:
 
     @staticmethod
     def _usb_ids(device) -> tuple[str, str]:
-        """(vid, pid) of a device, lowercased.
-
-        A whole-disk node (e.g. the O4's ``sdc``) sometimes lacks
-        ``ID_VENDOR_ID``/``ID_MODEL_ID``; in that case fall back to its USB
-        ancestor, which always carries them. Returns ``("", "")`` if unknown.
-        """
-        vid = (device.get("ID_VENDOR_ID") or "").lower()
-        pid = (device.get("ID_MODEL_ID") or "").lower()
-        if vid and pid:
-            return vid, pid
-        find_parent = getattr(device, "find_parent", None)
-        if callable(find_parent):
-            try:
-                parent = find_parent("usb", "usb_device")
-            except Exception:  # pragma: no cover - defensive
-                parent = None
-            if parent is not None:
-                vid = vid or (parent.get("ID_VENDOR_ID") or "").lower()
-                pid = pid or (parent.get("ID_MODEL_ID") or "").lower()
-        return vid, pid
+        """(vid, pid) of a device, lowercased. See :func:`volumes.usb_ids`."""
+        return volumes.usb_ids(device)
 
     def _matches_source(self, device) -> bool:
         """Optional hardening via USB VID/PID allowlist (otherwise always True)."""
@@ -797,7 +735,7 @@ class DeviceWatcher:
         pids = [p.lower() for p in ident.get("source_usb_product_ids", [])]
         if not vids and not pids:
             return True
-        vid, pid = self._usb_ids(device)
+        vid, pid = volumes.usb_ids(device)
         if vids and vid not in vids:
             return False
         if pids and pid not in pids:
@@ -805,42 +743,12 @@ class DeviceWatcher:
         return True
 
     def _volume_name(self, device) -> str:
-        """Human-friendly volume name.
-
-        Resolution order (best first):
-        1. a user-configured name matched by USB VID/PID (``identify
-           .device_labels``) -- this is how an O4 becomes "O4 Lite"/"O4 Pro"
-           without hardcoding, since the USB product string is only a serial,
-        2. the filesystem label (e.g. a card the user named),
-        3. the USB model / vendor string,
-        4. a generic fallback.
-        """
-        configured = self._configured_label(device)
-        if configured:
-            return configured
-        for key in ("ID_FS_LABEL", "ID_MODEL", "ID_VENDOR"):
-            value = device.get(key)
-            if value:
-                return value
-        return "camera"
+        """Human-friendly volume name. See :func:`volumes.volume_name`."""
+        return volumes.volume_name(device, self._config)
 
     def _configured_label(self, device) -> Optional[str]:
-        """Look up a friendly name from ``identify.device_labels`` by VID/PID."""
-        mapping = self._config.get("identify", {}).get("device_labels", [])
-        if not mapping:
-            return None
-        vid, pid = self._usb_ids(device)
-        for entry in mapping:
-            evid = str(entry.get("vid", "")).lower()
-            epid = str(entry.get("pid", "")).lower()
-            if not (evid or epid):
-                continue
-            if evid and evid != vid:
-                continue
-            if epid and epid != pid:
-                continue
-            return entry.get("name")
-        return None
+        """Friendly name from ``identify.device_labels``. See :func:`volumes.configured_label`."""
+        return volumes.configured_label(device, self._config)
 
     def _mount(self, device_node: str, mountpoint: Path) -> Path:
         mountpoint.mkdir(parents=True, exist_ok=True)

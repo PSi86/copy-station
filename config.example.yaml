@@ -117,11 +117,95 @@ status:
     full_refresh_every: 20      # force a full refresh after N partial updates
     partial_min_interval: 2.0   # seconds between partial updates
 
-# Optional local web interface (status + progress + storage, future settings).
+# Optional local web interface (status + progress + storage, file browser,
+# optional transcoding). Served on all interfaces, so it is also reachable over
+# the WLAN access point below.
 web:
   enabled: false
   host: 0.0.0.0        # all interfaces; robust to interfaces going up/down
   port: 8080
+  # Optional HTTP Basic auth for the whole interface (off by default). Sensible
+  # once file download is reachable over the AP. Fail-safe: enabling this with an
+  # empty password rejects every request rather than leaving it open.
+  auth:
+    enabled: false
+    username: admin
+    password: ""
+  # Read-only browsing + download of the ATTACHED USB mass storage only (never
+  # the OS partitions). Effective only while the web interface is enabled.
+  files:
+    enabled: true
+    allow_download: true
+    browse_base: /run/copystation/browse   # separate from the transfer mounts
+    idle_unmount_seconds: 120              # release a browsed volume when idle
+
+# Optional WLAN access point so the station hosts its own network in the field
+# (the web interface above is then reachable at http://<ipv4_address>:<port>/).
+# Managed via NetworkManager (nmcli): the daemon (re)creates the profile from
+# these values and brings it up on start. `ipv4.method shared` gives DHCP + NAT
+# automatically. WPA2 needs a password of at least 8 characters; an empty
+# password leaves the AP down. Requires NetworkManager (default on Raspberry Pi
+# OS Bookworm and current Radxa images). It can also be toggled from a user
+# button via the `wifi_ap` action below.
+wifi_ap:
+  enabled: false
+  con_name: copystation-ap
+  ssid: Copy_Station
+  password: ""            # >= 8 chars for WPA2; empty -> AP stays down
+  band: bg               # bg (2.4 GHz) | a (5 GHz)
+  channel: 6
+  ipv4_address: 10.42.0.1/24
+  autoconnect: true
+  ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
+  # Captive portal: point all DNS at the AP and redirect port 80 to the web UI,
+  # so a joining device auto-opens the interface ("Sign in to network") and stays
+  # on the AP instead of falling back to mobile data. Needs web.enabled and port
+  # 80 free. Note: AP clients then get no general internet (expected for a field
+  # AP that only serves this UI).
+  captive_portal: false
+  captive_portal_port: 80
+
+# Optional video transcoding / resolution change via ffmpeg. Jobs are submitted
+# from the web interface (Files -> the ⚙ button on a video). The output is
+# written to <output_dirname>/ on the chosen TARGET volume (read-write) and is
+# also downloadable. Serialised with the copy daemon, so a copy and a transcode
+# never touch the same card at once. Needs ffmpeg installed (scripts/install.sh
+# pulls it in); a no-op with a clear error otherwise. Off by default.
+transcode:
+  enabled: false
+  output_dirname: Transcoded
+  max_jobs: 1
+  # Hardware acceleration. `auto` uses the board's hardware encoder when the
+  # installed ffmpeg supports it and falls back to the CPU otherwise:
+  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware)
+  #   * Raspberry Pi 5  -> no hardware encoder exists -> CPU (libx264/libx265)
+  #   * Radxa Cubie A7S -> the A733 HW H.264/H.265 encoders are only reachable via
+  #                        GStreamer OpenMAX (omxh264videoenc / omxhevcvideoenc),
+  #                        NOT ffmpeg, so auto resolves to CPU here.
+  # Set `cpu` to force software, or a specific ffmpeg encoder name (e.g.
+  # h264_v4l2m2m) to force hardware. `fallback_to_cpu` retries on the CPU if the
+  # hardware encoder fails at runtime.
+  acceleration: auto        # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
+  fallback_to_cpu: true
+  # Buffer the transcode through RAM (a tmpfs) instead of reading and writing the
+  # same card at once -- avoids the constant read/write seeking that is slow and
+  # wears an SD card. Used only when the input (with output headroom) fits within
+  # `ram_buffer_fraction` of the FREE RAM; larger files stream on the card. The
+  # tmpfs is size-capped, so it never exceeds that fraction of free RAM.
+  ram_buffer: true
+  ram_buffer_fraction: 0.66  # use up to ~two thirds of the free RAM
+  # Selectable presets. `height` downscales to that many lines keeping the aspect
+  # ratio (width auto, even); `height: 0` keeps the source resolution. `vcodec`
+  # is the software codec and picks the family (h264/hevc); `crf` drives software
+  # quality, `bitrate` (optional) drives the hardware encoder (a height-based
+  # default is used otherwise). A per-preset `accel:` overrides the global one.
+  # `preset` is the software speed preset -- `veryfast` is a good SBC default
+  # (much faster than `medium`); `ultrafast` = max speed / bigger files,
+  # `fast`/`medium`/`slow` = smaller files. Ignored by hardware encoders.
+  presets:
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast }
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast }
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
@@ -147,11 +231,15 @@ buttons:
       max_gap_seconds: 1.0     # a longer release ends the click sequence
       hold_seconds: 3.0        # hold after the activation click -> hold action
     actions:
-      # poweroff | reboot | none | {command: "..."}  (reboot may hang on the A733)
+      # poweroff | reboot | wifi_ap | none | {command: "..."}
+      #   wifi_ap toggles the WLAN access point (see wifi_ap: above); on a WS2812
+      #   strip it plays a distinct blink code (cyan = on, amber = off) and the
+      #   e-paper shows a "WiFi" badge while the AP is up.
+      #   (reboot may hang on the A733 -- prefer poweroff.)
       hold: poweroff
       single_click: none
       double_click: none
-      triple_click: none
+      triple_click: wifi_ap    # 3 clicks (after the activation click) toggle the AP
 
 # Settle time (seconds) after device detection before mounting. This is the hard
 # upper bound for how long detection waits for a device's volumes to enumerate.

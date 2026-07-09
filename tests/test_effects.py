@@ -1,5 +1,6 @@
 from copystation.status import Event
 from copystation.status.effects import (
+    AP_FLASHES,
     DETECT_FLASHES,
     DETECT_OFF,
     DETECT_ON,
@@ -37,6 +38,18 @@ def test_source_empty_holds_lit_then_finishes():
     assert effect_phase(Event.SOURCE_EMPTY, 0.0) == (True, False)
     assert effect_phase(Event.SOURCE_EMPTY, EMPTY_HOLD_SECONDS - 0.01) == (True, False)
     assert effect_phase(Event.SOURCE_EMPTY, EMPTY_HOLD_SECONDS) == (False, True)
+
+
+def test_ap_toggle_blinks_three_times():
+    assert AP_FLASHES == 3
+    for event in (Event.AP_ENABLED, Event.AP_DISABLED):
+        # Lit in the middle of each of the three flashes.
+        for k in range(AP_FLASHES):
+            lit, done = effect_phase(event, k * PERIOD + DETECT_ON / 2)
+            assert lit and not done, (event, k)
+        # Runs up to AP_FLASHES periods, then it is done.
+        assert effect_phase(event, PERIOD * AP_FLASHES - 0.001)[1] is False
+        assert effect_phase(event, PERIOD * AP_FLASHES)[1] is True
 
 
 def test_fill_gauge_shows_for_three_seconds_then_hides():

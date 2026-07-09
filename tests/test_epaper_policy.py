@@ -10,6 +10,7 @@ def _vm(
     tgt=(120, 256),
     devices=2,
     error="",
+    ap=False,
 ):
     def storage(t):
         used, cap = t
@@ -33,6 +34,7 @@ def _vm(
         eta_text="0:10",
         error_text=error,
         version="0.1.0",
+        ap_active=ap,
     )
 
 
@@ -102,3 +104,13 @@ def test_clear_beats_budget_and_throttle():
     prev = _vm(devices=2)
     kw = {**_KW, "seconds_since_last": 0.0}
     assert decide(prev, _vm(devices=1), **kw) is Decision.FULL
+
+
+def test_ap_enabled_is_partial():
+    # The WiFi badge appearing draws black onto white -> a clean partial.
+    assert decide(_vm(ap=False), _vm(ap=True), **_KW) is Decision.PARTIAL
+
+
+def test_ap_disabled_is_full():
+    # The badge must go white again -> only a full refresh erases it cleanly.
+    assert decide(_vm(ap=True), _vm(ap=False), **_KW) is Decision.FULL

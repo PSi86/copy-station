@@ -57,6 +57,11 @@ if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   # renders the status frame; DejaVu gives it crisp text). Harmless if unused.
   apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-spidev python3-yaml python3-pil fonts-dejavu-core gpiod
 
+  # ffmpeg powers the optional video transcoding feature (also provides ffprobe).
+  # Best-effort: the feature is a no-op if it is missing, so don't fail install.
+  echo ">> Installing ffmpeg (optional video transcoding) ..."
+  apt-get install -y ffmpeg || echo "   -> ffmpeg not installed; transcoding will be unavailable."
+
   # exFAT support so camera/SD cards mount (package name differs by release:
   # Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).
   echo ">> Installing exFAT support ..."
@@ -176,6 +181,19 @@ if [[ ${CONFIG_INSTALLED} -eq 1 && -z "${CONFIG_SRC}" ]]; then
     echo "   -> web interface set to enabled=${WEB_ENABLED}."
   fi
   echo "   -> review/confirm the GPIO pins in ${TARGET} (see README)."
+fi
+
+# The WLAN access point is managed by the daemon at runtime via NetworkManager,
+# so nothing is installed here -- but if it is enabled without nmcli present,
+# flag it now instead of letting it silently fail to come up. NetworkManager is
+# NOT auto-installed (it can clash with an existing dhcpcd/networkd setup).
+if python3 -c "import sys, yaml; c = yaml.safe_load(open(sys.argv[1])) or {}; sys.exit(0 if (c.get('wifi_ap') or {}).get('enabled') else 1)" "${TARGET}" 2>/dev/null; then
+  if command -v nmcli >/dev/null 2>&1; then
+    echo "   -> wifi_ap enabled; NetworkManager present -- the daemon raises the AP on start."
+  else
+    echo "   -> NOTE: wifi_ap is enabled but 'nmcli' (NetworkManager) was not found." >&2
+    echo "            Install NetworkManager to use the access point (see README)." >&2
+  fi
 fi
 
 if [[ ${CONFIG_ONLY} -eq 0 ]]; then

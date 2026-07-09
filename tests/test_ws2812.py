@@ -4,6 +4,8 @@ from copystation.status import Event, State
 from copystation.status.ws2812_backend import (
     MAX_LEDS,
     Ws2812Backend,
+    _AP_OFF_COLOR,
+    _AP_ON_COLOR,
     _DETECT_COLOR,
     _EMPTY_COLOR,
     _ERROR_COLOR,
@@ -92,6 +94,21 @@ def test_effect_pixels_cover_all_leds():
     assert b._effect_pixels(Event.SOURCE_EMPTY, True, 0.0) == [_EMPTY_COLOR] * 3
     # Detection green and empty-source blue must be visually different.
     assert _DETECT_COLOR != _EMPTY_COLOR
+
+
+def test_ap_toggle_uses_distinct_colours_on_whole_strip():
+    b = Ws2812Backend.__new__(Ws2812Backend)
+    b._led_count = 4
+    # AP enable = cyan on the whole strip; disable = amber; off between flashes.
+    assert b._effect_pixels(Event.AP_ENABLED, True, 0.0) == [_AP_ON_COLOR] * 4
+    assert b._effect_pixels(Event.AP_ENABLED, False, 0.0) == [_OFF] * 4
+    assert b._effect_pixels(Event.AP_DISABLED, True, 0.0) == [_AP_OFF_COLOR] * 4
+    assert b._effect_pixels(Event.AP_DISABLED, False, 0.0) == [_OFF] * 4
+    # Enable and disable must be unmistakably different, and distinct from the
+    # other effect colours so nothing is ambiguous at a glance.
+    assert _AP_ON_COLOR != _AP_OFF_COLOR
+    assert _AP_ON_COLOR not in (_DETECT_COLOR, _EMPTY_COLOR, _ERROR_COLOR)
+    assert _AP_OFF_COLOR not in (_DETECT_COLOR, _EMPTY_COLOR, _ERROR_COLOR)
 
 
 def test_startup_sweep_grows_then_fills():

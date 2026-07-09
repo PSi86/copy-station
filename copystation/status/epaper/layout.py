@@ -103,6 +103,23 @@ def _bar(draw, x: int, y: int, w: int, h: int, fraction: float) -> None:
         draw.rectangle([x + 1, y + 1, x + fill_w, y + h - 2], fill=_BLACK)
 
 
+def _wifi_badge(draw, x_right: int, y: int, font) -> int:
+    """Draw a small inverted "WiFi" badge right-aligned at ``(x_right, y)``.
+
+    A solid black chip with white text -- it reads at a glance on the 1-bit panel
+    and drawing darker pixels onto white is a clean partial refresh. Returns the
+    badge's left x so the caller can place other header text to its left.
+    """
+    label = "WiFi"
+    pad = 3
+    tw = _text_width(draw, label, font)
+    bh = _line_height(font) + 2
+    x0 = x_right - (tw + 2 * pad)
+    draw.rectangle([x0, y, x_right, y + bh - 1], fill=_BLACK)
+    draw.text((x0 + pad, y + 1), label, font=font, fill=_WHITE)
+    return x0
+
+
 def render(view: ViewModel, width: int, height: int):
     """Render ``view`` to a mode-``"1"`` image of the given viewer-facing size."""
     landscape = width >= height * 1.3
@@ -129,8 +146,12 @@ def _render_portrait(view: ViewModel, width: int, height: int):
     small_f = _font(max(10, height // 20))
 
     _text(draw, m, m, "Copy_Station", title_f)
+    version_right = right
+    if view.ap_active:
+        # WiFi status badge top-right; version tucks in to its left.
+        version_right = _wifi_badge(draw, right, m, small_f) - 4
     if view.version:
-        _text(draw, 0, m, f"v{view.version}", small_f, anchor_right=right)
+        _text(draw, 0, m, f"v{view.version}", small_f, anchor_right=version_right)
     line_y = m + _line_height(title_f) + 2
     draw.line([m, line_y, right, line_y], fill=_BLACK)
 
@@ -142,11 +163,29 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y = _draw_wrapped(draw, m, y, right, view.error_text, label_f)
 
     if view.show_progress:
-        _text(draw, m, y, "Transfer", label_f)
+        _text(draw, m, y, "Transcode" if view.transcode_active else "Transfer", label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=right)
         y += _line_height(label_f) + 2
         _bar(draw, m, y, width - 2 * m, max(10, height // 18), view.progress_fraction)
         y += max(10, height // 18) + 8
+
+    if view.transcode_active:
+        # A transcode shows the file, encoder + size, and elapsed/fps + ETA in the
+        # footer -- not the source/target storage gauges.
+        _text(draw, m, y, _fit_label(draw, view.transcode_name, label_f, right - m), label_f)
+        y += _line_height(label_f) + 3
+        info = " · ".join(t for t in (view.transcode_encoder, view.transcode_size_text) if t)
+        if info:
+            _text(draw, m, y, info, small_f)
+        foot_y = height - m - _line_height(small_f)
+        left = f"Elapsed {view.elapsed_text}"
+        if view.transcode_fps_text:
+            left += f" · {view.transcode_fps_text}"
+        _text(draw, m, foot_y, left, small_f)
+        if view.eta_text and view.eta_text != "--":
+            _text(draw, 0, foot_y, f"ETA {view.eta_text}", small_f, anchor_right=right)
+        return img
+
     footer = view.show_progress and (view.speed_text or view.eta_text != "--")
     data_bottom = (height - m - _line_height(small_f) - 4) if footer else (height - m)
     items, overflow = _gauge_items(view)
@@ -173,6 +212,8 @@ def _render_landscape(view: ViewModel, width: int, height: int):
     small_f = _font(max(10, height // 13))
 
     _text(draw, m, m, "Copy_Station", title_f)
+    if view.ap_active:
+        _wifi_badge(draw, width - m, m, small_f)  # WiFi status badge, top-right
     ly = m + _line_height(title_f) + 1
     draw.line([m, ly, col - m, ly], fill=_BLACK)
 
@@ -184,7 +225,10 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         big_f = _fit_font(draw, f"{view.percent}%", left_w, max(14, height // 6))
         _text(draw, m, sy, f"{view.percent}%", big_f)
         sy += _line_height(big_f) + 1
-        if view.speed_text:
+        if view.transcode_active:
+            _text(draw, m, sy, f"Elapsed {view.elapsed_text}", small_f)
+            sy += _line_height(small_f)
+        elif view.speed_text:
             _text(draw, m, sy, view.speed_text, small_f)
             sy += _line_height(small_f)
         if view.eta_text and view.eta_text != "--":
@@ -197,6 +241,28 @@ def _render_landscape(view: ViewModel, width: int, height: int):
     rx = col + m
     x1 = width - m
     y = m
+    if view.ap_active:
+        # Drop the right column below the top-right WiFi badge so a right-aligned
+        # value (e.g. the copy "67%") never lands under it.
+        y = m + _line_height(small_f) + 4
+
+    if view.transcode_active:
+        # The right column shows the progress bar (like a copy) plus the file and
+        # encoder, instead of the storage gauges.
+        _text(draw, rx, y, "Transcode", label_f)
+        _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=x1)
+        y += _line_height(label_f) + 2
+        _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
+        y += max(9, height // 11) + 8
+        _text(draw, rx, y, _fit_label(draw, view.transcode_name, small_f, x1 - rx), small_f)
+        y += _line_height(small_f) + 2
+        info = " · ".join(
+            t for t in (view.transcode_encoder, view.transcode_size_text, view.transcode_fps_text) if t
+        )
+        if info:
+            _text(draw, rx, y, _fit_label(draw, info, small_f, x1 - rx), small_f)
+        return img
+
     if view.show_progress:
         _text(draw, rx, y, "Transfer", label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=x1)

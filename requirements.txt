@@ -12,9 +12,17 @@
 
 PyYAML>=5.3
 
-# Web interface (only needed when status.web.enabled = true):
+# Web interface (only needed when web.enabled = true):
 fastapi>=0.100
 uvicorn>=0.20
+
+# The optional web features need NO extra pip packages -- they rely on system
+# tooling installed by scripts/install.sh:
+#   * File browser + WiFi AP: mount/umount and NetworkManager (`nmcli`).
+#   * Video transcoding:      `ffmpeg` (also provides `ffprobe`).
+# NetworkManager is the default network stack on Raspberry Pi OS Bookworm and
+# current Radxa images; it is not auto-installed to avoid clashing with an
+# existing dhcpcd/networkd setup.
 
 # Development/tests only:
 #   pytest>=6.0

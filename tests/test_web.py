@@ -44,3 +44,33 @@ def test_settings_placeholder():
     res = _client(StationState()).get("/api/settings")
     assert res.status_code == 200
     assert res.json()["editable"] is False
+
+
+def test_ap_status_in_status_endpoint():
+    state = StationState()
+    assert _client(state).get("/api/status").json()["wifi_ap"] is False
+    state.set_ap_active(True)
+    assert _client(state).get("/api/status").json()["wifi_ap"] is True
+
+
+def test_transcode_phase_and_block_in_snapshot():
+    state = StationState()
+    assert state.snapshot()["transcode"] == {"active": False}
+
+    state.begin_transcode("DJI_0219.MP4")
+    snap = state.snapshot()
+    assert snap["phase"] == "transcoding"  # overrides the copy phase
+    tr = snap["transcode"]
+    assert tr["active"] is True and tr["name"] == "DJI_0219.MP4"
+
+    state.update_transcode(0.5, "cpu", False)
+    state.set_transcode_meta(input_size=210_000_000, fps=25.0)
+    tr = state.snapshot()["transcode"]
+    assert tr["percent"] == 50.0
+    assert tr["encoder"] == "cpu"
+    assert tr["elapsed_seconds"] is not None
+    assert tr["input_size"] == 210_000_000
+    assert tr["fps"] == 25.0
+
+    state.finish_transcode()
+    assert state.snapshot()["transcode"] == {"active": False}

@@ -10,6 +10,9 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 
 * [Flow](#flow)
 * [Web interface](#web-interface-optional)
+  * [File access & download](#file-access--download-optional)
+  * [Video transcoding](#video-transcoding-optional)
+* [WiFi access point](#wifi-access-point-optional)
 * [E-Paper display](#e-paper-display-optional)
 * [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
 * [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
@@ -19,6 +22,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 * [Deployment](#deployment)
 * [Source/target detection](#sourcetarget-detection)
 * [Configuration](#configuration)
+* [Changelog](CHANGELOG.md)
 
 ## Flow
 
@@ -69,6 +73,195 @@ runtime -- no per-interface rebinding.
 The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API
 docs). Open `http://<device-ip>:8080/`.
+
+**Access control (optional).** Once file download or the WiFi AP are in play you
+may want the interface behind a password. Set `web.auth.enabled: true` with a
+`username`/`password` and the whole interface (status, files, transcode) is
+guarded by HTTP Basic auth. It is off by default (unchanged behaviour), and
+**fail-safe**: enabling it with an empty password rejects every request rather
+than leaving it open.
+
+### File access & download (optional)
+
+Set `web.files.enabled: true` (default on when the web interface is enabled) to
+browse and download the footage of the **attached mass storage** directly from
+the web UI -- pick a volume, walk its folders, download a file. Only the
+**USB volumes are ever exposed; the board's OS card is never listed or
+reachable** (the same OS-exclusion the copy logic uses). Access is **read-only**:
+the browser mounts each volume read-only under a separate mount base
+(`web.files.browse_base`), so it can never modify or corrupt a card, and releases
+it again after `idle_unmount_seconds` of inactivity. Downloads are streamed;
+path traversal (`..`, symlinks) is refused. Set `web.files.allow_download: false`
+to allow browsing but not downloading.
+
+### Video transcoding (optional)
+
+Set `transcode.enabled: true` (and install **ffmpeg**, which `scripts/install.sh`
+pulls in) to re-encode / downscale a video from the web UI: browse to a clip in
+**Files**, press the **⚙** button, pick a preset and an output volume. The job
+runs in the background with a live progress bar; the result is written to a
+`Transcoded/` folder (`transcode.output_dirname`) on the **target volume**
+(read-write) and is downloadable through the file browser.
+
+Presets are configurable (`transcode.presets`): each sets a target `height`
+(downscale keeping the aspect ratio; `0` keeps the source resolution), a video
+codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
+default set offers 1080p/720p H.264 and 720p H.265.
+
+**Speed (software encoding).** The `preset` field is libx264/libx265's
+speed/size trade-off and defaults to **`veryfast`** -- a good choice on an SBC,
+where software encoding is CPU-bound (much faster than `medium` for a modest size
+increase). Use `ultrafast` for the most speed (larger files) or `fast`/`medium`/
+`slow` for smaller files. On boards without a usable hardware encoder (Pi 5 and
+the Cubie A7S, which encodes on the CPU), a heavy source -- e.g. **4K60** drone
+footage -- is dominated by *decoding*, so expect well under real-time; a lower
+`height` and a faster `preset` are the levers that matter. (`preset` is ignored
+by hardware encoders, which are bitrate-controlled.)
+
+**Hardware acceleration.** `transcode.acceleration` controls the encoder, and the
+station picks the best one for the board automatically -- the three supported
+boards differ a lot in what they can encode in hardware:
+
+| Board | Hardware encode | `auto` uses |
+|-------|-----------------|-------------|
+| Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
+| Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
+| Radxa Cubie A7S | H.264 **and H.265** 4K@30 in the SoC, but **only via GStreamer OpenMAX** (`omxh264videoenc` / `omxhevcvideoenc`) -- **not** exposed to ffmpeg | CPU (`libx264`/`libx265`) |
+
+> **Cubie A7S note.** The Allwinner A733 has hardware H.264 **and H.265** encoders
+> (up to 4K@30), but on the Radxa images they are reachable **only through
+> GStreamer's OpenMAX elements** (`omxh264videoenc` / `omxhevcvideoenc`), not
+> through ffmpeg's V4L2 M2M. So this ffmpeg-based transcoder falls back to the CPU
+> on the Cubie (which is expected, and why `auto` resolves to CPU there). Install
+> and check with `sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-bad`
+> then `gst-inspect-1.0 | grep omx`. A GStreamer hardware-encode path is a
+> possible future addition.
+
+* `acceleration: auto` (default) uses the board's hardware encoder **when the
+  installed ffmpeg actually has it**, otherwise software.
+* `acceleration: cpu` forces software; a specific ffmpeg encoder name (e.g.
+  `h264_v4l2m2m`) forces that one. A per-preset `accel:` overrides the global one.
+* **Automatic fallback:** if a hardware encode fails at runtime (missing device
+  node, unsupported input, driver error), the partial output is discarded and the
+  job retries with the next candidate -- ultimately the CPU -- so a job does not
+  fail just because hardware encoding is unavailable. Set `fallback_to_cpu: false`
+  to disable. Hardware (V4L2 M2M) encoders are bitrate-controlled, so they use the
+  preset's `bitrate` (or a height-based default) rather than `crf`. The job list
+  shows which encoder actually ran (e.g. `h264_v4l2m2m (hw)` or `cpu`).
+
+A transcode and a copy are **mutually exclusive**: a running job holds an
+in-process lock the copy daemon also takes, so the two never write to (or mount)
+the same card at once. **No transcode starts while a copy is running** (the submit
+is refused with a clear message) and **no copy starts while a transcode is
+running** (device detection pauses until it finishes). While a job runs it
+**takes over the status display** -- a dedicated `Transcoding` phase with its own
+**progress bar on the LEDs** (purple on a WS2812 strip, so it is clearly not a
+copy) and on the **e-paper panel** (bar, file name, encoder and elapsed/ETA), and
+in the web UI the phase badge plus **elapsed and remaining time** on the running
+job. Jobs run one at a time and can be **canceled from the UI** (the ✕ on a
+queued/running row), which stops ffmpeg and removes the partial output. Without
+ffmpeg the feature is a no-op and the endpoint returns a clear error.
+
+**RAM buffering.** When the input and output are on the **same card** (the common
+case -- a clip transcoded into that card's `Transcoded/` folder), reading the
+input and writing the output at the same time makes the SD card seek constantly,
+which is slow and wears it. With `transcode.ram_buffer` on (default), the station
+buffers the **output** through **RAM**: the input **streams from the card**
+(sequential reads are card-friendly), the encode writes into a size-capped
+`tmpfs`, and the finished file is copied back to the card in one bulk write -- so
+during the encode the card only reads, and the write is a single bulk copy at the
+end. Because the input is **not** held in RAM, its size is irrelevant: even a
+file much larger than RAM is buffered, as long as the (usually much smaller)
+**output** fits `ram_buffer_fraction` of the **free** RAM (default ~two thirds);
+otherwise it streams straight to the card. The web job row tags a RAM-buffered job
+with `RAM`, and the journal logs `buffering output in RAM ...`.
+
+**Trade-off / how to check it.** RAM buffering helps when the *card I/O* is the
+bottleneck (interleaved read+write seeking stalls the encode). When the *encode*
+is the bottleneck instead -- e.g. **software encoding on the Cubie A7S** -- the
+extra bulk input/output copies are serial time that does **not** overlap the
+encode, so the total can be a little *slower*. Measure it on your board and pick
+what fits:
+
+* Confirm RAM is actually used: while a job runs, `mount | grep transcode-work`
+  (a `tmpfs` appears) and `free -m` (used RAM rises by roughly the file size);
+  `journalctl -u copystation | grep RAM`.
+* Confirm the card is read/written less during the encode: `iostat -dx 2 /dev/sdb`
+  (or diff `/sys/block/sdb/stat` before/after) -- with buffering the card is
+  near-idle during the encode and busy only at the start/end.
+* Compare wall-clock: run the same job with `ram_buffer: true` vs `false`
+  (restart the service between) and compare the job's elapsed time. Set
+  `ram_buffer: false` if streaming is faster for your card + codec.
+
+## WiFi access point (optional)
+
+Set `wifi_ap.enabled: true` to have the station host its **own WLAN** in the
+field -- handy when there is no existing network -- with the web interface
+reachable over it. It is managed through **NetworkManager** (`nmcli`): on start
+the daemon (re)creates a hotspot connection profile from the config and brings it
+up. `ipv4.method shared` makes NetworkManager run **DHCP + NAT** on the AP subnet
+automatically, so a device that associates gets an address and can open
+`http://<ipv4_address>:<web.port>/` (default `http://10.42.0.1:8080/`).
+
+```yaml
+wifi_ap:
+  enabled: true
+  ssid: Copy_Station
+  password: "change-me-8+"   # >= 8 chars for WPA2; empty leaves the AP down
+  band: bg                   # bg (2.4 GHz) | a (5 GHz)
+  channel: 6
+  ipv4_address: 10.42.0.1/24
+  ifname: ""                 # empty -> NetworkManager picks the Wi-Fi interface
+```
+
+WPA2 requires a password of **at least 8 characters**; a shorter or empty one
+leaves the AP down (logged). It needs **NetworkManager** -- the default network
+stack on Raspberry Pi OS Bookworm and current Radxa images. The installer is not
+allowed to force-install it (it can clash with an existing `dhcpcd`/`networkd`
+setup), so if `nmcli` is missing it prints a note; install `network-manager` by
+hand to use the AP. Verify with `nmcli connection show --active`.
+
+**Turning the AP on/off from the button.** Bind the `wifi_ap` action to a user
+button gesture to toggle the access point on demand -- the recommended binding is
+**`triple_click`** (see [User button](#user-button-optional)). Each press flips
+the AP based on its current state (on if it was off, off if it was on), with
+clear feedback:
+
+* the **e-paper display** shows a **`WiFi`** badge in the top-right corner while
+  the AP is up (also reflected as a badge in the web header), and
+* a **WS2812 strip** plays a distinct blink code -- **three cyan flashes** on
+  enable, **three amber flashes** on disable -- so activation and deactivation are
+  unmistakable (it reads on a single LED as well as on a full strip).
+
+```yaml
+buttons:
+  userbutton_1:
+    enabled: true
+    line: 3
+    actions:
+      hold: poweroff          # clean shutdown
+      triple_click: wifi_ap   # toggle the WiFi access point
+```
+
+**Reaching the web UI over the AP.** The AP only serves the web interface if the
+**web interface is enabled** -- they are independent switches. If
+`http://10.42.0.1:8080/` is *refused* after joining the AP, the usual cause is
+`web.enabled: false` (nothing is listening); set it `true` and restart. The
+daemon logs a warning for exactly this case and prints the reachable URL at
+startup (`journalctl -u copystation`). Quick checks on the device:
+`sudo ss -ltnp | grep 8080` (uvicorn listening on `0.0.0.0:8080`?) and
+`nmcli connection show --active` / `ip -4 addr` (is `10.42.0.1/24` on the Wi-Fi
+interface?).
+
+**Captive portal (optional).** Set `wifi_ap.captive_portal: true` so a device that
+joins **auto-opens the web UI** (the OS "Sign in to network" prompt) and stays on
+the AP. Without it, phones detect "no internet" on the AP and route to mobile
+data, so even the manual URL can fail. The portal points all DNS at the AP (a
+NetworkManager `dnsmasq-shared.d` drop-in) and runs a small redirect server on
+**port 80** that sends every request to `http://10.42.0.1:8080/`. It needs
+`web.enabled: true` and a free port 80; AP clients then get **no general internet**
+through the station (expected for a field AP that only serves this UI). Disabling
+it again removes the DNS drop-in on the next start.
 
 ## E-Paper display (optional)
 
@@ -181,7 +374,9 @@ bar that blinks at 10 Hz (the same activity pattern as the Grove LED Bar). On an
 devices are removed. Ready is a steady green first LED
 (Success = a short green blink). A source with nothing to copy holds the whole
 strip **blue** for a few seconds. When the **service starts** the strip wipes
-**cyan** once; when it **stops** all LEDs go off. Set `led_count`
+**cyan** once; when it **stops** all LEDs go off. Toggling the **WiFi access
+point** from a button plays a dedicated code: **three cyan flashes** when it comes
+up, **three amber flashes** when it goes down. Set `led_count`
 (1-10) and the `device` (e.g. `/dev/spidev0.0`) in
 the config. On the **Raspberry Pi** enable SPI (**`sudo raspi-config`** -> Interface
 Options -> SPI, or `dtparam=spi=on` in `/boot/firmware/config.txt`) and wire DIN to
@@ -251,7 +446,10 @@ the hold is only accepted as the **first** press after activation
 thresholds cancels the sequence. An activation click with nothing after it
 simply times out.
 
-Each action is `poweroff`, `reboot`, `none`, or an arbitrary shell command:
+Each action is `poweroff`, `reboot`, `wifi_ap` (toggle the WLAN access point --
+with a display badge and a WS2812 blink code, see
+[WiFi access point](#wifi-access-point-optional)), `none`, or an arbitrary shell
+command:
 
 ```yaml
 buttons:
@@ -262,8 +460,8 @@ buttons:
     actions:
       hold: poweroff                          # C _ H   -> clean shutdown
       single_click: { command: "rfkill toggle wlan" }   # C _ C
-      double_click: none
-      triple_click: none
+      double_click: none                      # C _ C _ C
+      triple_click: wifi_ap                   # C _ C _ C _ C -> toggle the WiFi AP
 ```
 
 All timings live under `timing` (defaults shown; the values above use them):
@@ -386,7 +584,8 @@ sudo bash scripts/install.sh
 The installer:
 
 * installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`,
-  `python3-spidev`, the `gpiod` CLI tools, exFAT support),
+  `python3-spidev`, the `gpiod` CLI tools, exFAT support, and `ffmpeg` for the
+  optional video transcoding),
 * copies the code to `/opt/copystation` and creates a venv with FastAPI/uvicorn
   (PEP 668-safe via `--system-site-packages`),
 * **detects the board** and writes `/etc/copystation/config.yaml` from the
@@ -497,7 +696,8 @@ It stops and disables the service, removes the systemd unit and `/opt/copystatio
 and unmounts anything left under `/run/copystation`. Your `/etc/copystation/config.yaml`
 is kept unless you pass `--purge`. The apt packages the installer pulled in
 (`rsync`, `python3-pyudev`, `python3-libgpiod`, `python3-spidev`, `gpiod`, exFAT
-tools) are left in place -- remove them by hand if nothing else needs them.
+tools, `ffmpeg`) are left in place -- remove them by hand if nothing else needs
+them.
 
 ## Source/target detection
 

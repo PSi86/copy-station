@@ -54,6 +54,18 @@ def test_progress_bar_grows_with_percent():
     assert high > low
 
 
+def test_wifi_badge_drawn_when_ap_active():
+    # The WiFi badge is a solid black chip, so it adds black pixels on both layouts.
+    base = {
+        "phase": "ready", "percent": 0.0,
+        "source": {"capacity": 0, "used": 0}, "target": {"capacity": 0, "used": 0},
+    }
+    for w, h in ((200, 200), (296, 128)):
+        off = _black_pixels(render(build_view({**base, "wifi_ap": False}, "0.1.0"), w, h))
+        on = _black_pixels(render(build_view({**base, "wifi_ap": True}, "0.1.0"), w, h))
+        assert on > off
+
+
 _DETECTING_SNAPSHOT = {
     "phase": "detecting",
     "source": {"capacity": 0, "used": 0},

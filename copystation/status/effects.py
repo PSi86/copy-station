@@ -36,6 +36,12 @@ DETECT_FLASHES = 2
 DETECT_ON = 0.12   # s lit per flash
 DETECT_OFF = 0.12  # s dark per flash
 
+# WiFi AP toggled: three quick flashes. Both the enable and the disable signal use
+# the same three-flash rhythm; the backend gives each its own colour (see the
+# ws2812 backend: cyan = AP on, amber = AP off) so activation and deactivation are
+# unmistakable, and it works on a single LED as well as on a full strip.
+AP_FLASHES = 3
+
 # Empty source: hold steady long enough to be unmistakable ("nothing to copy").
 EMPTY_HOLD_SECONDS = 5.0
 
@@ -78,6 +84,11 @@ def effect_phase(event: Event, elapsed: float) -> Tuple[bool, bool]:
         # Always "lit" while it runs; the backend draws the growing wipe itself
         # from ``elapsed`` (see :func:`startup_sweep_count`).
         return True, elapsed >= STARTUP_SWEEP_SECONDS
+    if event in (Event.AP_ENABLED, Event.AP_DISABLED):
+        period = DETECT_ON + DETECT_OFF
+        if elapsed >= period * AP_FLASHES:
+            return False, True
+        return (elapsed % period) < DETECT_ON, False
     return False, True  # unknown -> nothing to play
 
 

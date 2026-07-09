@@ -37,6 +37,12 @@ def test_build_view_ready_hides_progress():
     assert v.source.present is False  # no storage yet
 
 
+def test_build_view_reads_ap_status():
+    assert build_view({"phase": "ready", "wifi_ap": True}).ap_active is True
+    assert build_view({"phase": "ready", "wifi_ap": False}).ap_active is False
+    assert build_view({"phase": "ready"}).ap_active is False  # absent -> off
+
+
 def test_build_view_extracts_detected_devices():
     v = build_view(
         {

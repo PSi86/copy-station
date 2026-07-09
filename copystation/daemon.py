@@ -179,7 +179,7 @@ def perform_transfer(
     return dest
 
 
-def _maybe_start_web(state: StationState, config: Config) -> bool:
+def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
     """Start the web interface if enabled. Returns True if it was started."""
     web_cfg = config.get("web", {})
     if not web_cfg.get("enabled"):
@@ -187,18 +187,63 @@ def _maybe_start_web(state: StationState, config: Config) -> bool:
     try:
         from .web import start_web_server
 
-        start_web_server(state, web_cfg.get("host", "0.0.0.0"), int(web_cfg.get("port", 8080)))
+        browse, transcode = _build_web_features(hub, config)
+        start_web_server(
+            hub.state,
+            web_cfg.get("host", "0.0.0.0"),
+            int(web_cfg.get("port", 8080)),
+            config=config,
+            browse=browse,
+            transcode=transcode,
+        )
         return True
     except Exception as exc:
         _LOG.warning("Web interface could not be started: %s", exc)
         return False
 
 
+def _build_web_features(hub: StatusHub, config: Config):
+    """Construct the optional file-browser and transcode managers.
+
+    Each is best-effort: a missing dependency (pyudev, ffmpeg) or a disabled
+    feature yields ``None``, and the web app simply hides that panel. Never lets
+    an optional feature stop the (status) web interface from coming up.
+
+    Returns ``(browse, transcode)`` where ``browse`` is passed to the web app
+    only to expose the file endpoints -- it is ``None`` unless the file browser
+    itself is enabled, even when transcoding (which needs its own mount access)
+    is on.
+    """
+    files_enabled = (config.get("web", {}) or {}).get("files", {}).get("enabled", True)
+    transcode_enabled = bool((config.get("transcode", {}) or {}).get("enabled"))
+
+    browse = None
+    if files_enabled or transcode_enabled:
+        try:
+            from .mounts import BrowseManager
+
+            browse = BrowseManager(config)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("File browser/mounts unavailable: %s", exc)
+
+    transcode = None
+    if transcode_enabled and browse is not None:
+        try:
+            from .transcode import TranscodeManager
+
+            transcode = TranscodeManager(config, hub, browse)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("Transcoding unavailable: %s", exc)
+
+    # Only expose the file endpoints when the browser itself is enabled.
+    return (browse if files_enabled else None), transcode
+
+
 def run_simulation(args: argparse.Namespace, config: Config) -> int:
     """Run a transfer with local folders (development/test)."""
     state = StationState()
     hub = StatusHub(state, build_indicator(config, state=state))
-    web_running = _maybe_start_web(state, config)
+    web_running = _maybe_start_web(hub, config)
 
     source = Path(args.source)
     target = Path(args.target)
@@ -235,12 +280,101 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     return rc
 
 
-def _maybe_start_buttons(config: Config) -> list:
-    """Start the optional GPIO user buttons. Returns them (possibly empty)."""
+def _maybe_start_wifi_ap(config: Config) -> bool:
+    """Bring up the optional WLAN access point (NetworkManager). Best-effort."""
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    if not ap_cfg.get("enabled"):
+        return False
+    try:
+        from .wifi_ap import start_ap
+
+        return start_ap(ap_cfg)
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("WiFi AP could not be started: %s", exc)
+        return False
+
+
+def _maybe_start_captive_portal(config: Config):
+    """Set up the optional captive portal (DNS hijack + port-80 redirect).
+
+    Returns the running :class:`CaptivePortal` or ``None``. The DNS drop-in is
+    written before the AP is raised (so NetworkManager's shared dnsmasq reads it),
+    and is removed again when the feature is disabled so stale config never
+    lingers. Best-effort: any failure is logged and the AP still works.
+    """
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    try:
+        from .captive_portal import remove_dnsmasq_hijack, write_dnsmasq_hijack, CaptivePortal
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("Captive portal module unavailable: %s", exc)
+        return None
+
+    if not ap_cfg.get("captive_portal"):
+        remove_dnsmasq_hijack()  # clean up if it was enabled before
+        return None
+
+    web_cfg = config.get("web", {}) or {}
+    if not web_cfg.get("enabled"):
+        _LOG.warning("captive_portal is set but web.enabled is false -- no page to redirect to.")
+        remove_dnsmasq_hijack()
+        return None
+
+    try:
+        ip = str(ap_cfg.get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+        write_dnsmasq_hijack(ip)
+        portal = CaptivePortal(ip, int(web_cfg.get("port", 8080)),
+                               int(ap_cfg.get("captive_portal_port", 80)))
+        portal.start()
+        return portal
+    except Exception as exc:
+        _LOG.warning("Captive portal could not be started: %s", exc)
+        return None
+
+
+def _wifi_ap_bound_to_button(config: Config) -> bool:
+    """True if any enabled user button binds the ``wifi_ap`` toggle action."""
+    for entry in (config.get("buttons") or {}).values():
+        if not (entry or {}).get("enabled"):
+            continue
+        actions = (entry or {}).get("actions") or {}
+        if any(v == "wifi_ap" for v in actions.values()):
+            return True
+    return False
+
+
+def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
+    """Warn about the classic 'AP up but web UI refused' misconfiguration.
+
+    The AP only serves the web interface if the web interface is actually
+    enabled: without it, ``http://<ap-ip>:<port>/`` is refused (nothing listens).
+    The AP and web are independent flags, so a common setup mistake is enabling
+    the AP (or binding it to a button) while leaving ``web.enabled`` off. Also log
+    the exact URL when both are up, so it is easy to find in the journal.
+    """
+    ap_usable = bool((config.get("wifi_ap", {}) or {}).get("enabled")) or _wifi_ap_bound_to_button(config)
+    web_cfg = config.get("web", {}) or {}
+    if ap_usable and not web_cfg.get("enabled"):
+        _LOG.warning(
+            "WiFi AP is configured but web.enabled is false -- the AP has no web UI "
+            "to serve, so http://<ap-ip>:%s/ will be refused. Set web.enabled: true "
+            "to reach the interface over the access point.",
+            web_cfg.get("port", 8080),
+        )
+    if web_up:
+        ip = str((config.get("wifi_ap", {}) or {}).get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+        _LOG.info("Web interface over the AP: http://%s:%s/", ip, web_cfg.get("port", 8080))
+
+
+def _maybe_start_buttons(config: Config, hub: StatusHub) -> list:
+    """Start the optional GPIO user buttons. Returns them (possibly empty).
+
+    ``hub`` is passed through so a ``wifi_ap`` button action can update the
+    display status and fire the WS2812 AP blink code.
+    """
     try:
         from .buttons import build_buttons
 
-        buttons = build_buttons(config)
+        buttons = build_buttons(config, hub=hub)
         for button in buttons:
             button.start()
             _LOG.info("User button %s active", button.name)
@@ -265,8 +399,16 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
-    _maybe_start_web(state, config)
-    buttons = _maybe_start_buttons(config)
+    # Start the web server first so it is already listening (on 0.0.0.0, all
+    # interfaces) before the slower AP bring-up. The captive-portal DNS drop-in is
+    # written before the AP is raised, so NetworkManager's dnsmasq reads it. Then
+    # raise the AP.
+    web_up = _maybe_start_web(hub, config)
+    portal = _maybe_start_captive_portal(config)
+    if _maybe_start_wifi_ap(config):
+        hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started
+    _check_ap_web_reachability(config, web_up)
+    buttons = _maybe_start_buttons(config, hub)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
     try:
@@ -276,6 +418,8 @@ def run_daemon(config: Config) -> int:
     finally:
         for button in buttons:
             button.close()
+        if portal is not None:
+            portal.stop()
         hub.close()  # switches every LED off
     return 0
 

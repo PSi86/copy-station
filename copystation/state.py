@@ -47,6 +47,13 @@ class StationState:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Serialises the two *writers* that must never touch the same removable
+        # volume at once: a copy evaluation (DeviceWatcher._evaluate) and a video
+        # transcode job. Both run as threads in the daemon process, so an
+        # in-process lock is enough -- no IPC. Read-only web browsing does NOT
+        # take this lock (a read-only mount is safe next to a live writer).
+        # Distinct from ``_lock`` (which only guards the snapshot fields below).
+        self.operation_lock = threading.Lock()
         self._phase: State = State.READY
         self._progress: float = 0.0  # 0.0 .. 1.0
         self._bytes_done: int = 0
@@ -60,6 +67,11 @@ class StationState:
         self._devices: list[dict[str, Any]] = []
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._event_seq = 0
+        # Whether the WLAN access point is currently up. Independent of the copy
+        # cycle (survives reset_to_ready), so the display keeps showing it.
+        self._ap_active = False
+        # Current video transcode (overrides the copy status while active).
+        self._transcode: dict[str, Any] = {"active": False}
 
     # ----- mutators (single writer) --------------------------------------------
 
@@ -109,6 +121,47 @@ class StationState:
         with self._lock:
             self._devices = list(devices)
 
+    def set_ap_active(self, active: bool) -> None:
+        """Record whether the WLAN access point is up (shown on display + web)."""
+        with self._lock:
+            self._ap_active = bool(active)
+
+    def begin_transcode(self, name: str) -> None:
+        """Mark a transcode as running (phase TRANSCODING overrides everything)."""
+        with self._lock:
+            self._transcode = {
+                "active": True,
+                "name": name,
+                "percent": 0.0,
+                "encoder": "",
+                "hw": False,
+                "input_size": 0,
+                "fps": None,
+                "started": time.monotonic(),
+            }
+            self._phase = State.TRANSCODING
+
+    def update_transcode(self, fraction: float, encoder: str = "", hw: bool = False) -> None:
+        with self._lock:
+            if self._transcode.get("active"):
+                self._transcode["percent"] = min(100.0, max(0.0, fraction * 100.0))
+                if encoder:
+                    self._transcode["encoder"] = encoder
+                    self._transcode["hw"] = hw
+
+    def set_transcode_meta(self, input_size: Optional[int] = None, fps: Optional[float] = None) -> None:
+        """Record the input size / live fps of the running transcode."""
+        with self._lock:
+            if self._transcode.get("active"):
+                if input_size is not None:
+                    self._transcode["input_size"] = int(input_size)
+                if fps is not None:
+                    self._transcode["fps"] = float(fps)
+
+    def finish_transcode(self) -> None:
+        with self._lock:
+            self._transcode = {"active": False}
+
     def log_event(self, message: str, level: str = "info") -> None:
         """Append a timestamped entry to the action log (kept across cycles)."""
         with self._lock:
@@ -142,6 +195,12 @@ class StationState:
     def phase(self) -> State:
         with self._lock:
             return self._phase
+
+    @property
+    def ap_active(self) -> bool:
+        """Last known WLAN AP state (used to flip it instantly on a button press)."""
+        with self._lock:
+            return self._ap_active
 
     @property
     def progress(self) -> float:
@@ -181,8 +240,33 @@ class StationState:
                 "source": self._source.as_dict(),
                 "target": self._target.as_dict(),
                 "devices": list(self._devices),
+                "wifi_ap": self._ap_active,
+                "transcode": self._transcode_snapshot_locked(),
                 "events": list(reversed(self._events)),  # newest first
             }
+
+    def _transcode_snapshot_locked(self) -> dict[str, Any]:
+        """Transcode block for the snapshot (elapsed/ETA from percent + wall clock)."""
+        tr = self._transcode
+        if not tr.get("active"):
+            return {"active": False}
+        percent = float(tr.get("percent", 0.0))
+        started = tr.get("started")
+        elapsed = (time.monotonic() - started) if started is not None else None
+        eta = None
+        if elapsed is not None and percent > 0:
+            eta = max(0.0, elapsed * (100.0 - percent) / percent)
+        return {
+            "active": True,
+            "name": tr.get("name", ""),
+            "percent": round(percent, 1),
+            "encoder": tr.get("encoder", ""),
+            "hw": bool(tr.get("hw", False)),
+            "input_size": int(tr.get("input_size", 0) or 0),
+            "fps": tr.get("fps"),
+            "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
 
 
 class StatusHub:
@@ -239,6 +323,29 @@ class StatusHub:
 
     def set_devices(self, devices: list[dict]) -> None:
         self._state.set_devices(devices)
+
+    def set_ap_active(self, active: bool) -> None:
+        self._state.set_ap_active(active)
+
+    def begin_transcode(self, name: str) -> None:
+        """Enter the TRANSCODING phase: overrides the copy status on every backend."""
+        self._state.begin_transcode(name)
+        self._indicator.set_state(State.TRANSCODING)
+        self._indicator.set_progress(0.0)
+
+    def set_transcode_progress(self, fraction: float, encoder: str = "", hw: bool = False) -> None:
+        self._state.update_transcode(fraction, encoder, hw)
+        self._indicator.set_progress(fraction)
+
+    def finish_transcode(self, restore_phase: State) -> None:
+        """Leave the transcode phase and restore whatever phase was showing before."""
+        self._state.finish_transcode()
+        self.set_phase(restore_phase)
+
+    def fail_transcode(self, message: str) -> None:
+        """End a failed transcode by showing the error on every backend."""
+        self._state.finish_transcode()
+        self.set_error(message)
 
     def log_event(self, message: str, level: str = "info") -> None:
         self._state.log_event(message, level)

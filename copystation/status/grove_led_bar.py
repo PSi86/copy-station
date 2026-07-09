@@ -156,7 +156,9 @@ class GroveLedBarBackend(StatusIndicator):
                         self._fill_shown_at = now
                     fill_elapsed = now - self._fill_shown_at
 
-            if phase is State.COPYING:
+            if phase in (State.COPYING, State.TRANSCODING):
+                # A blinking progress bar for a copy or a transcode (the monochrome
+                # bar shows the same fill for both; a transcode overrides the copy).
                 # At least one segment so 0 % is not a dark bar that reads as a
                 # pause before the fill grows.
                 count = max(1, segments_for(progress))
