@@ -61,6 +61,32 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def mem_available_bytes(path: str = "/proc/meminfo") -> int:
+    """Free RAM in bytes from ``MemAvailable`` in /proc/meminfo (0 if unknown)."""
+    try:
+        for line in Path(path).read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024  # kB -> bytes
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def ram_budget(free_bytes: int, fraction: float) -> int:
+    """The RAM the buffer may use: ``fraction`` of the free RAM (>= 0)."""
+    return max(0, int(free_bytes * float(fraction)))
+
+
+def fits_in_ram(input_size: int, budget: int) -> bool:
+    """True if input plus an equal-sized output headroom fit the RAM budget.
+
+    A downscale/transcode output is normally no larger than the input, so
+    reserving ``2 * input_size`` keeps the tmpfs from overflowing in the common
+    case; larger inputs stream on the card instead.
+    """
+    return input_size > 0 and budget > 0 and 2 * input_size <= budget
+
+
 def sanitize_component(name: str) -> str:
     """Reduce a filename to a safe single path component."""
     base = Path(str(name)).name  # strip any directory part
@@ -131,6 +157,9 @@ class TranscodeManager:
         self._presets = list(tc.get("presets", []))
         self._acceleration = str(tc.get("acceleration", "auto"))
         self._fallback_to_cpu = bool(tc.get("fallback_to_cpu", True))
+        self._ram_buffer = bool(tc.get("ram_buffer", True))
+        self._ram_buffer_fraction = float(tc.get("ram_buffer_fraction", 2 / 3))
+        self._work_base = "/run/copystation/transcode-work"
         self._available = ffmpeg_available()
         # Detect the board and probe which encoders ffmpeg actually has, once at
         # startup, so hardware acceleration can be picked per job without re-probing.
@@ -304,7 +333,7 @@ class TranscodeManager:
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
-                    self._encode_with_fallback(job_id, src, dst, self._preset(preset_id))
+                    self._encode(job_id, src, dst, self._preset(preset_id))
                     subprocess.run(["sync"], check=False)
                 finally:
                     self._browse.umount_rw(output_device)
@@ -330,6 +359,70 @@ class TranscodeManager:
                 job["status"] = "done"
                 job["percent"] = 100
         _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
+
+    def _ram_budget(self) -> int:
+        """RAM the buffer may use this job (0 disables buffering)."""
+        if not self._ram_buffer:
+            return 0
+        return ram_budget(mem_available_bytes(), self._ram_buffer_fraction)
+
+    def _encode(self, job_id: int, src: Path, final_dst: Path, preset: dict) -> None:
+        """Encode ``src`` to ``final_dst``, buffering through RAM when it fits.
+
+        When the input (plus output headroom) fits the RAM budget, the input is
+        copied once into a size-capped tmpfs, the encode runs entirely in RAM, and
+        the result is copied back to the card in one go -- so the card is not read
+        and written at the same time. Otherwise it encodes straight to the card.
+        """
+        budget = self._ram_budget()
+        try:
+            input_size = src.stat().st_size
+        except OSError:
+            input_size = 0
+
+        if not fits_in_ram(input_size, budget):
+            if budget > 0 and input_size > 0:
+                _LOG.info(
+                    "Transcode #%d: input %d MB does not fit the RAM buffer "
+                    "(budget %d MB) -- encoding directly on the card.",
+                    job_id, input_size // (1024 * 1024), budget // (1024 * 1024),
+                )
+            self._encode_with_fallback(job_id, src, final_dst, preset)
+            return
+
+        work = Path(self._work_base) / f"job{job_id}"
+        self._mount_tmpfs(work, budget)
+        try:
+            tmp_in = work / ("input" + src.suffix)
+            _LOG.info(
+                "Transcode #%d: buffering through RAM (tmpfs cap %d MB, input %d MB)",
+                job_id, budget // (1024 * 1024), input_size // (1024 * 1024),
+            )
+            shutil.copy2(src, tmp_in)                 # bulk read: card -> RAM
+            tmp_out = work / final_dst.name
+            self._encode_with_fallback(job_id, tmp_in, tmp_out, preset)
+            shutil.copy2(tmp_out, final_dst)          # bulk write: RAM -> card
+        finally:
+            self._umount_tmpfs(work)
+
+    def _mount_tmpfs(self, path: Path, size_bytes: int) -> None:
+        """Mount a size-capped tmpfs at ``path`` (isolated so tests can bypass it)."""
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                ["mount", "-t", "tmpfs", "-o",
+                 f"size={size_bytes},nosuid,nodev,noexec", "tmpfs", str(path)],
+                capture_output=True, text=True, check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise TranscodeError(f"could not mount RAM buffer: {exc}") from exc
+
+    def _umount_tmpfs(self, path: Path) -> None:
+        subprocess.run(["umount", str(path)], capture_output=True, check=False)
+        try:
+            path.rmdir()
+        except OSError:  # pragma: no cover - best effort
+            pass
 
     def _encode_with_fallback(self, job_id: int, src: Path, dst: Path, preset: dict) -> None:
         """Try each candidate encoder in turn; fall back to the next on failure.

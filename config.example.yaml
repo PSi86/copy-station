@@ -185,6 +185,13 @@ transcode:
   # hardware encoder fails at runtime.
   acceleration: auto        # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
   fallback_to_cpu: true
+  # Buffer the transcode through RAM (a tmpfs) instead of reading and writing the
+  # same card at once -- avoids the constant read/write seeking that is slow and
+  # wears an SD card. Used only when the input (with output headroom) fits within
+  # `ram_buffer_fraction` of the FREE RAM; larger files stream on the card. The
+  # tmpfs is size-capped, so it never exceeds that fraction of free RAM.
+  ram_buffer: true
+  ram_buffer_fraction: 0.66  # use up to ~two thirds of the free RAM
   # Selectable presets. `height` downscales to that many lines keeping the aspect
   # ratio (width auto, even); `height: 0` keeps the source resolution. `vcodec`
   # is the software codec and picks the family (h264/hevc); `crf` drives software

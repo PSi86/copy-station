@@ -180,6 +180,16 @@ DEFAULTS: dict[str, Any] = {
         "acceleration": "auto",
         # Fall back to CPU encoding if the hardware encoder fails at runtime.
         "fallback_to_cpu": True,
+        # Buffer the transcode through RAM (a tmpfs) instead of reading and
+        # writing the same card at once: the input is read once into RAM, the
+        # encode runs entirely in RAM, and the result is written back in one go.
+        # This avoids the constant read/write seeking that is slow and wears an SD
+        # card. Used only when the input fits (with room for the output) within
+        # ``ram_buffer_fraction`` of the *free* RAM; otherwise it streams on the
+        # card as before. The tmpfs is size-capped, so it never exceeds that
+        # fraction of free RAM.
+        "ram_buffer": True,
+        "ram_buffer_fraction": 2 / 3,  # use up to two thirds of the free RAM
         # Selectable presets (shown in the web UI). ``height`` downscales while
         # keeping the aspect ratio (width auto, even); ``height: 0`` keeps the
         # source resolution. Argument construction lives in

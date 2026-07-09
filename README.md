@@ -132,8 +132,20 @@ boards differ a lot in what they can encode in hardware:
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
 the same card at once -- while a job runs, device detection simply pauses until
-it finishes. Jobs run one at a time and can be canceled from the UI. Without
+it finishes. Jobs run one at a time and can be **canceled from the UI** (the ✕ on
+a queued/running row), which stops ffmpeg and removes the partial output. Without
 ffmpeg the feature is a no-op and the endpoint returns a clear error.
+
+**RAM buffering.** When the input and output are on the **same card** (the common
+case -- a clip transcoded into that card's `Transcoded/` folder), reading the
+input and writing the output at the same time makes the SD card seek constantly,
+which is slow and wears it. With `transcode.ram_buffer` on (default), the station
+instead stages the job through **RAM**: it reads the input once into a
+size-capped `tmpfs`, runs the whole encode in RAM, and writes the result back to
+the card in one go -- so during the encode the card only reads, and the write is a
+single bulk copy at the end. The tmpfs is capped at `ram_buffer_fraction` of the
+**free** RAM (default ~two thirds), so it never fills memory; a file too large to
+fit falls back to streaming directly on the card.
 
 ## WiFi access point (optional)
 
