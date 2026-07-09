@@ -115,7 +115,15 @@ boards differ a lot in what they can encode in hardware:
 |-------|-----------------|-------------|
 | Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
 | Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
-| Radxa Cubie A7S | H.264 / H.265 via the Allwinner Cedar VPU (`h264_v4l2m2m` / `hevc_v4l2m2m`) | hardware when ffmpeg exposes it |
+| Radxa Cubie A7S | H.264 4K@30 in the SoC, but **only via GStreamer OpenMAX** (`omxh264videoenc`) -- **not** exposed to ffmpeg | CPU (`libx264`/`libx265`) |
+
+> **Cubie A7S note.** The Allwinner A733 *does* have a hardware H.264 encoder
+> (up to 4K@30; H.265 encode is not exposed), but on the current Radxa images it
+> is reachable **only through GStreamer's OpenMAX element `omxh264videoenc`**, not
+> through ffmpeg's V4L2 M2M. So this ffmpeg-based transcoder falls back to the CPU
+> on the Cubie (which is expected, and why `auto` resolves to CPU there). Check
+> what your image exposes with `gst-inspect-1.0 | grep omx`. A GStreamer
+> hardware-encode path is a possible future addition.
 
 * `acceleration: auto` (default) uses the board's hardware encoder **when the
   installed ffmpeg actually has it**, otherwise software.
@@ -151,7 +159,25 @@ size-capped `tmpfs`, runs the whole encode in RAM, and writes the result back to
 the card in one go -- so during the encode the card only reads, and the write is a
 single bulk copy at the end. The tmpfs is capped at `ram_buffer_fraction` of the
 **free** RAM (default ~two thirds), so it never fills memory; a file too large to
-fit falls back to streaming directly on the card.
+fit falls back to streaming directly on the card. The web job row tags a
+RAM-buffered job with `RAM`, and the journal logs `buffering through RAM ...`.
+
+**Trade-off / how to check it.** RAM buffering helps when the *card I/O* is the
+bottleneck (interleaved read+write seeking stalls the encode). When the *encode*
+is the bottleneck instead -- e.g. **software encoding on the Cubie A7S** -- the
+extra bulk input/output copies are serial time that does **not** overlap the
+encode, so the total can be a little *slower*. Measure it on your board and pick
+what fits:
+
+* Confirm RAM is actually used: while a job runs, `mount | grep transcode-work`
+  (a `tmpfs` appears) and `free -m` (used RAM rises by roughly the file size);
+  `journalctl -u copystation | grep RAM`.
+* Confirm the card is read/written less during the encode: `iostat -dx 2 /dev/sdb`
+  (or diff `/sys/block/sdb/stat` before/after) -- with buffering the card is
+  near-idle during the encode and busy only at the start/end.
+* Compare wall-clock: run the same job with `ram_buffer: true` vs `false`
+  (restart the service between) and compare the job's elapsed time. Set
+  `ram_buffer: false` if streaming is faster for your card + codec.
 
 ## WiFi access point (optional)
 

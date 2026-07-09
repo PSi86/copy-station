@@ -283,6 +283,8 @@ class TranscodeManager:
                 "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
                 "hw": False,           # True if a hardware encoder was used
                 "input_size": None,    # source file size in bytes
+                "output_size": None,   # transcoded file size in bytes (once done)
+                "ram_buffered": False, # True if staged through a RAM tmpfs
                 "fps": None,           # live encode rate (frames/second)
                 "speed": None,         # ffmpeg speed relative to realtime (e.g. "2.5x")
                 "error": None,
@@ -384,6 +386,10 @@ class TranscodeManager:
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
                     self._encode(job_id, src, dst, self._preset(preset_id))
+                    try:
+                        self._set(job_id, output_size=dst.stat().st_size)
+                    except OSError:  # pragma: no cover - defensive
+                        pass
                     subprocess.run(["sync"], check=False)
                 finally:
                     self._browse.umount_rw(output_device)
@@ -432,8 +438,11 @@ class TranscodeManager:
                     "(budget %d MB) -- encoding directly on the card.",
                     job_id, input_size // (1024 * 1024), budget // (1024 * 1024),
                 )
+            self._set(job_id, ram_buffered=False)
             self._encode_with_fallback(job_id, src, final_dst, preset)
             return
+
+        self._set(job_id, ram_buffered=True)
 
         work = Path(self._work_base) / f"job{job_id}"
         self._mount_tmpfs(work, budget)

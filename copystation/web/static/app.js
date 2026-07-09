@@ -283,12 +283,20 @@ function renderJobs(jobs) {
       let stats = "";
       if (j.status === "running") {
         const parts = [`${j.percent || 0}%`];
-        if (j.input_size) parts.push(fmtBytes(j.input_size));
+        if (j.input_size) parts.push(fmtBytes(j.input_size)); // source size
         parts.push(`elapsed ${fmtDuration(j.elapsed_seconds)}`);
         parts.push(`ETA ${fmtDuration(j.eta_seconds)}`);
         if (j.fps) parts.push(`${Math.round(j.fps)} fps`);
         if (j.speed) parts.push(escapeHtml(j.speed));
+        if (j.ram_buffered) parts.push("RAM");
         stats = `<div class="muted jobstats">${parts.join(" · ")}</div>`;
+      } else if (j.status === "done") {
+        // Show the TRANSCODED file's size (with the source size for context).
+        const parts = [];
+        if (j.output_size) parts.push(fmtBytes(j.output_size));
+        if (j.input_size) parts.push(`from ${fmtBytes(j.input_size)}`);
+        if (j.ram_buffered) parts.push("RAM");
+        if (parts.length) stats = `<div class="muted jobstats">${parts.join(" · ")}</div>`;
       } else if (j.input_size) {
         stats = `<div class="muted jobstats">${fmtBytes(j.input_size)}</div>`;
       }

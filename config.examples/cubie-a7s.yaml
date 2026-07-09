@@ -129,12 +129,13 @@ wifi_ap:
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by
 # scripts/install.sh). Off by default; see config.example.yaml for presets.
-# `acceleration: auto` uses the Allwinner Cedar VPU (h264_v4l2m2m / hevc_v4l2m2m)
-# when the installed ffmpeg exposes it, and falls back to the CPU otherwise.
+# NOTE: the A733 HW H.264 encoder is only reachable via GStreamer OpenMAX
+# (omxh264videoenc), NOT ffmpeg -- so `acceleration: auto` encodes on the CPU
+# here. `ram_buffer` may be slower for CPU encoding; test it (see README).
 transcode:
   enabled: false
   output_dirname: Transcoded
-  acceleration: auto      # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
+  acceleration: auto      # auto | cpu | <ffmpeg encoder>; Cubie A7S -> CPU
   fallback_to_cpu: true
 
 # Optional GPIO user button (set the line from `gpioinfo`). Shutdown gesture

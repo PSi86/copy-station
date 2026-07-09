@@ -217,6 +217,9 @@ def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
     assert result["percent"] == 100
     assert result["output_path"] == "Transcoded/clip_720p-h264.mp4"
     assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"encoded"
+    # The done job reports the TRANSCODED file's size (not the source's).
+    assert result["output_size"] == len(b"encoded")
+    assert result["ram_buffered"] is False  # tmpfs not used on the dev machine
     assert browse.umounted_rw == ["sdb1"]      # rw output volume released
     # The read-only browse mount is dropped BEFORE the read-write mount (the fix
     # for the same-device ro+rw superblock clash that made the output read-only).
