@@ -74,6 +74,35 @@ web:
   enabled: true
   host: 0.0.0.0
   port: 8080
+  # Optional HTTP Basic auth for the whole interface (off by default). See
+  # config.example.yaml for details. Sensible once files are reachable over the AP.
+  auth:
+    enabled: false
+    username: admin
+    password: ""
+  # Read-only browsing + download of the ATTACHED USB storage (never the OS card).
+  files:
+    enabled: true
+    allow_download: true
+
+# Optional WLAN access point (NetworkManager). The Pi has on-board Wi-Fi, so the
+# station can host its own network and the web UI is then reachable at
+# http://10.42.0.1:8080/. WPA2 needs a password of at least 8 characters. See
+# config.example.yaml for all options; toggle it from a button via `wifi_ap`.
+wifi_ap:
+  enabled: false
+  ssid: Copy_Station
+  password: ""            # >= 8 chars for WPA2; empty -> AP stays down
+  band: bg
+  channel: 6
+  ipv4_address: 10.42.0.1/24
+
+# Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
+# chosen target volume, also downloadable). Needs ffmpeg (installed by
+# scripts/install.sh). Off by default; see config.example.yaml for presets.
+transcode:
+  enabled: false
+  output_dirname: Transcoded
 
 # Optional GPIO user button. Shutdown gesture (DJI style): short click, release,
 # then press and HOLD 3 s -- a plain long hold alone does nothing (intent check).
@@ -97,8 +126,8 @@ buttons:
       max_gap_seconds: 1.0
       hold_seconds: 3.0
     actions:
-      hold: poweroff      # poweroff | reboot | none | {command: "..."}
-      single_click: none
+      hold: poweroff      # poweroff | reboot | wifi_ap | none | {command: "..."}
+      single_click: none  # e.g. wifi_ap to toggle the access point
       double_click: none
       triple_click: none
 

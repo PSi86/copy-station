@@ -10,6 +10,9 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 
 * [Flow](#flow)
 * [Web interface](#web-interface-optional)
+  * [File access & download](#file-access--download-optional)
+  * [Video transcoding](#video-transcoding-optional)
+* [WiFi access point](#wifi-access-point-optional)
 * [E-Paper display](#e-paper-display-optional)
 * [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
 * [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
@@ -69,6 +72,75 @@ runtime -- no per-interface rebinding.
 The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API
 docs). Open `http://<device-ip>:8080/`.
+
+**Access control (optional).** Once file download or the WiFi AP are in play you
+may want the interface behind a password. Set `web.auth.enabled: true` with a
+`username`/`password` and the whole interface (status, files, transcode) is
+guarded by HTTP Basic auth. It is off by default (unchanged behaviour), and
+**fail-safe**: enabling it with an empty password rejects every request rather
+than leaving it open.
+
+### File access & download (optional)
+
+Set `web.files.enabled: true` (default on when the web interface is enabled) to
+browse and download the footage of the **attached mass storage** directly from
+the web UI -- pick a volume, walk its folders, download a file. Only the
+**USB volumes are ever exposed; the board's OS card is never listed or
+reachable** (the same OS-exclusion the copy logic uses). Access is **read-only**:
+the browser mounts each volume read-only under a separate mount base
+(`web.files.browse_base`), so it can never modify or corrupt a card, and releases
+it again after `idle_unmount_seconds` of inactivity. Downloads are streamed;
+path traversal (`..`, symlinks) is refused. Set `web.files.allow_download: false`
+to allow browsing but not downloading.
+
+### Video transcoding (optional)
+
+Set `transcode.enabled: true` (and install **ffmpeg**, which `scripts/install.sh`
+pulls in) to re-encode / downscale a video from the web UI: browse to a clip in
+**Files**, press the **⚙** button, pick a preset and an output volume. The job
+runs in the background with a live progress bar; the result is written to a
+`Transcoded/` folder (`transcode.output_dirname`) on the **target volume**
+(read-write) and is downloadable through the file browser.
+
+Presets are configurable (`transcode.presets`): each sets a target `height`
+(downscale keeping the aspect ratio; `0` keeps the source resolution), a video
+codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
+default set offers 1080p/720p H.264 and 720p H.265.
+
+A transcode and a copy are **mutually exclusive**: a running job holds an
+in-process lock the copy daemon also takes, so the two never write to (or mount)
+the same card at once -- while a job runs, device detection simply pauses until
+it finishes. Jobs run one at a time and can be canceled from the UI. Without
+ffmpeg the feature is a no-op and the endpoint returns a clear error.
+
+## WiFi access point (optional)
+
+Set `wifi_ap.enabled: true` to have the station host its **own WLAN** in the
+field -- handy when there is no existing network -- with the web interface
+reachable over it. It is managed through **NetworkManager** (`nmcli`): on start
+the daemon (re)creates a hotspot connection profile from the config and brings it
+up. `ipv4.method shared` makes NetworkManager run **DHCP + NAT** on the AP subnet
+automatically, so a device that associates gets an address and can open
+`http://<ipv4_address>:<web.port>/` (default `http://10.42.0.1:8080/`).
+
+```yaml
+wifi_ap:
+  enabled: true
+  ssid: Copy_Station
+  password: "change-me-8+"   # >= 8 chars for WPA2; empty leaves the AP down
+  band: bg                   # bg (2.4 GHz) | a (5 GHz)
+  channel: 6
+  ipv4_address: 10.42.0.1/24
+  ifname: ""                 # empty -> NetworkManager picks the Wi-Fi interface
+```
+
+WPA2 requires a password of **at least 8 characters**; a shorter or empty one
+leaves the AP down (logged). It needs **NetworkManager** -- the default network
+stack on Raspberry Pi OS Bookworm and current Radxa images. The installer is not
+allowed to force-install it (it can clash with an existing `dhcpcd`/`networkd`
+setup), so if `nmcli` is missing it prints a note; install `network-manager` by
+hand to use the AP. The AP can also be **toggled from a user button** via the
+`wifi_ap` action (see below). Verify with `nmcli connection show --active`.
 
 ## E-Paper display (optional)
 
@@ -251,7 +323,8 @@ the hold is only accepted as the **first** press after activation
 thresholds cancels the sequence. An activation click with nothing after it
 simply times out.
 
-Each action is `poweroff`, `reboot`, `none`, or an arbitrary shell command:
+Each action is `poweroff`, `reboot`, `wifi_ap` (toggle the WLAN access point),
+`none`, or an arbitrary shell command:
 
 ```yaml
 buttons:
@@ -261,8 +334,8 @@ buttons:
     line: 3
     actions:
       hold: poweroff                          # C _ H   -> clean shutdown
-      single_click: { command: "rfkill toggle wlan" }   # C _ C
-      double_click: none
+      single_click: wifi_ap                   # C _ C   -> toggle the WiFi AP
+      double_click: { command: "rfkill toggle wlan" } # C _ C _ C
       triple_click: none
 ```
 
@@ -386,7 +459,8 @@ sudo bash scripts/install.sh
 The installer:
 
 * installs dependencies (`rsync`, `python3-pyudev`, `python3-libgpiod`,
-  `python3-spidev`, the `gpiod` CLI tools, exFAT support),
+  `python3-spidev`, the `gpiod` CLI tools, exFAT support, and `ffmpeg` for the
+  optional video transcoding),
 * copies the code to `/opt/copystation` and creates a venv with FastAPI/uvicorn
   (PEP 668-safe via `--system-site-packages`),
 * **detects the board** and writes `/etc/copystation/config.yaml` from the
@@ -497,7 +571,8 @@ It stops and disables the service, removes the systemd unit and `/opt/copystatio
 and unmounts anything left under `/run/copystation`. Your `/etc/copystation/config.yaml`
 is kept unless you pass `--purge`. The apt packages the installer pulled in
 (`rsync`, `python3-pyudev`, `python3-libgpiod`, `python3-spidev`, `gpiod`, exFAT
-tools) are left in place -- remove them by hand if nothing else needs them.
+tools, `ffmpeg`) are left in place -- remove them by hand if nothing else needs
+them.
 
 ## Source/target detection
 
