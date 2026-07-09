@@ -107,6 +107,28 @@ Presets are configurable (`transcode.presets`): each sets a target `height`
 codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
 default set offers 1080p/720p H.264 and 720p H.265.
 
+**Hardware acceleration.** `transcode.acceleration` controls the encoder, and the
+station picks the best one for the board automatically -- the three supported
+boards differ a lot in what they can encode in hardware:
+
+| Board | Hardware encode | `auto` uses |
+|-------|-----------------|-------------|
+| Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
+| Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
+| Radxa Cubie A7S | H.264 / H.265 via the Allwinner Cedar VPU (`h264_v4l2m2m` / `hevc_v4l2m2m`) | hardware when ffmpeg exposes it |
+
+* `acceleration: auto` (default) uses the board's hardware encoder **when the
+  installed ffmpeg actually has it**, otherwise software.
+* `acceleration: cpu` forces software; a specific ffmpeg encoder name (e.g.
+  `h264_v4l2m2m`) forces that one. A per-preset `accel:` overrides the global one.
+* **Automatic fallback:** if a hardware encode fails at runtime (missing device
+  node, unsupported input, driver error), the partial output is discarded and the
+  job retries with the next candidate -- ultimately the CPU -- so a job does not
+  fail just because hardware encoding is unavailable. Set `fallback_to_cpu: false`
+  to disable. Hardware (V4L2 M2M) encoders are bitrate-controlled, so they use the
+  preset's `bitrate` (or a height-based default) rather than `crf`. The job list
+  shows which encoder actually ran (e.g. `h264_v4l2m2m (hw)` or `cpu`).
+
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
 the same card at once -- while a job runs, device detection simply pauses until

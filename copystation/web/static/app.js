@@ -251,7 +251,9 @@ function renderJobs(jobs) {
   }
   el.innerHTML = jobs
     .map((j) => {
-      const label = j.filename || j.input_path || `job ${j.id}`;
+      // Raw string -- the whole label is escaped once when inserted below.
+      const enc = j.encoder ? ` · ${j.encoder}${j.hw ? " (hw)" : ""}` : "";
+      const label = (j.filename || j.input_path || `job ${j.id}`) + enc;
       let right;
       if (j.status === "running") {
         right = `<span class="muted">${j.percent || 0}%</span>`;
@@ -286,10 +288,18 @@ async function loadPresets() {
   try {
     const res = await fetch("/api/transcode", { cache: "no-store" });
     if (!res.ok) return;
-    const presets = (await res.json()).presets || [];
-    sel.innerHTML = presets
+    const data = await res.json();
+    sel.innerHTML = (data.presets || [])
       .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label || p.id)}</option>`)
       .join("");
+    const info = document.getElementById("tc-info");
+    if (info) {
+      if (data.available === false) {
+        info.textContent = "ffmpeg not installed — transcoding unavailable";
+      } else {
+        info.textContent = `board: ${data.board || "?"} · acceleration: ${data.acceleration || "auto"}`;
+      }
+    }
   } catch (e) {
     /* transient */
   }

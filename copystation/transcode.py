@@ -24,6 +24,13 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional
 
+from .encoders import (
+    Encoder,
+    available_encoders,
+    build_ffmpeg_cmd,
+    detect_board,
+    select_encoders,
+)
 from .mounts import BrowseError
 
 _LOG = logging.getLogger("copystation.transcode")
@@ -46,6 +53,10 @@ class UnknownPreset(TranscodeError):
     """The requested preset id is not configured."""
 
 
+class _Canceled(TranscodeError):
+    """Internal: the running ffmpeg was canceled -- do not fall back or retry."""
+
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -62,27 +73,6 @@ def output_name(input_name: str, preset_id: str, container: str = "mp4") -> str:
     stem = sanitize_component(Path(str(input_name)).stem)
     preset = sanitize_component(preset_id)
     return f"{stem}_{preset}.{container}"
-
-
-def build_ffmpeg_cmd(preset: dict, src: Any, dst: Any) -> List[str]:
-    """ffmpeg argument list for one transcode (pure -- no execution).
-
-    ``preset.height`` downscales to that height keeping the aspect ratio (width
-    auto, forced even via ``scale=-2:H``); ``height`` of 0/absent keeps the
-    source resolution. Progress is emitted on stdout via ``-progress pipe:1``.
-    """
-    height = int(preset.get("height", 0) or 0)
-    vcodec = str(preset.get("vcodec", "libx264"))
-    crf = preset.get("crf", 23)
-    ff_preset = str(preset.get("preset", "medium"))
-
-    cmd: List[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src)]
-    if height > 0:
-        cmd += ["-vf", f"scale=-2:{height}"]
-    cmd += ["-c:v", vcodec, "-crf", str(crf), "-preset", ff_preset]
-    cmd += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
-    cmd += ["-progress", "pipe:1", "-nostats", str(dst)]
-    return cmd
 
 
 def probe_duration(src: Any) -> Optional[float]:
@@ -139,7 +129,13 @@ class TranscodeManager:
         tc = config.get("transcode", {}) or {}
         self._output_dirname = str(tc.get("output_dirname", "Transcoded"))
         self._presets = list(tc.get("presets", []))
+        self._acceleration = str(tc.get("acceleration", "auto"))
+        self._fallback_to_cpu = bool(tc.get("fallback_to_cpu", True))
         self._available = ffmpeg_available()
+        # Detect the board and probe which encoders ffmpeg actually has, once at
+        # startup, so hardware acceleration can be picked per job without re-probing.
+        self._board = detect_board()
+        self._encoders_avail = available_encoders() if self._available else set()
         self._queue: "queue.Queue[int]" = queue.Queue()
         self._lock = threading.Lock()
         self._jobs: dict[int, dict] = {}
@@ -151,6 +147,25 @@ class TranscodeManager:
         self._stop = threading.Event()
         if not self._available:
             _LOG.warning("Transcoding enabled but ffmpeg/ffprobe not found on PATH.")
+        else:
+            _LOG.info(
+                "Transcoding ready (board=%s, acceleration=%s, fallback_to_cpu=%s)",
+                self._board, self._acceleration, self._fallback_to_cpu,
+            )
+
+    def _encoders_for(self, preset: dict) -> List[Encoder]:
+        """Ordered encoder candidates for a preset (HW first, then CPU fallback).
+
+        A per-preset ``accel`` overrides the global ``transcode.acceleration``.
+        """
+        accel = str(preset.get("accel") or self._acceleration)
+        return select_encoders(
+            preset,
+            board=self._board,
+            available=self._encoders_avail,
+            acceleration=accel,
+            fallback_to_cpu=self._fallback_to_cpu,
+        )
 
     # ----- introspection --------------------------------------------------------
 
@@ -166,6 +181,8 @@ class TranscodeManager:
         return {
             "available": self._available,
             "output_dirname": self._output_dirname,
+            "board": self._board,
+            "acceleration": self._acceleration,
             "presets": [
                 {"id": p.get("id"), "label": p.get("label", p.get("id"))}
                 for p in self._presets
@@ -202,6 +219,8 @@ class TranscodeManager:
                 "percent": 0,
                 "filename": None,
                 "output_path": None,
+                "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
+                "hw": False,           # True if a hardware encoder was used
                 "error": None,
             }
             self._jobs[job_id] = job
@@ -274,21 +293,22 @@ class TranscodeManager:
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
-                    self._run_ffmpeg(job_id, src, dst, self._preset(preset_id))
+                    self._encode_with_fallback(job_id, src, dst, self._preset(preset_id))
                     subprocess.run(["sync"], check=False)
                 finally:
                     self._browse.umount_rw(output_device)
+            except _Canceled:
+                self._set(job_id, status="canceled")
+                _LOG.info("Transcode #%d canceled", job_id)
+                return
             except BrowseError as exc:
-                self._set(job_id, status="error", error=str(exc))
-                _LOG.warning("Transcode #%d failed: %s", job_id, exc)
+                self._fail(job_id, exc)
                 return
             except TranscodeError as exc:
-                self._set(job_id, status="error", error=str(exc))
-                _LOG.warning("Transcode #%d failed: %s", job_id, exc)
+                self._fail(job_id, exc)
                 return
             except Exception as exc:  # pragma: no cover - defensive
-                self._set(job_id, status="error", error=str(exc))
-                _LOG.exception("Transcode #%d crashed: %s", job_id, exc)
+                self._fail(job_id, exc, crash=True)
                 return
 
         with self._lock:
@@ -298,9 +318,45 @@ class TranscodeManager:
                 job["percent"] = 100
         _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
 
-    def _run_ffmpeg(self, job_id: int, src: Path, dst: Path, preset: dict) -> None:
+    def _encode_with_fallback(self, job_id: int, src: Path, dst: Path, preset: dict) -> None:
+        """Try each candidate encoder in turn; fall back to the next on failure.
+
+        Hardware first (when configured/available), then software. A hardware
+        encode that fails at runtime (missing device node, unsupported input,
+        driver error) does not abort the job -- the partial output is removed and
+        the next candidate (ultimately the CPU) is tried. A cancel aborts without
+        falling back.
+        """
         duration = probe_duration(src)
-        cmd = build_ffmpeg_cmd(preset, src, dst)
+        encoders = self._encoders_for(preset)
+        last_exc: Optional[TranscodeError] = None
+        for idx, enc in enumerate(encoders):
+            self._set(job_id, encoder=enc.name, hw=enc.is_hardware, percent=0)
+            _LOG.info("Transcode #%d: encoding with %s (%s)", job_id, enc.name, enc.kind)
+            cmd = build_ffmpeg_cmd(enc, preset, src, dst)
+            try:
+                self._run_ffmpeg(job_id, cmd, duration)
+                return
+            except _Canceled:
+                _cleanup(dst)
+                raise
+            except TranscodeError as exc:
+                last_exc = exc
+                _cleanup(dst)
+                has_more = idx + 1 < len(encoders)
+                if has_more:
+                    nxt = encoders[idx + 1].name
+                    _LOG.warning(
+                        "Transcode #%d: encoder %s failed (%s) -- falling back to %s",
+                        job_id, enc.name, exc, nxt,
+                    )
+                    self._set(job_id, note=f"{enc.name} failed, retrying with {nxt}")
+                    continue
+                raise
+        # Unreachable (the loop always returns or raises), but be explicit.
+        raise last_exc or TranscodeError("no encoder available")
+
+    def _run_ffmpeg(self, job_id: int, cmd: List[str], duration: Optional[float]) -> None:
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
@@ -324,14 +380,24 @@ class TranscodeManager:
                 self._current_proc = None
                 self._current_id = None
 
-        with self._lock:
-            canceled = self._jobs.get(job_id, {}).get("status") == "canceled"
-        if canceled:
-            _cleanup(dst)
-            raise TranscodeError("canceled")
+        if self._is_canceled(job_id):
+            raise _Canceled("canceled")
         if proc.returncode != 0:
-            _cleanup(dst)
             raise TranscodeError(f"ffmpeg exited with code {proc.returncode}")
+
+    def _is_canceled(self, job_id: int) -> bool:
+        with self._lock:
+            return self._jobs.get(job_id, {}).get("status") == "canceled"
+
+    def _fail(self, job_id: int, exc: Exception, crash: bool = False) -> None:
+        # A cancel that raced with a failure keeps the canceled status.
+        if self._is_canceled(job_id):
+            return
+        self._set(job_id, status="error", error=str(exc))
+        if crash:
+            _LOG.exception("Transcode #%d crashed: %s", job_id, exc)
+        else:
+            _LOG.warning("Transcode #%d failed: %s", job_id, exc)
 
     def _trim_history(self) -> None:
         # Drop the oldest *finished* jobs beyond MAX_HISTORY (keep active ones).

@@ -100,9 +100,14 @@ wifi_ap:
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by
 # scripts/install.sh). Off by default; see config.example.yaml for presets.
+# `acceleration: auto` uses the Pi 4's h264_v4l2m2m hardware encoder; the Pi 5
+# has no hardware encoder, so it encodes on the CPU (auto handles both). It falls
+# back to the CPU automatically if a hardware encode fails.
 transcode:
   enabled: false
   output_dirname: Transcoded
+  acceleration: auto      # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
+  fallback_to_cpu: true
 
 # Optional GPIO user button. Shutdown gesture (DJI style): short click, release,
 # then press and HOLD 3 s -- a plain long hold alone does nothing (intent check).

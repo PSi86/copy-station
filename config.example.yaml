@@ -168,8 +168,21 @@ transcode:
   enabled: false
   output_dirname: Transcoded
   max_jobs: 1
+  # Hardware acceleration. `auto` uses the board's hardware encoder when the
+  # installed ffmpeg supports it and falls back to the CPU otherwise:
+  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware)
+  #   * Raspberry Pi 5  -> no hardware encoder exists -> CPU (libx264/libx265)
+  #   * Radxa Cubie A7S -> h264_v4l2m2m / hevc_v4l2m2m (Allwinner Cedar VPU)
+  # Set `cpu` to force software, or a specific ffmpeg encoder name (e.g.
+  # h264_v4l2m2m) to force hardware. `fallback_to_cpu` retries on the CPU if the
+  # hardware encoder fails at runtime.
+  acceleration: auto        # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
+  fallback_to_cpu: true
   # Selectable presets. `height` downscales to that many lines keeping the aspect
-  # ratio (width auto, even); `height: 0` keeps the source resolution.
+  # ratio (width auto, even); `height: 0` keeps the source resolution. `vcodec`
+  # is the software codec and picks the family (h264/hevc); `crf` drives software
+  # quality, `bitrate` (optional) drives the hardware encoder (a height-based
+  # default is used otherwise). A per-preset `accel:` overrides the global one.
   presets:
     - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 20, preset: medium }
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 22, preset: medium }

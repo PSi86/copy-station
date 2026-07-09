@@ -14,7 +14,6 @@ from copystation.transcode import (
     TranscodeManager,
     TranscodeUnavailable,
     UnknownPreset,
-    build_ffmpeg_cmd,
     output_name,
     progress_seconds,
     sanitize_component,
@@ -31,25 +30,6 @@ from copystation.web.app import create_app  # noqa: E402
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
-
-def test_build_ffmpeg_cmd_downscales_and_encodes():
-    preset = {"id": "720p-h264", "height": 720, "vcodec": "libx264", "crf": 22, "preset": "medium"}
-    cmd = build_ffmpeg_cmd(preset, "/in/clip.mp4", "/out/clip.mp4")
-    assert cmd[0] == "ffmpeg"
-    assert cmd[cmd.index("-i") + 1] == "/in/clip.mp4"
-    assert cmd[cmd.index("-vf") + 1] == "scale=-2:720"
-    assert cmd[cmd.index("-c:v") + 1] == "libx264"
-    assert cmd[cmd.index("-crf") + 1] == "22"
-    assert cmd[cmd.index("-preset") + 1] == "medium"
-    assert cmd[-1] == "/out/clip.mp4"
-    assert "-progress" in cmd and "pipe:1" in cmd
-
-
-def test_build_ffmpeg_cmd_keeps_resolution_when_height_zero():
-    cmd = build_ffmpeg_cmd({"id": "orig", "height": 0, "vcodec": "libx265"}, "a.mov", "b.mp4")
-    assert "-vf" not in cmd  # no scaling
-    assert cmd[cmd.index("-c:v") + 1] == "libx265"
-
 
 def test_output_name_and_sanitize():
     assert output_name("DJI_0001.MP4", "720p-h264") == "DJI_0001_720p-h264.mp4"
@@ -216,6 +196,97 @@ def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
     result = mgr.snapshot()["jobs"][0]
     assert result["status"] == "error"
     assert "code 1" in result["error"]
+
+
+def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
+    in_root = tmp_path / "in"
+    in_root.mkdir()
+    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
+    out_root = tmp_path / "out"
+    out_root.mkdir()
+    mgr = _mgr(_FakeBrowse(in_root=in_root, out_root=out_root))
+    # Simulate a Pi 4 whose ffmpeg has the H.264 hardware encoder.
+    mgr._board = "pi4"
+    mgr._encoders_avail = {"h264_v4l2m2m", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self._hw = "h264_v4l2m2m" in cmd
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            if self._hw:
+                self.returncode = 1  # hardware encode fails at runtime
+            else:
+                self._dst.write_bytes(b"cpu-encoded")
+                self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert result["encoder"] == "cpu"
+    assert result["hw"] is False
+    # Two attempts: hardware first, then the CPU fallback.
+    assert len(calls) == 2
+    assert "h264_v4l2m2m" in calls[0]
+    assert "libx264" in calls[1]
+    assert (out_root / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
+
+
+def test_cancel_during_encode_does_not_fall_back(tmp_path, monkeypatch):
+    in_root = tmp_path / "in"
+    in_root.mkdir()
+    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
+    out_root = tmp_path / "out"
+    out_root.mkdir()
+    mgr = _mgr(_FakeBrowse(in_root=in_root, out_root=out_root))
+    mgr._board = "pi4"
+    mgr._encoders_avail = {"h264_v4l2m2m", "libx264"}  # a fallback exists...
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    calls = []
+    holder = {}
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            # A cancel arrives while the (first) encoder runs.
+            mgr._jobs[holder["id"]]["status"] = "canceled"
+            self.returncode = -15
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    holder["id"] = job["id"]
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "canceled"
+    assert len(calls) == 1  # ...but a cancel must NOT trigger the fallback
 
 
 # --------------------------------------------------------------------------- #

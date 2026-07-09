@@ -165,6 +165,16 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "output_dirname": "Transcoded",
         "max_jobs": 1,
+        # Video encoder selection:
+        #   auto     -> use the board's hardware encoder when ffmpeg has it
+        #               (Pi 4: h264_v4l2m2m; Cubie A7S: h264/hevc_v4l2m2m; the
+        #               Pi 5 has no HW encoder -> CPU), else software.
+        #   cpu      -> always software (libx264/libx265).
+        #   <name>   -> force a specific ffmpeg encoder (e.g. h264_v4l2m2m).
+        # A per-preset ``accel`` overrides this. See copystation/encoders.py.
+        "acceleration": "auto",
+        # Fall back to CPU encoding if the hardware encoder fails at runtime.
+        "fallback_to_cpu": True,
         # Selectable presets (shown in the web UI). ``height`` downscales while
         # keeping the aspect ratio (width auto, even); ``height: 0`` keeps the
         # source resolution. Argument construction lives in
