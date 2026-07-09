@@ -114,4 +114,45 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .log-msg { flex: 1 1 auto; }
 .log-entry.error .log-msg { color: var(--error); }
 
+.files-toolbar { margin-top: 0; align-items: center; }
+.select {
+  flex: 1 1 auto;
+  background: #2a2f3a;
+  color: var(--fg);
+  border: 1px solid #333a47;
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.9rem;
+}
+.btn {
+  background: #2a2f3a;
+  color: var(--fg);
+  border: 1px solid #333a47;
+  border-radius: 8px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.breadcrumb { margin: 0.6rem 0; word-break: break-all; }
+.breadcrumb a { color: var(--accent); text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+.breadcrumb .sep { color: var(--muted); }
+
+.filelist { list-style: none; margin: 0; padding: 0; max-height: 20rem; overflow-y: auto; }
+.filelist .file {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.2rem;
+}
+.filelist .file + .file { border-top: 1px solid #2a2f3a; }
+.filelist .file a { color: var(--fg); text-decoration: none; word-break: break-all; }
+.filelist .file.dir a { color: var(--accent); }
+.filelist .file a:hover { text-decoration: underline; }
+.filelist .fsize { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
 footer { text-align: center; margin-top: 1rem; }

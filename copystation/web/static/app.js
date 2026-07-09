@@ -118,5 +118,153 @@ async function poll() {
   }
 }
 
+// --------------------------------------------------------------------------
+// File browser (only wired up when the backend reports the feature is on)
+// --------------------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
+const fileState = { device: null, path: "" };
+
+function joinPath(base, name) {
+  return base ? `${base}/${name}` : name;
+}
+
+function parentPath(path) {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function renderFileMessage(msg) {
+  document.getElementById("file-list").innerHTML = `<li class="muted">${escapeHtml(msg)}</li>`;
+}
+
+function renderBreadcrumb(device, path) {
+  const el = document.getElementById("file-path");
+  const parts = path ? path.split("/").filter(Boolean) : [];
+  let acc = "";
+  const crumbs = [`<a href="#" data-path="">${escapeHtml(device)}</a>`];
+  for (const p of parts) {
+    acc = joinPath(acc, p);
+    crumbs.push(`<a href="#" data-path="${escapeHtml(acc)}">${escapeHtml(p)}</a>`);
+  }
+  el.innerHTML = crumbs.join(' <span class="sep">/</span> ');
+}
+
+function renderFileList(entries) {
+  const el = document.getElementById("file-list");
+  const rows = [];
+  if (fileState.path) {
+    rows.push(
+      `<li class="file dir up"><a href="#" data-dir="${escapeHtml(parentPath(fileState.path))}">../</a></li>`
+    );
+  }
+  if (entries.length === 0 && !fileState.path) {
+    renderFileMessage("empty");
+    return;
+  }
+  for (const e of entries) {
+    const full = joinPath(fileState.path, e.name);
+    if (e.is_dir) {
+      rows.push(
+        `<li class="file dir"><a href="#" data-dir="${escapeHtml(full)}">${escapeHtml(e.name)}/</a></li>`
+      );
+    } else {
+      const url = `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(full)}`;
+      rows.push(
+        `<li class="file">
+           <a class="fname" href="${url}" download>${escapeHtml(e.name)}</a>
+           <span class="muted fsize">${fmtBytes(e.size)}</span>
+         </li>`
+      );
+    }
+  }
+  el.innerHTML = rows.join("");
+}
+
+async function loadDir(path) {
+  if (!fileState.device) return;
+  try {
+    const url = `/api/files?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      renderFileMessage(`error ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    fileState.path = data.path || "";
+    renderBreadcrumb(fileState.device, fileState.path);
+    renderFileList(data.entries || []);
+  } catch (e) {
+    renderFileMessage("disconnected");
+  }
+}
+
+async function loadVolumes() {
+  const sel = document.getElementById("file-volume");
+  try {
+    const res = await fetch("/api/volumes", { cache: "no-store" });
+    if (!res.ok) {
+      renderFileMessage("cannot list volumes");
+      return;
+    }
+    const vols = (await res.json()).volumes || [];
+    sel.innerHTML = vols
+      .map((v) => `<option value="${escapeHtml(v.sys_name)}">${escapeHtml(v.name)} (${escapeHtml(v.sys_name)})</option>`)
+      .join("");
+    if (vols.length === 0) {
+      fileState.device = null;
+      document.getElementById("file-path").textContent = "";
+      renderFileMessage("no mass storage attached");
+      return;
+    }
+    if (!fileState.device || !vols.some((v) => v.sys_name === fileState.device)) {
+      fileState.device = vols[0].sys_name;
+      fileState.path = "";
+    }
+    sel.value = fileState.device;
+    await loadDir(fileState.path);
+  } catch (e) {
+    renderFileMessage("disconnected");
+  }
+}
+
+async function initFiles() {
+  let features = {};
+  try {
+    const res = await fetch("/api/settings", { cache: "no-store" });
+    if (res.ok) features = (await res.json()).features || {};
+  } catch (e) {
+    return;
+  }
+  if (!features.files) return;
+  document.getElementById("files-card").hidden = false;
+  document.getElementById("file-volume").addEventListener("change", (e) => {
+    fileState.device = e.target.value;
+    fileState.path = "";
+    loadDir("");
+  });
+  document.getElementById("file-refresh").addEventListener("click", loadVolumes);
+  document.getElementById("file-path").addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-path]");
+    if (!a) return;
+    e.preventDefault();
+    loadDir(a.getAttribute("data-path"));
+  });
+  document.getElementById("file-list").addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-dir]");
+    if (!a) return;
+    e.preventDefault();
+    loadDir(a.getAttribute("data-dir"));
+  });
+  await loadVolumes();
+}
+
 poll();
 setInterval(poll, POLL_MS);
+initFiles();

@@ -24,14 +24,35 @@ import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
+from ..mounts import (
+    BrowseError,
+    MountFailed,
+    NotFound,
+    PathEscapesVolume,
+    UnknownVolume,
+)
+
 if TYPE_CHECKING:
     from ..config import Config
     from ..state import StationState
+
+
+# BrowseError subclass -> HTTP status code for the file endpoints.
+_BROWSE_HTTP_STATUS = {
+    UnknownVolume: 404,
+    NotFound: 404,
+    PathEscapesVolume: 403,
+    MountFailed: 503,
+}
+
+
+def _browse_http_error(exc: BrowseError) -> HTTPException:
+    return HTTPException(status_code=_BROWSE_HTTP_STATUS.get(type(exc), 400), detail=str(exc))
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -113,6 +134,37 @@ def create_app(
                 },
             }
         )
+
+    if browse is not None:
+
+        @app.get("/api/volumes")
+        def get_volumes() -> JSONResponse:
+            # Attached USB mass storage only -- the OS/root device is excluded by
+            # copystation.volumes, so it can never be browsed.
+            return JSONResponse({"volumes": browse.list_volumes()})
+
+        @app.get("/api/files")
+        def get_files(
+            device: str = Query(..., description="sys_name from /api/volumes"),
+            path: str = Query("", description="path relative to the volume root"),
+        ) -> JSONResponse:
+            try:
+                return JSONResponse(browse.list_dir(device, path))
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+
+        @app.get("/api/files/download")
+        def download_file(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> FileResponse:
+            try:
+                target = browse.resolve_file(device, path)
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            return FileResponse(
+                str(target), filename=target.name, media_type="application/octet-stream"
+            )
 
     @app.get("/")
     def index() -> FileResponse:
