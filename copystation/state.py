@@ -159,6 +159,12 @@ class StationState:
             return self._phase
 
     @property
+    def ap_active(self) -> bool:
+        """Last known WLAN AP state (used to flip it instantly on a button press)."""
+        with self._lock:
+            return self._ap_active
+
+    @property
     def progress(self) -> float:
         with self._lock:
             return self._progress

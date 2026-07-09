@@ -294,6 +294,40 @@ def _maybe_start_wifi_ap(config: Config) -> bool:
         return False
 
 
+def _wifi_ap_bound_to_button(config: Config) -> bool:
+    """True if any enabled user button binds the ``wifi_ap`` toggle action."""
+    for entry in (config.get("buttons") or {}).values():
+        if not (entry or {}).get("enabled"):
+            continue
+        actions = (entry or {}).get("actions") or {}
+        if any(v == "wifi_ap" for v in actions.values()):
+            return True
+    return False
+
+
+def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
+    """Warn about the classic 'AP up but web UI refused' misconfiguration.
+
+    The AP only serves the web interface if the web interface is actually
+    enabled: without it, ``http://<ap-ip>:<port>/`` is refused (nothing listens).
+    The AP and web are independent flags, so a common setup mistake is enabling
+    the AP (or binding it to a button) while leaving ``web.enabled`` off. Also log
+    the exact URL when both are up, so it is easy to find in the journal.
+    """
+    ap_usable = bool((config.get("wifi_ap", {}) or {}).get("enabled")) or _wifi_ap_bound_to_button(config)
+    web_cfg = config.get("web", {}) or {}
+    if ap_usable and not web_cfg.get("enabled"):
+        _LOG.warning(
+            "WiFi AP is configured but web.enabled is false -- the AP has no web UI "
+            "to serve, so http://<ap-ip>:%s/ will be refused. Set web.enabled: true "
+            "to reach the interface over the access point.",
+            web_cfg.get("port", 8080),
+        )
+    if web_up:
+        ip = str((config.get("wifi_ap", {}) or {}).get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+        _LOG.info("Web interface over the AP: http://%s:%s/", ip, web_cfg.get("port", 8080))
+
+
 def _maybe_start_buttons(config: Config, hub: StatusHub) -> list:
     """Start the optional GPIO user buttons. Returns them (possibly empty).
 
@@ -328,9 +362,12 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
+    # Start the web server first so it is already listening (on 0.0.0.0, all
+    # interfaces) before the slower AP bring-up; then raise the AP.
+    web_up = _maybe_start_web(state, config)
     if _maybe_start_wifi_ap(config):
         hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started
-    _maybe_start_web(state, config)
+    _check_ap_web_reachability(config, web_up)
     buttons = _maybe_start_buttons(config, hub)
 
     watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)

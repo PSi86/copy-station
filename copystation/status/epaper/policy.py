@@ -98,6 +98,10 @@ def decide(
     # No visible change -> de-dup, just like the LED backends skip equal frames.
     if _signature(new) == _signature(prev):
         return Decision.SKIP
+    # The WiFi AP was just switched on (a deliberate button press): show the badge
+    # on the next tick rather than waiting out the partial cadence.
+    if new.ap_active and not prev.ap_active:
+        return Decision.PARTIAL
     # Additive change pending, but hold partials to the configured cadence.
     if seconds_since_last < partial_min_interval:
         return Decision.SKIP

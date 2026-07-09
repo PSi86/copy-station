@@ -248,20 +248,29 @@ def command_action(command: str) -> Action:
 def wifi_ap_toggle_action(config=None, hub=None) -> Action:
     """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`).
 
-    After flipping the AP it updates the shared state (so the display shows the
-    WiFi status) and fires the matching one-shot signal, so the WS2812 strip plays
-    a distinct blink code for activation vs deactivation.
+    The indication is updated *first*, before the (slow, several-second) nmcli
+    call: the target state is chosen by flipping the last known ``ap_active``
+    (in-memory, no nmcli), so the display badge and the WS2812 blink code react
+    the instant the press is recognised. The AP is then actually brought up/down,
+    and the state is reconciled if a requested bring-up did not succeed.
     """
 
     def _run() -> None:
+        from . import wifi_ap
         from .status import Event
-        from .wifi_ap import toggle
 
         ap_cfg = (config.get("wifi_ap") if config is not None else None) or {}
-        active = toggle(ap_cfg)
-        if hub is not None:
-            hub.set_ap_active(active)
-            hub.signal(Event.AP_ENABLED if active else Event.AP_DISABLED)
+        if hub is None:
+            wifi_ap.toggle(ap_cfg)
+            return
+        desired = not bool(hub.state.ap_active)
+        # Instant feedback (display + LED) before the slow network operation.
+        hub.set_ap_active(desired)
+        hub.signal(Event.AP_ENABLED if desired else Event.AP_DISABLED)
+        actual = wifi_ap.set_active(ap_cfg, desired)
+        if actual != desired:
+            # The bring-up failed (e.g. no valid password): correct the display.
+            hub.set_ap_active(actual)
 
     return _run
 

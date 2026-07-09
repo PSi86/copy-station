@@ -109,30 +109,102 @@ def test_button_wifi_ap_action_toggles(monkeypatch):
     assert seen["cfg"] == FULL
 
 
-def test_button_wifi_ap_action_reports_to_hub(monkeypatch):
+def test_set_active_up_and_down(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ap, "start_ap", lambda cfg: True)
+    monkeypatch.setattr(ap, "down", lambda cfg: seen.setdefault("down", True))
+    assert ap.set_active(FULL, True) is True
+    assert ap.set_active(FULL, False) is False
+    assert seen == {"down": True}
+
+
+import types  # noqa: E402
+
+
+class _FakeHub:
+    def __init__(self, ap_active=False):
+        self.ap = ap_active
+        self.signals = []
+        self.events = []
+        self.state = types.SimpleNamespace(ap_active=ap_active)
+
+    def set_ap_active(self, active):
+        self.ap = active
+        self.state.ap_active = active
+        self.events.append(("display", active))
+
+    def signal(self, event):
+        self.signals.append(event)
+        self.events.append(("led", event))
+
+
+def test_button_wifi_ap_feedback_precedes_slow_nmcli(monkeypatch):
     from copystation.status import Event
 
-    class _FakeHub:
-        def __init__(self):
-            self.ap = None
-            self.signals = []
-
-        def set_ap_active(self, active):
-            self.ap = active
-
-        def signal(self, event):
-            self.signals.append(event)
-
-    # AP came up -> hub told active + AP_ENABLED blink code.
-    hub = _FakeHub()
-    monkeypatch.setattr(ap, "toggle", lambda cfg: True)
+    hub = _FakeHub(ap_active=False)
+    monkeypatch.setattr(ap, "set_active",
+                        lambda cfg, active: hub.events.append(("nmcli", active)) or active)
     _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub)()
+
     assert hub.ap is True
     assert hub.signals == [Event.AP_ENABLED]
+    # The display badge and the LED code are applied BEFORE the slow nmcli call.
+    assert hub.events == [("display", True), ("led", Event.AP_ENABLED), ("nmcli", True)]
 
-    # AP went down -> hub told inactive + AP_DISABLED blink code.
-    hub2 = _FakeHub()
-    monkeypatch.setattr(ap, "toggle", lambda cfg: False)
-    _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub2)()
-    assert hub2.ap is False
-    assert hub2.signals == [Event.AP_DISABLED]
+
+def test_button_wifi_ap_flips_off_when_active(monkeypatch):
+    from copystation.status import Event
+
+    hub = _FakeHub(ap_active=True)  # AP currently up
+    monkeypatch.setattr(ap, "set_active", lambda cfg, active: active)
+    _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub)()
+    assert hub.ap is False
+    assert hub.signals == [Event.AP_DISABLED]
+
+
+def test_button_wifi_ap_reconciles_when_bringup_fails(monkeypatch):
+    from copystation.status import Event
+
+    hub = _FakeHub(ap_active=False)
+    monkeypatch.setattr(ap, "set_active", lambda cfg, active: False)  # bring-up fails
+    _resolve_action("b", "triple_click", "wifi_ap", {"wifi_ap": FULL}, hub)()
+    # Optimistically shown on, then reconciled back to off; the press was still
+    # acknowledged with the enable blink.
+    assert hub.ap is False
+    assert hub.signals == [Event.AP_ENABLED]
+
+
+def test_wifi_ap_bound_to_button_detection():
+    from copystation.daemon import _wifi_ap_bound_to_button
+
+    on = {"buttons": {"u1": {"enabled": True, "actions": {"triple_click": "wifi_ap"}}}}
+    off = {"buttons": {"u1": {"enabled": False, "actions": {"triple_click": "wifi_ap"}}}}
+    other = {"buttons": {"u1": {"enabled": True, "actions": {"hold": "poweroff"}}}}
+    assert _wifi_ap_bound_to_button(on) is True
+    assert _wifi_ap_bound_to_button(off) is False
+    assert _wifi_ap_bound_to_button(other) is False
+    assert _wifi_ap_bound_to_button({}) is False
+
+
+def test_check_ap_web_reachability_warns_when_web_disabled(caplog):
+    from copystation.config import Config
+    from copystation.daemon import _check_ap_web_reachability
+
+    cfg = Config()
+    cfg.data["wifi_ap"]["enabled"] = True
+    cfg.data["web"]["enabled"] = False
+    with caplog.at_level("WARNING"):
+        _check_ap_web_reachability(cfg, web_up=False)
+    assert any("web.enabled is false" in r.message for r in caplog.records)
+
+
+def test_check_ap_web_reachability_quiet_when_web_enabled(caplog):
+    from copystation.config import Config
+    from copystation.daemon import _check_ap_web_reachability
+
+    cfg = Config()
+    cfg.data["wifi_ap"]["enabled"] = True
+    cfg.data["web"]["enabled"] = True
+    with caplog.at_level("WARNING"):
+        _check_ap_web_reachability(cfg, web_up=True)
+    assert not any("web.enabled is false" in r.message for r in caplog.records)

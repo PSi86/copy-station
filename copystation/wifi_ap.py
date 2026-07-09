@@ -157,6 +157,22 @@ def start_ap(cfg: Any) -> bool:
     return ok
 
 
+def set_active(cfg: Any, active: bool) -> bool:
+    """Bring the AP up (``active=True``) or down; return the resulting state.
+
+    Unlike :func:`toggle` this takes the desired direction as an argument, so the
+    caller can decide the target (e.g. by flipping a cached state) and show the
+    indication *before* this slow nmcli call runs. Returns whether the AP is up
+    afterwards (``False`` if a requested bring-up failed).
+    """
+    if active:
+        _LOG.info("WiFi AP: bringing '%s' up", con_name(cfg))
+        return bool(start_ap(cfg))
+    _LOG.info("WiFi AP: bringing '%s' down", con_name(cfg))
+    down(cfg)
+    return False
+
+
 def toggle(cfg: Any) -> bool:
     """Flip the AP and return whether it is **active afterwards**.
 
@@ -164,9 +180,4 @@ def toggle(cfg: Any) -> bool:
     return value (True = now up, False = now down) lets the caller show the right
     indication. Bound to a user button via the ``wifi_ap`` action keyword.
     """
-    if is_active(cfg):
-        _LOG.info("WiFi AP toggle: bringing '%s' down", con_name(cfg))
-        down(cfg)
-        return False
-    _LOG.info("WiFi AP toggle: bringing '%s' up", con_name(cfg))
-    return bool(start_ap(cfg))
+    return set_active(cfg, not is_active(cfg))
