@@ -158,6 +158,23 @@ wifi_ap:
   autoconnect: true
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
 
+# Optional video transcoding / resolution change via ffmpeg. Jobs are submitted
+# from the web interface (Files -> the ⚙ button on a video). The output is
+# written to <output_dirname>/ on the chosen TARGET volume (read-write) and is
+# also downloadable. Serialised with the copy daemon, so a copy and a transcode
+# never touch the same card at once. Needs ffmpeg installed (scripts/install.sh
+# pulls it in); a no-op with a clear error otherwise. Off by default.
+transcode:
+  enabled: false
+  output_dirname: Transcoded
+  max_jobs: 1
+  # Selectable presets. `height` downscales to that many lines keeping the aspect
+  # ratio (width auto, even); `height: 0` keeps the source resolution.
+  presets:
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 20, preset: medium }
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 22, preset: medium }
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 26, preset: medium }
+
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
 # activation click (< max_click_seconds) followed by a 0.2-1.0 s release -- an

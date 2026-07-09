@@ -129,6 +129,7 @@ function escapeHtml(s) {
 }
 
 const fileState = { device: null, path: "" };
+let transcodeAvailable = false;
 
 function joinPath(base, name) {
   return base ? `${base}/${name}` : name;
@@ -176,10 +177,13 @@ function renderFileList(entries) {
       );
     } else {
       const url = `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(full)}`;
+      const tcBtn = transcodeAvailable
+        ? `<button class="btn tc" type="button" data-file="${escapeHtml(full)}" title="Transcode this file">⚙</button>`
+        : "";
       rows.push(
         `<li class="file">
            <a class="fname" href="${url}" download>${escapeHtml(e.name)}</a>
-           <span class="muted fsize">${fmtBytes(e.size)}</span>
+           <span class="fmeta"><span class="muted fsize">${fmtBytes(e.size)}</span>${tcBtn}</span>
          </li>`
       );
     }
@@ -214,9 +218,12 @@ async function loadVolumes() {
       return;
     }
     const vols = (await res.json()).volumes || [];
-    sel.innerHTML = vols
+    const options = vols
       .map((v) => `<option value="${escapeHtml(v.sys_name)}">${escapeHtml(v.name)} (${escapeHtml(v.sys_name)})</option>`)
       .join("");
+    sel.innerHTML = options;
+    const tcOut = document.getElementById("tc-output");
+    if (tcOut) tcOut.innerHTML = options; // transcode output volume picker
     if (vols.length === 0) {
       fileState.device = null;
       document.getElementById("file-path").textContent = "";
@@ -234,7 +241,82 @@ async function loadVolumes() {
   }
 }
 
-async function initFiles() {
+// ---- transcode -----------------------------------------------------------
+
+function renderJobs(jobs) {
+  const el = document.getElementById("tc-jobs");
+  if (!jobs || jobs.length === 0) {
+    el.innerHTML = `<li class="muted">no jobs yet</li>`;
+    return;
+  }
+  el.innerHTML = jobs
+    .map((j) => {
+      const label = j.filename || j.input_path || `job ${j.id}`;
+      let right;
+      if (j.status === "running") {
+        right = `<span class="muted">${j.percent || 0}%</span>`;
+      } else if (j.status === "done" && j.output_path) {
+        const url = `/api/files/download?device=${encodeURIComponent(j.output_device)}&path=${encodeURIComponent(j.output_path)}`;
+        right = `<a href="${url}" download>download</a>`;
+      } else if (j.status === "error") {
+        right = `<span class="role error" title="${escapeHtml(j.error || "")}">error</span>`;
+      } else {
+        right = `<span class="role ${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>`;
+      }
+      const bar =
+        j.status === "running"
+          ? `<div class="storage-track"><div class="storage-used" style="width:${j.percent || 0}%"></div></div>`
+          : "";
+      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span>${right}</div>${bar}</li>`;
+    })
+    .join("");
+}
+
+async function loadJobs() {
+  try {
+    const res = await fetch("/api/transcode", { cache: "no-store" });
+    if (res.ok) renderJobs((await res.json()).jobs || []);
+  } catch (e) {
+    /* transient */
+  }
+}
+
+async function loadPresets() {
+  const sel = document.getElementById("tc-preset");
+  try {
+    const res = await fetch("/api/transcode", { cache: "no-store" });
+    if (!res.ok) return;
+    const presets = (await res.json()).presets || [];
+    sel.innerHTML = presets
+      .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label || p.id)}</option>`)
+      .join("");
+  } catch (e) {
+    /* transient */
+  }
+}
+
+async function submitTranscode(path) {
+  const preset = document.getElementById("tc-preset").value;
+  const output = document.getElementById("tc-output").value || fileState.device;
+  if (!preset || !fileState.device) return;
+  try {
+    const res = await fetch("/api/transcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: fileState.device, path, preset, output_device: output }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(`Transcode failed: ${body.detail || res.status}`);
+      return;
+    }
+    loadJobs();
+  } catch (e) {
+    alert("Transcode request failed");
+  }
+}
+
+async function initFeatures() {
   let features = {};
   try {
     const res = await fetch("/api/settings", { cache: "no-store" });
@@ -242,29 +324,46 @@ async function initFiles() {
   } catch (e) {
     return;
   }
-  if (!features.files) return;
-  document.getElementById("files-card").hidden = false;
-  document.getElementById("file-volume").addEventListener("change", (e) => {
-    fileState.device = e.target.value;
-    fileState.path = "";
-    loadDir("");
-  });
-  document.getElementById("file-refresh").addEventListener("click", loadVolumes);
-  document.getElementById("file-path").addEventListener("click", (e) => {
-    const a = e.target.closest("a[data-path]");
-    if (!a) return;
-    e.preventDefault();
-    loadDir(a.getAttribute("data-path"));
-  });
-  document.getElementById("file-list").addEventListener("click", (e) => {
-    const a = e.target.closest("a[data-dir]");
-    if (!a) return;
-    e.preventDefault();
-    loadDir(a.getAttribute("data-dir"));
-  });
-  await loadVolumes();
+
+  transcodeAvailable = !!features.transcode;
+
+  if (features.files) {
+    document.getElementById("files-card").hidden = false;
+    document.getElementById("file-volume").addEventListener("change", (e) => {
+      fileState.device = e.target.value;
+      fileState.path = "";
+      loadDir("");
+    });
+    document.getElementById("file-refresh").addEventListener("click", loadVolumes);
+    document.getElementById("file-path").addEventListener("click", (e) => {
+      const a = e.target.closest("a[data-path]");
+      if (!a) return;
+      e.preventDefault();
+      loadDir(a.getAttribute("data-path"));
+    });
+    document.getElementById("file-list").addEventListener("click", (e) => {
+      const tc = e.target.closest("button.tc[data-file]");
+      if (tc) {
+        submitTranscode(tc.getAttribute("data-file"));
+        return;
+      }
+      const a = e.target.closest("a[data-dir]");
+      if (!a) return;
+      e.preventDefault();
+      loadDir(a.getAttribute("data-dir"));
+    });
+  }
+
+  if (transcodeAvailable) {
+    document.getElementById("transcode-card").hidden = false;
+    await loadPresets();
+    loadJobs();
+    setInterval(loadJobs, 1500);
+  }
+
+  if (features.files) await loadVolumes();
 }
 
 poll();
 setInterval(poll, POLL_MS);
-initFiles();
+initFeatures();

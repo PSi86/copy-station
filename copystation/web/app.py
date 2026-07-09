@@ -28,6 +28,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from ..mounts import (
     BrowseError,
@@ -36,6 +37,16 @@ from ..mounts import (
     PathEscapesVolume,
     UnknownVolume,
 )
+from ..transcode import TranscodeError, TranscodeUnavailable, UnknownPreset
+
+
+class TranscodeRequest(BaseModel):
+    """POST /api/transcode body."""
+
+    device: str
+    path: str
+    preset: str
+    output_device: Optional[str] = None
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -165,6 +176,32 @@ def create_app(
             return FileResponse(
                 str(target), filename=target.name, media_type="application/octet-stream"
             )
+
+    if transcode is not None:
+
+        @app.get("/api/transcode")
+        def get_transcode() -> JSONResponse:
+            return JSONResponse(transcode.snapshot())
+
+        @app.post("/api/transcode")
+        def post_transcode(req: TranscodeRequest) -> JSONResponse:
+            try:
+                job = transcode.submit(req.device, req.path, req.preset, req.output_device)
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            except TranscodeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(job)
+
+        @app.delete("/api/transcode/{job_id}")
+        def cancel_transcode(job_id: int) -> JSONResponse:
+            if not transcode.cancel(job_id):
+                raise HTTPException(status_code=404, detail="no such active job")
+            return JSONResponse({"canceled": job_id})
 
     @app.get("/")
     def index() -> FileResponse:

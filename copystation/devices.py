@@ -448,7 +448,18 @@ class DeviceWatcher:
         return bool(added), bool(removed)
 
     def _evaluate(self) -> None:
-        """Probe all present volumes; wait, or transfer once two are eligible."""
+        """Probe all present volumes; wait, or transfer once two are eligible.
+
+        Serialised with video transcode jobs through the shared ``operation_lock``
+        so the daemon never mounts/writes a removable volume while a transcode is
+        writing one (and vice versa). Both run as threads in this process, so the
+        in-process lock is sufficient. A transcode in flight simply defers the
+        next evaluation until it finishes.
+        """
+        with self._hub.state.operation_lock:
+            self._evaluate_impl()
+
+    def _evaluate_impl(self) -> None:
         ident = self._config.get("identify", {})
         min_bytes = int(ident.get("min_partition_gb", 6)) * 1024**3
         require_smaller = bool(ident.get("require_source_smaller_than_target", True))

@@ -57,6 +57,11 @@ if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   # renders the status frame; DejaVu gives it crisp text). Harmless if unused.
   apt-get install -y rsync python3 python3-venv python3-pyudev python3-libgpiod python3-spidev python3-yaml python3-pil fonts-dejavu-core gpiod
 
+  # ffmpeg powers the optional video transcoding feature (also provides ffprobe).
+  # Best-effort: the feature is a no-op if it is missing, so don't fail install.
+  echo ">> Installing ffmpeg (optional video transcoding) ..."
+  apt-get install -y ffmpeg || echo "   -> ffmpeg not installed; transcoding will be unavailable."
+
   # exFAT support so camera/SD cards mount (package name differs by release:
   # Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).
   echo ">> Installing exFAT support ..."

@@ -89,6 +89,9 @@ class BrowseManager:
         self._config = config
         files_cfg = (config.get("web", {}) or {}).get("files", {}) or {}
         self._base = Path(files_cfg.get("browse_base", "/run/copystation/browse"))
+        # Read-write mounts (transcode output) live under a sibling base so they
+        # never collide with the read-only browse mountpoints of the same device.
+        self._rw_base = self._base.with_name(self._base.name + "-rw")
         self._idle = float(files_cfg.get("idle_unmount_seconds", 120))
         self._allow_download = bool(files_cfg.get("allow_download", True))
         self._lock = threading.RLock()
@@ -143,6 +146,36 @@ class BrowseManager:
             _LOG.info("Browsing %s mounted read-only at %s", node, mountpoint)
             return mountpoint
 
+    def mount_ro(self, sys_name: str) -> Path:
+        """Public: ensure the volume is mounted read-only; return its mountpoint."""
+        return self._ensure_mounted(sys_name)
+
+    def mount_rw(self, sys_name: str) -> Path:
+        """Mount the volume read-write under the rw base (transcode output).
+
+        Not ref-counted/reaped -- the transcode worker mounts it for one job and
+        unmounts it in a ``finally``. Safe because the shared ``operation_lock``
+        guarantees no copy (and no daemon probe mount) touches the same device
+        while a transcode holds it.
+        """
+        node = self._node_for(sys_name)
+        mountpoint = self._rw_base / sys_name
+        mountpoint.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                ["mount", "-o", "rw,nosuid,nodev,noexec", node, str(mountpoint)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise MountFailed(f"cannot mount {node} read-write: {exc}") from exc
+        _LOG.info("Transcode output %s mounted read-write at %s", node, mountpoint)
+        return mountpoint
+
+    def umount_rw(self, sys_name: str) -> None:
+        self._do_umount(self._rw_base / sys_name)
+
     def _do_mount(self, node: str, mountpoint: Path) -> None:
         """Real read-only mount (Linux/root). Isolated so tests can bypass it."""
         mountpoint.mkdir(parents=True, exist_ok=True)
@@ -188,10 +221,11 @@ class BrowseManager:
         rel_norm = _rel_to_root(root, target)
         return {"device": sys_name, "path": rel_norm, "entries": entries}
 
-    def resolve_file(self, sys_name: str, rel: str) -> Path:
-        """Absolute path of a downloadable file, path-traversal-checked."""
-        if not self._allow_download:
-            raise PathEscapesVolume("downloads are disabled")
+    def resolve_input(self, sys_name: str, rel: str) -> Path:
+        """Absolute path of an existing file on a volume, path-traversal-checked.
+
+        Read-only access used both for downloads and as the transcode input.
+        """
         root = self._ensure_mounted(sys_name)
         target = safe_resolve(root, rel)
         if not target.exists():
@@ -199,6 +233,12 @@ class BrowseManager:
         if not target.is_file():
             raise NotFound(f"{rel!r} is not a file")
         return target
+
+    def resolve_file(self, sys_name: str, rel: str) -> Path:
+        """Absolute path of a downloadable file (subject to ``allow_download``)."""
+        if not self._allow_download:
+            raise PathEscapesVolume("downloads are disabled")
+        return self.resolve_input(sys_name, rel)
 
     # ----- idle reaper / shutdown ----------------------------------------------
 

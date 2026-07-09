@@ -208,21 +208,26 @@ def _build_web_features(state: StationState, config: Config):
     Each is best-effort: a missing dependency (pyudev, ffmpeg) or a disabled
     feature yields ``None``, and the web app simply hides that panel. Never lets
     an optional feature stop the (status) web interface from coming up.
-    """
-    browse = None
-    transcode = None
 
-    files_cfg = (config.get("web", {}) or {}).get("files", {}) or {}
-    if files_cfg.get("enabled", True):
+    Returns ``(browse, transcode)`` where ``browse`` is passed to the web app
+    only to expose the file endpoints -- it is ``None`` unless the file browser
+    itself is enabled, even when transcoding (which needs its own mount access)
+    is on.
+    """
+    files_enabled = (config.get("web", {}) or {}).get("files", {}).get("enabled", True)
+    transcode_enabled = bool((config.get("transcode", {}) or {}).get("enabled"))
+
+    browse = None
+    if files_enabled or transcode_enabled:
         try:
             from .mounts import BrowseManager
 
             browse = BrowseManager(config)
         except Exception as exc:  # pragma: no cover - defensive
-            _LOG.warning("File browser unavailable: %s", exc)
+            _LOG.warning("File browser/mounts unavailable: %s", exc)
 
-    transcode_cfg = config.get("transcode", {}) or {}
-    if transcode_cfg.get("enabled"):
+    transcode = None
+    if transcode_enabled and browse is not None:
         try:
             from .transcode import TranscodeManager
 
@@ -230,7 +235,8 @@ def _build_web_features(state: StationState, config: Config):
         except Exception as exc:  # pragma: no cover - defensive
             _LOG.warning("Transcoding unavailable: %s", exc)
 
-    return browse, transcode
+    # Only expose the file endpoints when the browser itself is enabled.
+    return (browse if files_enabled else None), transcode
 
 
 def run_simulation(args: argparse.Namespace, config: Config) -> int:
