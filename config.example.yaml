@@ -117,11 +117,46 @@ status:
     full_refresh_every: 20      # force a full refresh after N partial updates
     partial_min_interval: 2.0   # seconds between partial updates
 
-# Optional local web interface (status + progress + storage, future settings).
+# Optional local web interface (status + progress + storage, file browser,
+# optional transcoding). Served on all interfaces, so it is also reachable over
+# the WLAN access point below.
 web:
   enabled: false
   host: 0.0.0.0        # all interfaces; robust to interfaces going up/down
   port: 8080
+  # Optional HTTP Basic auth for the whole interface (off by default). Sensible
+  # once file download is reachable over the AP. Fail-safe: enabling this with an
+  # empty password rejects every request rather than leaving it open.
+  auth:
+    enabled: false
+    username: admin
+    password: ""
+  # Read-only browsing + download of the ATTACHED USB mass storage only (never
+  # the OS partitions). Effective only while the web interface is enabled.
+  files:
+    enabled: true
+    allow_download: true
+    browse_base: /run/copystation/browse   # separate from the transfer mounts
+    idle_unmount_seconds: 120              # release a browsed volume when idle
+
+# Optional WLAN access point so the station hosts its own network in the field
+# (the web interface above is then reachable at http://<ipv4_address>:<port>/).
+# Managed via NetworkManager (nmcli): the daemon (re)creates the profile from
+# these values and brings it up on start. `ipv4.method shared` gives DHCP + NAT
+# automatically. WPA2 needs a password of at least 8 characters; an empty
+# password leaves the AP down. Requires NetworkManager (default on Raspberry Pi
+# OS Bookworm and current Radxa images). It can also be toggled from a user
+# button via the `wifi_ap` action below.
+wifi_ap:
+  enabled: false
+  con_name: copystation-ap
+  ssid: Copy_Station
+  password: ""            # >= 8 chars for WPA2; empty -> AP stays down
+  band: bg               # bg (2.4 GHz) | a (5 GHz)
+  channel: 6
+  ipv4_address: 10.42.0.1/24
+  autoconnect: true
+  ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
@@ -147,9 +182,11 @@ buttons:
       max_gap_seconds: 1.0     # a longer release ends the click sequence
       hold_seconds: 3.0        # hold after the activation click -> hold action
     actions:
-      # poweroff | reboot | none | {command: "..."}  (reboot may hang on the A733)
+      # poweroff | reboot | wifi_ap | none | {command: "..."}
+      #   wifi_ap toggles the WLAN access point (see wifi_ap: above).
+      #   (reboot may hang on the A733 -- prefer poweroff.)
       hold: poweroff
-      single_click: none
+      single_click: none       # e.g. wifi_ap to toggle the access point
       double_click: none
       triple_click: none
 

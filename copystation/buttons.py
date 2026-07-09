@@ -245,11 +245,25 @@ def command_action(command: str) -> Action:
     return _run
 
 
-def _resolve_action(button: str, key: str, raw) -> Optional[Action]:
+def wifi_ap_toggle_action(config=None) -> Action:
+    """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`)."""
+
+    def _run() -> None:
+        from .wifi_ap import toggle
+
+        ap_cfg = (config.get("wifi_ap") if config is not None else None) or {}
+        toggle(ap_cfg)
+
+    return _run
+
+
+def _resolve_action(button: str, key: str, raw, config=None) -> Optional[Action]:
     if raw is None or raw == "none":
         return None
     if raw in ("poweroff", "reboot"):
         return systemctl_action(raw)
+    if raw == "wifi_ap":
+        return wifi_ap_toggle_action(config)
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return command_action(raw["command"])
     _LOG.warning("Button %s: unknown action %r for %s -- ignored", button, raw, key)
@@ -285,7 +299,7 @@ def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None) 
             raw = cfg.get("actions") or {}
             actions = {}
             for event, key in EVENT_CONFIG_KEYS.items():
-                action = _resolve_action(name, key, raw.get(key))
+                action = _resolve_action(name, key, raw.get(key), config)
                 if action is not None:
                     actions[event] = action
         if not actions:

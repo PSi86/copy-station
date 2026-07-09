@@ -274,6 +274,20 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     return rc
 
 
+def _maybe_start_wifi_ap(config: Config) -> bool:
+    """Bring up the optional WLAN access point (NetworkManager). Best-effort."""
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    if not ap_cfg.get("enabled"):
+        return False
+    try:
+        from .wifi_ap import start_ap
+
+        return start_ap(ap_cfg)
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("WiFi AP could not be started: %s", exc)
+        return False
+
+
 def _maybe_start_buttons(config: Config) -> list:
     """Start the optional GPIO user buttons. Returns them (possibly empty)."""
     try:
@@ -304,6 +318,7 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
+    _maybe_start_wifi_ap(config)
     _maybe_start_web(state, config)
     buttons = _maybe_start_buttons(config)
 

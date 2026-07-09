@@ -178,6 +178,19 @@ if [[ ${CONFIG_INSTALLED} -eq 1 && -z "${CONFIG_SRC}" ]]; then
   echo "   -> review/confirm the GPIO pins in ${TARGET} (see README)."
 fi
 
+# The WLAN access point is managed by the daemon at runtime via NetworkManager,
+# so nothing is installed here -- but if it is enabled without nmcli present,
+# flag it now instead of letting it silently fail to come up. NetworkManager is
+# NOT auto-installed (it can clash with an existing dhcpcd/networkd setup).
+if python3 -c "import sys, yaml; c = yaml.safe_load(open(sys.argv[1])) or {}; sys.exit(0 if (c.get('wifi_ap') or {}).get('enabled') else 1)" "${TARGET}" 2>/dev/null; then
+  if command -v nmcli >/dev/null 2>&1; then
+    echo "   -> wifi_ap enabled; NetworkManager present -- the daemon raises the AP on start."
+  else
+    echo "   -> NOTE: wifi_ap is enabled but 'nmcli' (NetworkManager) was not found." >&2
+    echo "            Install NetworkManager to use the access point (see README)." >&2
+  fi
+fi
+
 if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   echo ">> Installing systemd service ..."
   cp "${REPO_DIR}/systemd/copystation.service" /etc/systemd/system/
