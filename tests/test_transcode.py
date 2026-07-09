@@ -57,26 +57,57 @@ def test_progress_seconds(line, expected):
 # --------------------------------------------------------------------------- #
 
 class _FakeBrowse:
-    def __init__(self, in_root=None, out_root=None):
-        self.in_root = Path(in_root) if in_root else None
-        self.out_root = Path(out_root) if out_root else None
-        self.umounted = []
+    """Models each device as a single directory (one mount for that device).
+
+    Same device -> same directory for read (mount_ro) and write (mount_rw), which
+    mirrors a real transcode reading the input from and writing the output to one
+    read-write mount when input and output are on the same card. ``release`` and
+    ``umount_rw`` calls are recorded so tests can assert the read-only browse mount
+    is dropped before the read-write mount.
+    """
+
+    def __init__(self, roots=None):
+        self.roots = {k: Path(v) for k, v in (roots or {}).items()}
+        self.released = []
+        self.umounted_rw = []
+        self.ops = []  # ordered log of mount operations
 
     def resolve_input(self, device, path):
-        if device != "sdb1":
-            raise UnknownVolume(device)
-        if self.in_root is None:
+        if not self.roots:  # validation-only fakes (submit tests)
+            if device != "sdb1":
+                raise UnknownVolume(device)
             return Path("/fake") / path
-        p = self.in_root / path
+        root = self.roots.get(device)
+        if root is None:
+            raise UnknownVolume(device)
+        p = root / path
         if not p.is_file():
             raise NotFound(path)
         return p
 
+    def mount_ro(self, device):
+        self.ops.append(f"mount_ro:{device}")
+        return self.roots[device]
+
     def mount_rw(self, device):
-        return self.out_root
+        self.ops.append(f"mount_rw:{device}")
+        return self.roots[device]
 
     def umount_rw(self, device):
-        self.umounted.append(device)
+        self.ops.append(f"umount_rw:{device}")
+        self.umounted_rw.append(device)
+
+    def release(self, device):
+        self.ops.append(f"release:{device}")
+        self.released.append(device)
+
+
+def _card(tmp_path, name="clip.mp4"):
+    """A fake card directory (one device) with an input video in it."""
+    card = tmp_path / "card"
+    card.mkdir()
+    (card / name).write_bytes(b"\x00" * 32)
+    return card
 
 
 def _mgr(browse, available=True):
@@ -130,12 +161,8 @@ def test_cancel_queued_job(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
-    in_root = tmp_path / "in"
-    in_root.mkdir()
-    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
-    out_root = tmp_path / "out"
-    out_root.mkdir()
-    browse = _FakeBrowse(in_root=in_root, out_root=out_root)
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
     mgr = _mgr(browse)
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
@@ -163,17 +190,55 @@ def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
     assert result["status"] == "done"
     assert result["percent"] == 100
     assert result["output_path"] == "Transcoded/clip_720p-h264.mp4"
-    assert (out_root / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"encoded"
-    assert browse.umounted == ["sdb1"]  # rw output volume released
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"encoded"
+    assert browse.umounted_rw == ["sdb1"]      # rw output volume released
+    # The read-only browse mount is dropped BEFORE the read-write mount (the fix
+    # for the same-device ro+rw superblock clash that made the output read-only).
+    assert browse.ops.index("release:sdb1") < browse.ops.index("mount_rw:sdb1")
+    # Same device -> no separate read-only input mount (read from the rw mount).
+    assert "mount_ro:sdb1" not in browse.ops
+
+
+def test_process_different_devices_mount_each_side(tmp_path, monkeypatch):
+    in_card = tmp_path / "in"
+    in_card.mkdir()
+    (in_card / "clip.mp4").write_bytes(b"\x00" * 32)
+    out_card = tmp_path / "out"
+    out_card.mkdir()
+    browse = _FakeBrowse({"sdb1": in_card, "sdc1": out_card})
+    mgr = _mgr(browse)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 5.0)
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"x")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _P)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264", output_device="sdc1")
+    mgr._process(job["id"])
+
+    assert mgr.snapshot()["jobs"][0]["status"] == "done"
+    assert (out_card / "Transcoded" / "clip_720p-h264.mp4").exists()
+    # Output device mounted read-write, input device read-only; both released.
+    assert "mount_rw:sdc1" in browse.ops and "release:sdc1" in browse.ops
+    assert "mount_ro:sdb1" in browse.ops and "release:sdb1" in browse.ops
 
 
 def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
-    in_root = tmp_path / "in"
-    in_root.mkdir()
-    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
-    out_root = tmp_path / "out"
-    out_root.mkdir()
-    mgr = _mgr(_FakeBrowse(in_root=in_root, out_root=out_root))
+    card = _card(tmp_path)
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     monkeypatch.setattr(tc, "probe_duration", lambda src: None)
 
@@ -199,12 +264,9 @@ def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
 
 
 def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
-    in_root = tmp_path / "in"
-    in_root.mkdir()
-    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
-    out_root = tmp_path / "out"
-    out_root.mkdir()
-    mgr = _mgr(_FakeBrowse(in_root=in_root, out_root=out_root))
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
     # Simulate a Pi 4 whose ffmpeg has the H.264 hardware encoder.
     mgr._board = "pi4"
     mgr._encoders_avail = {"h264_v4l2m2m", "libx264"}
@@ -245,16 +307,12 @@ def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert "h264_v4l2m2m" in calls[0]
     assert "libx264" in calls[1]
-    assert (out_root / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
 
 
 def test_cancel_during_encode_does_not_fall_back(tmp_path, monkeypatch):
-    in_root = tmp_path / "in"
-    in_root.mkdir()
-    (in_root / "clip.mp4").write_bytes(b"\x00" * 32)
-    out_root = tmp_path / "out"
-    out_root.mkdir()
-    mgr = _mgr(_FakeBrowse(in_root=in_root, out_root=out_root))
+    card = _card(tmp_path)
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
     mgr._board = "pi4"
     mgr._encoders_avail = {"h264_v4l2m2m", "libx264"}  # a fallback exists...
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)

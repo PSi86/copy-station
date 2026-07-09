@@ -176,6 +176,21 @@ class BrowseManager:
     def umount_rw(self, sys_name: str) -> None:
         self._do_umount(self._rw_base / sys_name)
 
+    def release(self, sys_name: str) -> None:
+        """Drop the read-only browse mount of a device, if any.
+
+        Used before a transcode read-write mounts the same block device: a device
+        cannot be mounted read-only and read-write at once (they share one
+        superblock, and the read-only one wins), so the browse mount must go first.
+        Safe under the operation lock -- the daemon holds no mount of the device
+        then, so this leaves it unmounted and free for a fresh read-write mount.
+        """
+        with self._lock:
+            entry = self._mounts.pop(sys_name, None)
+        if entry is not None:
+            self._do_umount(entry["path"])
+            _LOG.info("Browsing %s released (%s)", sys_name, entry["path"])
+
     def _do_mount(self, node: str, mountpoint: Path) -> None:
         """Real read-only mount (Linux/root). Isolated so tests can bypass it."""
         mountpoint.mkdir(parents=True, exist_ok=True)

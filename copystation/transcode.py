@@ -31,7 +31,7 @@ from .encoders import (
     detect_board,
     select_encoders,
 )
-from .mounts import BrowseError
+from .mounts import BrowseError, NotFound, safe_resolve
 
 _LOG = logging.getLogger("copystation.transcode")
 
@@ -286,10 +286,21 @@ class TranscodeManager:
             out_name = output_name(Path(input_path).name, preset_id)
             out_rel = f"{self._output_dirname}/{out_name}"
             self._set(job_id, filename=out_name, output_path=out_rel)
+            same_device = input_device == output_device
             try:
-                src = self._browse.resolve_input(input_device, input_path)
+                # A block device can't be mounted read-only and read-write at once
+                # (shared superblock -> the read-only one wins), so drop any browse
+                # mount of the output device before mounting it read-write. Under
+                # the operation lock the daemon holds no mount of it either.
+                self._browse.release(output_device)
                 out_root = self._browse.mount_rw(output_device)
                 try:
+                    # Read the input from the read-write mount when it is the same
+                    # device; otherwise mount the (different) input device read-only.
+                    in_root = out_root if same_device else self._browse.mount_ro(input_device)
+                    src = safe_resolve(in_root, input_path)
+                    if not src.is_file():
+                        raise NotFound(f"{input_path!r} is not a file")
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
@@ -297,6 +308,8 @@ class TranscodeManager:
                     subprocess.run(["sync"], check=False)
                 finally:
                     self._browse.umount_rw(output_device)
+                    if not same_device:
+                        self._browse.release(input_device)
             except _Canceled:
                 self._set(job_id, status="canceled")
                 _LOG.info("Transcode #%d canceled", job_id)
