@@ -10,27 +10,37 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
+    from ..config import Config
     from ..state import StationState
 
 _LOG = logging.getLogger("copystation.web")
 
 
-def start_web_server(state: "StationState", host: str, port: int) -> threading.Thread:
+def start_web_server(
+    state: "StationState",
+    host: str,
+    port: int,
+    config: "Optional[Config]" = None,
+    browse: Any = None,
+    transcode: Any = None,
+) -> threading.Thread:
     """Start the web server in a daemon thread and return the thread.
 
     Imports are local so the rest of the daemon runs even if FastAPI/uvicorn are
-    not installed (the caller logs and continues).
+    not installed (the caller logs and continues). ``config`` enables auth and
+    gates the optional file-browser/transcode features; ``browse``/``transcode``
+    are the managers backing them (``None`` when disabled/unavailable).
     """
     import uvicorn
 
     from .app import create_app
 
-    app = create_app(state)
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
+    app = create_app(state, config, browse=browse, transcode=transcode)
+    uvicorn_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(uvicorn_config)
     # We are not on the main thread, so uvicorn must not install signal handlers.
     server.install_signal_handlers = False
 

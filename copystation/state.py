@@ -47,6 +47,13 @@ class StationState:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Serialises the two *writers* that must never touch the same removable
+        # volume at once: a copy evaluation (DeviceWatcher._evaluate) and a video
+        # transcode job. Both run as threads in the daemon process, so an
+        # in-process lock is enough -- no IPC. Read-only web browsing does NOT
+        # take this lock (a read-only mount is safe next to a live writer).
+        # Distinct from ``_lock`` (which only guards the snapshot fields below).
+        self.operation_lock = threading.Lock()
         self._phase: State = State.READY
         self._progress: float = 0.0  # 0.0 .. 1.0
         self._bytes_done: int = 0

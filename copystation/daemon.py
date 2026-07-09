@@ -187,11 +187,50 @@ def _maybe_start_web(state: StationState, config: Config) -> bool:
     try:
         from .web import start_web_server
 
-        start_web_server(state, web_cfg.get("host", "0.0.0.0"), int(web_cfg.get("port", 8080)))
+        browse, transcode = _build_web_features(state, config)
+        start_web_server(
+            state,
+            web_cfg.get("host", "0.0.0.0"),
+            int(web_cfg.get("port", 8080)),
+            config=config,
+            browse=browse,
+            transcode=transcode,
+        )
         return True
     except Exception as exc:
         _LOG.warning("Web interface could not be started: %s", exc)
         return False
+
+
+def _build_web_features(state: StationState, config: Config):
+    """Construct the optional file-browser and transcode managers.
+
+    Each is best-effort: a missing dependency (pyudev, ffmpeg) or a disabled
+    feature yields ``None``, and the web app simply hides that panel. Never lets
+    an optional feature stop the (status) web interface from coming up.
+    """
+    browse = None
+    transcode = None
+
+    files_cfg = (config.get("web", {}) or {}).get("files", {}) or {}
+    if files_cfg.get("enabled", True):
+        try:
+            from .mounts import BrowseManager
+
+            browse = BrowseManager(config)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("File browser unavailable: %s", exc)
+
+    transcode_cfg = config.get("transcode", {}) or {}
+    if transcode_cfg.get("enabled"):
+        try:
+            from .transcode import TranscodeManager
+
+            transcode = TranscodeManager(config, state, browse)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("Transcoding unavailable: %s", exc)
+
+    return browse, transcode
 
 
 def run_simulation(args: argparse.Namespace, config: Config) -> int:

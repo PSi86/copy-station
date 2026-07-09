@@ -121,6 +121,62 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "host": "0.0.0.0",  # all interfaces; robust to interfaces up/down
         "port": 8080,
+        # Optional HTTP Basic auth for the whole interface (status + files +
+        # transcode). Off by default (backwards compatible). Fail-safe: if it is
+        # enabled but ``password`` is empty, every request is rejected rather
+        # than left open.
+        "auth": {
+            "enabled": False,
+            "username": "admin",
+            "password": "",
+        },
+        # Read-only file browser + download of the ATTACHED USB mass storage
+        # (never the OS partitions). Only effective when the web interface is on.
+        "files": {
+            "enabled": True,
+            "allow_download": True,
+            # Where the browser mounts volumes read-only (separate from the
+            # transfer mount base so the two never collide).
+            "browse_base": "/run/copystation/browse",
+            # Unmount a browsed volume after this many seconds without a request.
+            "idle_unmount_seconds": 120,
+        },
+    },
+    # Optional WLAN access point so the station can host its own network (and the
+    # web interface) in the field. Managed via NetworkManager (nmcli): the daemon
+    # ensures the connection profile exists and brings it up on start when
+    # enabled. ``ipv4.method shared`` gives DHCP + NAT automatically.
+    "wifi_ap": {
+        "enabled": False,
+        "con_name": "copystation-ap",
+        "ssid": "Copy_Station",
+        "password": "",          # >= 8 chars for WPA2; empty -> AP is not raised
+        "band": "bg",            # bg (2.4 GHz) | a (5 GHz)
+        "channel": 6,
+        "ipv4_address": "10.42.0.1/24",  # NM "shared" serves DHCP+NAT in this /24
+        "autoconnect": True,
+        "ifname": "",            # empty -> NM picks the Wi-Fi interface
+    },
+    # Optional video transcoding / resolution change via ffmpeg. Jobs are
+    # submitted from the web interface; the output is written to a folder on the
+    # TARGET volume (read-write) and is also downloadable. Off by default; a
+    # no-op with a clear error if ffmpeg is not installed.
+    "transcode": {
+        "enabled": False,
+        "output_dirname": "Transcoded",
+        "max_jobs": 1,
+        # Selectable presets (shown in the web UI). ``height`` downscales while
+        # keeping the aspect ratio (width auto, even); ``height: 0`` keeps the
+        # source resolution. Argument construction lives in
+        # ``copystation/transcode.py``.
+        "presets": [
+            {"id": "1080p-h264", "label": "1080p H.264", "height": 1080,
+             "vcodec": "libx264", "crf": 20, "preset": "medium"},
+            {"id": "720p-h264", "label": "720p H.264", "height": 720,
+             "vcodec": "libx264", "crf": 22, "preset": "medium"},
+            {"id": "720p-h265", "label": "720p H.265", "height": 720,
+             "vcodec": "libx265", "crf": 26, "preset": "medium"},
+        ],
     },
     # Optional GPIO user buttons (off by default). Every gesture starts with a
     # short activation click (intent check, never counted); after it the button
