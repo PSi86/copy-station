@@ -158,19 +158,26 @@ def family_of(vcodec: str) -> str:
 
 
 def default_bitrate(height: int) -> str:
-    """A sensible target bitrate for bitrate-based (hardware) encoders by height."""
+    """A sensible ~30fps target bitrate for bitrate-based (hardware) encoders.
+
+    Hardware encoders are less efficient than x264/x265 at a given quality, so
+    these are deliberately generous (a fixed low bitrate is what makes a hardware
+    encode look far worse than a CRF software one). The GStreamer path scales
+    these up further for high-framerate sources; a preset's explicit ``bitrate``
+    overrides them entirely.
+    """
     h = int(height or 0)
     if h <= 0 or h >= 2160:
-        return "16M"
+        return "24M"
     if h >= 1440:
-        return "12M"
+        return "16M"
     if h >= 1080:
-        return "8M"
+        return "12M"
     if h >= 720:
-        return "5M"
+        return "8M"
     if h >= 480:
-        return "2500k"
-    return "1500k"
+        return "4M"
+    return "2M"
 
 
 def cpu_encoder(vcodec: str) -> Encoder:
@@ -355,7 +362,16 @@ def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) ->
     """
     src, dst = str(src), str(dst)
     height = int(preset.get("height", 0) or 0)
-    bps = _bitrate_bps(preset.get("bitrate") or default_bitrate(height))
+    # An explicit preset bitrate is honoured exactly; otherwise the height-based
+    # default is scaled up for high-framerate sources (60fps needs ~2x of 30fps),
+    # since the encoder is bitrate-controlled and CRF has no effect here.
+    if preset.get("bitrate"):
+        bps = _bitrate_bps(preset.get("bitrate"))
+    else:
+        bps = _bitrate_bps(default_bitrate(height))
+        fps = float(info.get("fps") or 0)
+        if fps > 33:
+            bps = int(bps * min(1.8, fps / 30.0))
     container = str(info.get("container") or "mp4").lower()
     demux = _GST_DEMUX.get(container, "qtdemux")
     vcodec = str(info.get("vcodec") or "h264").lower()

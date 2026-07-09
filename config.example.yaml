@@ -200,15 +200,22 @@ transcode:
   ram_buffer_fraction: 0.66  # use up to ~two thirds of the free RAM
   # Selectable presets. `height` downscales to that many lines keeping the aspect
   # ratio (width auto, even); `height: 0` keeps the source resolution. `vcodec`
-  # is the software codec and picks the family (h264/hevc); `crf` drives software
-  # quality, `bitrate` (optional) drives the hardware encoder (a height-based
-  # default is used otherwise). A per-preset `accel:` overrides the global one.
-  # `preset` is the software speed preset -- `veryfast` is a good SBC default
-  # (much faster than `medium`); `ultrafast` = max speed / bigger files,
-  # `fast`/`medium`/`slow` = smaller files. Ignored by hardware encoders.
+  # is the software codec and picks the family (h264/hevc). There are two separate
+  # quality knobs, one per encode path:
+  #   * software / CPU: `crf` (lower = better + bigger) plus `preset` speed
+  #     (`veryfast` is a good SBC default; `ultrafast` = fastest/biggest,
+  #     `fast`/`medium`/`slow` = smaller). BOTH are ignored by hardware encoders.
+  #   * hardware (Cubie A7S OMX H.264, Pi 4 V4L2): `bitrate` (e.g. `16M`). If it
+  #     is unset, a generous height- AND framerate-aware default is used (a 60fps
+  #     source gets ~2x a 30fps one). CRF does NOTHING here -- so if a hardware
+  #     transcode looks poor, RAISE `bitrate` (that is the only quality lever).
+  # A per-preset `accel:` overrides the global one.
   presets:
-    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast }
-    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast }
+    # `bitrate` is shown on the H.264 presets so hardware quality is easy to tune;
+    # remove it to fall back to the adaptive default. (720p H.265 output has no
+    # hardware encoder on the Cubie, so it always runs on the CPU with `crf`.)
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 16M }
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 9M }
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and

@@ -153,9 +153,19 @@ boards differ a lot in what they can encode in hardware:
   node, unsupported input, driver error), the partial output is discarded and the
   job retries with the next candidate -- ultimately the CPU -- so a job does not
   fail just because hardware encoding is unavailable. Set `fallback_to_cpu: false`
-  to disable. Hardware (V4L2 M2M) encoders are bitrate-controlled, so they use the
-  preset's `bitrate` (or a height-based default) rather than `crf`. The job list
-  shows which encoder actually ran (e.g. `h264_v4l2m2m (hw)` or `cpu`).
+  to disable. Hardware encoders are bitrate-controlled, so they use the preset's
+  `bitrate` (or a height- **and framerate**-aware default -- a 60fps source gets
+  roughly twice a 30fps one) rather than `crf`, which has **no effect** on them.
+  The job list shows which encoder actually ran (e.g. `omxh264videoenc (hw)`,
+  `h264_v4l2m2m (hw)` or `cpu`).
+
+> **Hardware quality knob.** On the Cubie the encoder targets a bitrate, so `crf`
+> does nothing there -- if a hardware transcode looks soft or blocky, **raise the
+> preset's `bitrate`** (e.g. `bitrate: 20M` for high-motion 4K60 drone footage).
+> A preset can carry both: `crf` is used when it falls back to the CPU, `bitrate`
+> when the hardware encoder runs. Software (CRF) encodes of high-detail footage
+> can be several times larger than a fixed-bitrate hardware encode -- that size
+> difference is the quality you tune with `bitrate`.
 
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
