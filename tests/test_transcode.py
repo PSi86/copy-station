@@ -304,7 +304,8 @@ def test_process_different_devices_mount_each_side(tmp_path, monkeypatch):
 
 def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
     card = _card(tmp_path)
-    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    hub = _hub()
+    mgr = _mgr(_FakeBrowse({"sdb1": card}), hub=hub)
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     monkeypatch.setattr(tc, "probe_duration", lambda src: None)
 
@@ -327,6 +328,10 @@ def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
     result = mgr.snapshot()["jobs"][0]
     assert result["status"] == "error"
     assert "code 1" in result["error"]
+    # The failure is surfaced on every backend via the ERROR phase (not hidden by
+    # restoring the previous phase), and the transcode block is cleared.
+    assert hub.state.phase is State.ERROR
+    assert hub.state.snapshot()["transcode"]["active"] is False
 
 
 def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):

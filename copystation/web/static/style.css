@@ -162,13 +162,14 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 
 .tc-out { display: flex; align-items: center; flex: 1 1 auto; }
 .tc-hint { margin: 0.5rem 0; }
-.filelist .jobrow { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; width: 100%; }
-.filelist .jobname { word-break: break-all; }
+.filelist .jobitem { display: block; }
+.filelist .jobhead { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; width: 100%; }
+.filelist .jobname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filelist .jobright { display: flex; align-items: center; gap: 0.6rem; flex: 0 0 auto; }
+.filelist .jobstats { margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .btn.tc-cancel { padding: 0.05rem 0.45rem; font-size: 0.85rem; line-height: 1.2; }
 .btn.tc-cancel:hover { border-color: var(--error); color: var(--error); }
 .filelist .file .storage-track { height: 6px; margin-top: 0.35rem; width: 100%; }
-.filelist .jobtiming { margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .role.queued { background: #3a4250; color: var(--fg); }
 .role.running { background: var(--copying); color: #042036; }
 .role.done { background: var(--ready); color: #06210f; }

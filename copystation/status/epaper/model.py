@@ -114,6 +114,8 @@ class ViewModel:
     transcode_active: bool = False
     transcode_name: str = ""
     transcode_encoder: str = ""
+    transcode_size_text: str = ""
+    transcode_fps_text: str = ""
     elapsed_text: str = ""
 
     def storage_line(self, storage: StorageView) -> str:
@@ -173,5 +175,7 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         transcode_active=tr_active,
         transcode_name=str(transcode.get("name", "") or ""),
         transcode_encoder=str(transcode.get("encoder", "") or ""),
+        transcode_size_text=fmt_bytes(transcode.get("input_size")) if (tr_active and transcode.get("input_size")) else "",
+        transcode_fps_text=(f"{round(transcode['fps'])} fps" if (tr_active and transcode.get("fps")) else ""),
         elapsed_text=fmt_duration(transcode.get("elapsed_seconds")) if tr_active else "",
     )

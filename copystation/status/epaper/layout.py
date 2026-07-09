@@ -170,14 +170,18 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y += max(10, height // 18) + 8
 
     if view.transcode_active:
-        # A transcode shows the file + encoder, and elapsed/ETA in the footer --
-        # not the source/target storage gauges.
+        # A transcode shows the file, encoder + size, and elapsed/fps + ETA in the
+        # footer -- not the source/target storage gauges.
         _text(draw, m, y, _fit_label(draw, view.transcode_name, label_f, right - m), label_f)
         y += _line_height(label_f) + 3
-        if view.transcode_encoder:
-            _text(draw, m, y, view.transcode_encoder, small_f)
+        info = " · ".join(t for t in (view.transcode_encoder, view.transcode_size_text) if t)
+        if info:
+            _text(draw, m, y, info, small_f)
         foot_y = height - m - _line_height(small_f)
-        _text(draw, m, foot_y, f"Elapsed {view.elapsed_text}", small_f)
+        left = f"Elapsed {view.elapsed_text}"
+        if view.transcode_fps_text:
+            left += f" · {view.transcode_fps_text}"
+        _text(draw, m, foot_y, left, small_f)
         if view.eta_text and view.eta_text != "--":
             _text(draw, 0, foot_y, f"ETA {view.eta_text}", small_f, anchor_right=right)
         return img
@@ -252,8 +256,11 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         y += max(9, height // 11) + 8
         _text(draw, rx, y, _fit_label(draw, view.transcode_name, small_f, x1 - rx), small_f)
         y += _line_height(small_f) + 2
-        if view.transcode_encoder:
-            _text(draw, rx, y, view.transcode_encoder, small_f)
+        info = " · ".join(
+            t for t in (view.transcode_encoder, view.transcode_size_text, view.transcode_fps_text) if t
+        )
+        if info:
+            _text(draw, rx, y, _fit_label(draw, info, small_f, x1 - rx), small_f)
         return img
 
     if view.show_progress:

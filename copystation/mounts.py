@@ -157,10 +157,19 @@ class BrowseManager:
         unmounts it in a ``finally``. Safe because the shared ``operation_lock``
         guarantees no copy (and no daemon probe mount) touches the same device
         while a transcode holds it.
+
+        Robustness (a device can't be mounted read-only and read-write at once --
+        the shared superblock's read-only flag wins): every *other* mount of the
+        device is unmounted first so the read-write mount gets a fresh read-write
+        superblock, and the result is verified writable up front. If the volume
+        still comes up read-only (e.g. an unclean/dirty exFAT the kernel protects),
+        a ``remount,rw`` is attempted and, failing that, a clear error is raised
+        immediately -- rather than a confusing failure after minutes of encoding.
         """
         node = self._node_for(sys_name)
         mountpoint = self._rw_base / sys_name
         mountpoint.mkdir(parents=True, exist_ok=True)
+        _unmount_all(node)  # drop any other (e.g. read-only) mount of this device
         try:
             subprocess.run(
                 ["mount", "-o", "rw,nosuid,nodev,noexec", node, str(mountpoint)],
@@ -170,6 +179,18 @@ class BrowseManager:
             )
         except (OSError, subprocess.CalledProcessError) as exc:
             raise MountFailed(f"cannot mount {node} read-write: {exc}") from exc
+
+        if not _is_writable(mountpoint):
+            _LOG.warning("%s mounted read-only despite rw -- attempting remount,rw", node)
+            subprocess.run(["mount", "-o", "remount,rw", str(mountpoint)],
+                           capture_output=True, check=False)
+            if not _is_writable(mountpoint):
+                self._do_umount(mountpoint)
+                raise MountFailed(
+                    f"{node} is read-only: the card may be write-protected, or its "
+                    f"filesystem was not cleanly unmounted -- check it with "
+                    f"'sudo fsck.exfat {node}' (or fsck.vfat), then retry."
+                )
         _LOG.info("Transcode output %s mounted read-write at %s", node, mountpoint)
         return mountpoint
 
@@ -289,6 +310,55 @@ class BrowseManager:
             for name, entry in list(self._mounts.items()):
                 self._do_umount(entry["path"])
                 self._mounts.pop(name, None)
+
+
+def device_mountpoints(node: str, proc_mounts: str = "/proc/mounts") -> list[str]:
+    """Every current mountpoint of the block device ``node`` (from /proc/mounts).
+
+    Pure/parsing helper (``proc_mounts`` overridable for tests). The mountpoint
+    field is octal-escaped in /proc/mounts (e.g. a space is ``\\040``); it is
+    unescaped so the paths can be unmounted.
+    """
+    points: list[str] = []
+    try:
+        with open(proc_mounts, "r", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == node:
+                    points.append(parts[1].encode().decode("unicode_escape"))
+    except OSError:  # pragma: no cover - /proc absent (non-Linux)
+        return []
+    return points
+
+
+def _unmount_all(node: str) -> None:
+    """Unmount every current mountpoint of ``node`` (plain, then lazy fallback).
+
+    Removes any lingering mount of the device -- most importantly a read-only one
+    -- so a following read-write mount is not stuck sharing a read-only superblock.
+    """
+    for mp in device_mountpoints(node):
+        r = subprocess.run(["umount", mp], capture_output=True, text=True)
+        if r.returncode != 0:
+            # Busy mount: detach lazily so the read-write mount can still proceed.
+            subprocess.run(["umount", "-l", mp], capture_output=True, check=False)
+        _LOG.info("Unmounted stale mount of %s at %s", node, mp)
+
+
+def _is_writable(mountpoint: Path) -> bool:
+    """True if a file can actually be created under ``mountpoint`` (probe write).
+
+    ``os.access(W_OK)`` is unreliable for a read-only *mount* of a writable dir,
+    so this creates and removes a tiny probe file instead.
+    """
+    probe = mountpoint / ".copystation-wtest"
+    try:
+        with open(probe, "wb"):
+            pass
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _iter_dir(path: Path):

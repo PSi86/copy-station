@@ -282,6 +282,9 @@ class TranscodeManager:
                 "output_path": None,
                 "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
                 "hw": False,           # True if a hardware encoder was used
+                "input_size": None,    # source file size in bytes
+                "fps": None,           # live encode rate (frames/second)
+                "speed": None,         # ffmpeg speed relative to realtime (e.g. "2.5x")
                 "error": None,
                 "started": None,       # wall clock (time.monotonic) when it starts running
             }
@@ -371,6 +374,12 @@ class TranscodeManager:
                     src = safe_resolve(in_root, input_path)
                     if not src.is_file():
                         raise NotFound(f"{input_path!r} is not a file")
+                    try:
+                        input_size = src.stat().st_size
+                    except OSError:
+                        input_size = 0
+                    self._set(job_id, input_size=input_size)
+                    self._state.set_transcode_meta(input_size=input_size)
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
@@ -386,17 +395,15 @@ class TranscodeManager:
                         job["status"] = "done"
                         job["percent"] = 100
                 _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
+                self._hub.finish_transcode(prev_phase)
             except _Canceled:
                 self._set(job_id, status="canceled")
                 _LOG.info("Transcode #%d canceled", job_id)
-            except BrowseError as exc:
-                self._fail(job_id, exc)
-            except TranscodeError as exc:
-                self._fail(job_id, exc)
+                self._hub.finish_transcode(prev_phase)  # a cancel is not an error
+            except (BrowseError, TranscodeError) as exc:
+                self._end_failed(job_id, exc, prev_phase)
             except Exception as exc:  # pragma: no cover - defensive
-                self._fail(job_id, exc, crash=True)
-            finally:
-                self._hub.finish_transcode(prev_phase)
+                self._end_failed(job_id, exc, prev_phase, crash=True)
 
     def _ram_budget(self) -> int:
         """RAM the buffer may use this job (0 disables buffering)."""
@@ -515,12 +522,25 @@ class TranscodeManager:
             self._current_id = job_id
         try:
             assert proc.stdout is not None
-            for line in proc.stdout:
-                secs = progress_seconds(line.strip())
+            for raw in proc.stdout:
+                line = raw.strip()
+                secs = progress_seconds(line)
                 if secs is not None and duration and duration > 0:
                     pct = max(0, min(99, int(secs / duration * 100)))
                     self._set(job_id, percent=pct)
                     self._hub.set_transcode_progress(pct / 100.0)  # drives LEDs + display
+                elif line.startswith("fps="):
+                    try:
+                        fps = float(line.split("=", 1)[1])
+                    except ValueError:
+                        fps = 0.0
+                    if fps > 0:
+                        self._set(job_id, fps=fps)
+                        self._state.set_transcode_meta(fps=fps)
+                elif line.startswith("speed="):
+                    speed = line.split("=", 1)[1].strip()
+                    if speed and speed.upper() != "N/A":
+                        self._set(job_id, speed=speed)
             proc.wait()
         finally:
             with self._lock:
@@ -545,6 +565,18 @@ class TranscodeManager:
             _LOG.exception("Transcode #%d crashed: %s", job_id, exc)
         else:
             _LOG.warning("Transcode #%d failed: %s", job_id, exc)
+
+    def _end_failed(self, job_id: int, exc: Exception, prev_phase, crash: bool = False) -> None:
+        """Mark the job failed and surface the error on every backend (ERROR phase).
+
+        Unless it was actually canceled (a race), in which case the previous phase
+        is simply restored -- a cancel is not an error.
+        """
+        self._fail(job_id, exc, crash=crash)
+        if self._is_canceled(job_id):
+            self._hub.finish_transcode(prev_phase)
+        else:
+            self._hub.fail_transcode(f"Transcode failed: {exc}")
 
     def _trim_history(self) -> None:
         # Drop the oldest *finished* jobs beyond MAX_HISTORY (keep active ones).

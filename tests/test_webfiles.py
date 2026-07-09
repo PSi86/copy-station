@@ -14,6 +14,8 @@ from copystation.mounts import (
     BrowseManager,
     PathEscapesVolume,
     UnknownVolume,
+    _is_writable,
+    device_mountpoints,
     safe_resolve,
 )
 
@@ -44,6 +46,30 @@ def test_safe_resolve_rejects_parent_traversal(tmp_path):
     for evil in ("../secret.txt", "..", "DCIM/../../secret.txt", "/../secret.txt"):
         with pytest.raises(PathEscapesVolume):
             safe_resolve(root, evil)
+
+
+def test_device_mountpoints_lists_every_mount_of_a_device(tmp_path):
+    pm = tmp_path / "mounts"
+    pm.write_text(
+        "/dev/sdb1 /run/copystation/browse/sdb1 exfat ro,nosuid 0 0\n"
+        "/dev/sdb1 /run/copystation/browse-rw/sdb1 exfat rw 0 0\n"
+        "/dev/mmcblk0p2 / ext4 rw 0 0\n"
+    )
+    assert device_mountpoints("/dev/sdb1", proc_mounts=str(pm)) == [
+        "/run/copystation/browse/sdb1",
+        "/run/copystation/browse-rw/sdb1",
+    ]
+
+
+def test_device_mountpoints_unescapes_spaces(tmp_path):
+    pm = tmp_path / "mounts"
+    pm.write_text("/dev/sdb1 /run/with\\040space exfat rw 0 0\n")
+    assert device_mountpoints("/dev/sdb1", proc_mounts=str(pm)) == ["/run/with space"]
+
+
+def test_is_writable_probe(tmp_path):
+    assert _is_writable(tmp_path) is True
+    assert _is_writable(tmp_path / "does-not-exist") is False
 
 
 @pytest.mark.skipif(

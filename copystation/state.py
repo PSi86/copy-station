@@ -135,6 +135,8 @@ class StationState:
                 "percent": 0.0,
                 "encoder": "",
                 "hw": False,
+                "input_size": 0,
+                "fps": None,
                 "started": time.monotonic(),
             }
             self._phase = State.TRANSCODING
@@ -146,6 +148,15 @@ class StationState:
                 if encoder:
                     self._transcode["encoder"] = encoder
                     self._transcode["hw"] = hw
+
+    def set_transcode_meta(self, input_size: Optional[int] = None, fps: Optional[float] = None) -> None:
+        """Record the input size / live fps of the running transcode."""
+        with self._lock:
+            if self._transcode.get("active"):
+                if input_size is not None:
+                    self._transcode["input_size"] = int(input_size)
+                if fps is not None:
+                    self._transcode["fps"] = float(fps)
 
     def finish_transcode(self) -> None:
         with self._lock:
@@ -251,6 +262,8 @@ class StationState:
             "percent": round(percent, 1),
             "encoder": tr.get("encoder", ""),
             "hw": bool(tr.get("hw", False)),
+            "input_size": int(tr.get("input_size", 0) or 0),
+            "fps": tr.get("fps"),
             "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
             "eta_seconds": round(eta, 1) if eta is not None else None,
         }
@@ -328,6 +341,11 @@ class StatusHub:
         """Leave the transcode phase and restore whatever phase was showing before."""
         self._state.finish_transcode()
         self.set_phase(restore_phase)
+
+    def fail_transcode(self, message: str) -> None:
+        """End a failed transcode by showing the error on every backend."""
+        self._state.finish_transcode()
+        self.set_error(message)
 
     def log_event(self, message: str, level: str = "info") -> None:
         self._state.log_event(message, level)

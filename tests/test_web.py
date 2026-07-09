@@ -64,10 +64,13 @@ def test_transcode_phase_and_block_in_snapshot():
     assert tr["active"] is True and tr["name"] == "DJI_0219.MP4"
 
     state.update_transcode(0.5, "cpu", False)
+    state.set_transcode_meta(input_size=210_000_000, fps=25.0)
     tr = state.snapshot()["transcode"]
     assert tr["percent"] == 50.0
     assert tr["encoder"] == "cpu"
     assert tr["elapsed_seconds"] is not None
+    assert tr["input_size"] == 210_000_000
+    assert tr["fps"] == 25.0
 
     state.finish_transcode()
     assert state.snapshot()["transcode"] == {"active": False}

@@ -253,33 +253,52 @@ function renderJobs(jobs) {
   }
   el.innerHTML = jobs
     .map((j) => {
-      // Raw string -- the whole label is escaped once when inserted below.
+      // Multi-line layout: on a narrow phone screen the file name, timings,
+      // cancel button and progress bar do not fit on one row -- name (+ encoder)
+      // on the first line, the progress bar and a stats line below.
       const enc = j.encoder ? ` · ${j.encoder}${j.hw ? " (hw)" : ""}` : "";
-      const label = (j.filename || j.input_path || `job ${j.id}`) + enc;
-      let right;
-      if (j.status === "running") {
-        right = `<span class="muted">${j.percent || 0}%</span>`;
-      } else if (j.status === "done" && j.output_path) {
+      const name = (j.filename || j.input_path || `job ${j.id}`) + enc;
+
+      let statusRight = "";
+      if (j.status === "done" && j.output_path) {
         const url = `/api/files/download?device=${encodeURIComponent(j.output_device)}&path=${encodeURIComponent(j.output_path)}`;
-        right = `<a href="${url}" download>download</a>`;
+        statusRight = `<a href="${url}" download>download</a>`;
       } else if (j.status === "error") {
-        right = `<span class="role error" title="${escapeHtml(j.error || "")}">error</span>`;
-      } else {
-        right = `<span class="role ${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>`;
+        statusRight = `<span class="role error" title="${escapeHtml(j.error || "")}">error</span>`;
+      } else if (j.status === "queued") {
+        statusRight = `<span class="role queued">queued</span>`;
+      } else if (j.status === "canceled") {
+        statusRight = `<span class="role canceled">canceled</span>`;
       }
       const cancelable = j.status === "queued" || j.status === "running";
       const cancel = cancelable
         ? `<button class="btn tc-cancel" type="button" data-job="${j.id}" title="Cancel job">✕</button>`
         : "";
+
       const bar =
         j.status === "running"
           ? `<div class="storage-track"><div class="storage-used" style="width:${j.percent || 0}%"></div></div>`
           : "";
-      const timing =
-        j.status === "running"
-          ? `<div class="muted jobtiming">Elapsed ${fmtDuration(j.elapsed_seconds)} · ETA ${fmtDuration(j.eta_seconds)}</div>`
-          : "";
-      return `<li class="file"><div class="jobrow"><span class="jobname">${escapeHtml(label)}</span><span class="jobright">${right}${cancel}</span></div>${bar}${timing}</li>`;
+
+      let stats = "";
+      if (j.status === "running") {
+        const parts = [`${j.percent || 0}%`];
+        if (j.input_size) parts.push(fmtBytes(j.input_size));
+        parts.push(`elapsed ${fmtDuration(j.elapsed_seconds)}`);
+        parts.push(`ETA ${fmtDuration(j.eta_seconds)}`);
+        if (j.fps) parts.push(`${Math.round(j.fps)} fps`);
+        if (j.speed) parts.push(escapeHtml(j.speed));
+        stats = `<div class="muted jobstats">${parts.join(" · ")}</div>`;
+      } else if (j.input_size) {
+        stats = `<div class="muted jobstats">${fmtBytes(j.input_size)}</div>`;
+      }
+
+      return `<li class="file jobitem">
+        <div class="jobhead">
+          <span class="jobname">${escapeHtml(name)}</span>
+          <span class="jobright">${statusRight}${cancel}</span>
+        </div>${bar}${stats}
+      </li>`;
     })
     .join("");
 }
