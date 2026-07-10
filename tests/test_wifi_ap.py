@@ -186,6 +186,30 @@ def test_wifi_ap_bound_to_button_detection():
     assert _wifi_ap_bound_to_button({}) is False
 
 
+def test_wifi_ap_currently_active_reflects_real_state(monkeypatch):
+    from copystation.daemon import _wifi_ap_currently_active
+
+    # Feature usable via wifi_ap.enabled -> queries the real nmcli state.
+    monkeypatch.setattr(ap, "is_active", lambda cfg: True)
+    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": True}}) is True
+    monkeypatch.setattr(ap, "is_active", lambda cfg: False)
+    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": True}}) is False
+
+    # Usable via a button binding even though enabled is false (the reported bug:
+    # AP raised by a button before a restart must still be detected).
+    checked = {}
+    monkeypatch.setattr(ap, "is_active", lambda cfg: checked.setdefault("hit", True))
+    cfg = {"wifi_ap": {"enabled": False},
+           "buttons": {"u1": {"enabled": True, "actions": {"triple_click": "wifi_ap"}}}}
+    assert _wifi_ap_currently_active(cfg) is True
+    assert checked == {"hit": True}
+
+    # Not usable at all -> never touches nmcli.
+    checked.clear()
+    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": False}}) is False
+    assert checked == {}
+
+
 def test_check_ap_web_reachability_warns_when_web_disabled(caplog):
     from copystation.config import Config
     from copystation.daemon import _check_ap_web_reachability

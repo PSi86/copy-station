@@ -342,6 +342,23 @@ def _wifi_ap_bound_to_button(config: Config) -> bool:
     return False
 
 
+def _wifi_ap_currently_active(config: Config) -> bool:
+    """True if the AP connection is already active (e.g. raised by a button before
+    this restart). Only checked when the AP feature is usable at all, and
+    best-effort: no NetworkManager (or any error) reads as not active.
+    """
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    if not (ap_cfg.get("enabled") or _wifi_ap_bound_to_button(config)):
+        return False
+    try:
+        from .wifi_ap import is_active
+
+        return bool(is_active(ap_cfg))
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("WiFi AP state check failed: %s", exc)
+        return False
+
+
 def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
     """Warn about the classic 'AP up but web UI refused' misconfiguration.
 
@@ -405,8 +422,13 @@ def run_daemon(config: Config) -> int:
     # raise the AP.
     web_up = _maybe_start_web(hub, config)
     portal = _maybe_start_captive_portal(config)
-    if _maybe_start_wifi_ap(config):
-        hub.set_ap_active(True)  # so the display shows WiFi from boot when auto-started
+    # Auto-start the AP if configured, then reflect its REAL current state: it may
+    # already be up from a button toggle before this (re)start (with wifi_ap.enabled
+    # still false), so the WiFi badge must appear whenever the AP is actually
+    # active -- not only when we auto-started it here.
+    ap_started = _maybe_start_wifi_ap(config)
+    if ap_started or _wifi_ap_currently_active(config):
+        hub.set_ap_active(True)
     _check_ap_web_reachability(config, web_up)
     buttons = _maybe_start_buttons(config, hub)
 
