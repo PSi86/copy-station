@@ -677,6 +677,11 @@ class TranscodeManager:
             if prev_phase is State.TRANSCODING:  # defensive: never restore to ourselves
                 prev_phase = State.READY
             self._hub.begin_transcode(Path(input_path).name)
+            # Source media info, captured while the volume is still mounted so the
+            # perf model can be trained even from the cancel handler below (which
+            # runs *after* the ``finally`` has unmounted the volume -- a re-probe
+            # there would fail and silently drop the sample).
+            src_info: Optional[dict] = None
             try:
                 # A block device can't be mounted read-only and read-write at once
                 # (shared superblock -> the read-only one wins), so drop any browse
@@ -697,6 +702,9 @@ class TranscodeManager:
                         input_size = 0
                     self._set(job_id, input_size=input_size)
                     self._state.set_transcode_meta(input_size=input_size)
+                    # Probe now (still mounted); reused for the perf model on both
+                    # completion and cancel, and warms the cache for the encode.
+                    src_info = self._probe(src)
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
                     dst = out_dir / out_name
@@ -707,7 +715,7 @@ class TranscodeManager:
                         pass
                     # Learn the wall-time-per-frame so future jobs can be estimated.
                     try:
-                        self._update_perf(self._probe(src), preset_id,
+                        self._update_perf(src_info, preset_id,
                                           time.monotonic() - started)
                     except Exception:  # pragma: no cover - perf is best-effort
                         pass
@@ -730,9 +738,9 @@ class TranscodeManager:
                 with self._lock:
                     j = self._jobs.get(job_id) or {}
                     spf = j.get("perf_spf") if j.get("perf_stable") else None
-                if spf:
+                if spf and src_info:
                     try:
-                        self._record_perf(self._probe(src), preset_id, spf)
+                        self._record_perf(src_info, preset_id, spf)
                         _LOG.info("Transcode #%d canceled -- kept a stable perf sample", job_id)
                     except Exception:  # pragma: no cover - perf is best-effort
                         pass

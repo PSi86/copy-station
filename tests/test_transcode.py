@@ -608,6 +608,34 @@ def test_cancel_too_short_learns_nothing(tmp_path, monkeypatch):
     assert mgr._perf == {}
 
 
+def test_cancel_still_learns_after_output_volume_unmounts(tmp_path, monkeypatch):
+    # Regression: the cancel handler runs AFTER the `finally` unmounts the output
+    # volume, so the source path is gone and a re-probe there fails. On the real
+    # device this silently dropped every canceled sample. Model it: dropping the
+    # rw mount makes the input file vanish, and a probe of a missing file returns
+    # empty info (as ffprobe would). The fix captures the source info while still
+    # mounted, so a long-enough canceled job still trains the estimate model.
+    mgr, card = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    good = tc.probe_video_info  # the good-info stub installed by _cubie_mgr_with_perf
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: good(src)
+                        if Path(src).is_file()
+                        else {"vcodec": None, "width": 0, "height": 0, "fps": 0.0,
+                              "duration": None, "has_audio": False, "acodec": None,
+                              "container": "mp4"})
+    orig_umount = mgr._browse.umount_rw
+
+    def _umount(dev):
+        (card / "clip.mp4").unlink(missing_ok=True)  # the unmount hides the source
+        return orig_umount(dev)
+
+    monkeypatch.setattr(mgr._browse, "umount_rw", _umount)
+
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:20): 12 / 56 seconds (21.4 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf.get("h264:3840x2160:1080p-h264", {}).get("spf", 0) > 0
+
+
 # --------------------------------------------------------------------------- #
 # Planning + the performance/estimate model
 # --------------------------------------------------------------------------- #
