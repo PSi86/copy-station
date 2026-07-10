@@ -585,12 +585,17 @@ def test_estimate_falls_back_to_seed_defaults(tmp_path):
     mgr = _mgr(_FakeBrowse())
     mgr._perf_file = str(tmp_path / "perf.json")
     mgr._perf = {}  # fresh install: nothing learned yet
+    mgr._board = "cubie"
     info = {"vcodec": "h264", "width": 3840, "height": 2160, "duration": 56.89, "fps": 59.94}
     # the built-in Cubie seed reproduces the measured ~85.5s for 4K60 -> 1080p
-    seed = DEFAULT_PERF["h264:3840x2160:1080p-h264"]["spf"]
+    seed = DEFAULT_PERF["cubie"]["h264:3840x2160:1080p-h264"]["spf"]
     assert mgr._estimate(info, "1080p-h264") == pytest.approx(seed * 56.89 * 59.94)
     assert 80 < mgr._estimate(info, "1080p-h264") < 92
-    # a learned value always overrides the seed
+    # the seeds are hardware-specific: a Pi must NOT use the Cubie's numbers
+    mgr._board = "pi4"
+    assert mgr._estimate(info, "1080p-h264") is None
+    # a learned value always overrides the seed (any board)
+    mgr._board = "cubie"
     mgr._perf["h264:3840x2160:1080p-h264"] = {"spf": 0.01}
     assert mgr._estimate(info, "1080p-h264") == pytest.approx(0.01 * 56.89 * 59.94)
     # an un-seeded (codec, resolution, preset) -> no estimate yet

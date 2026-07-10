@@ -297,16 +297,23 @@ def estimate_seconds(spf: Optional[float], duration: Optional[float],
     return spf * duration * fps
 
 
-# Seed performance model (wall-seconds per source frame), measured on the Radxa
-# Cubie A7S (Allwinner A733) with a 4K60 H.264 source, so a fresh install can
-# estimate a job's duration before it has run one. Keyed like the learned model
-# (see ``perf_key``); a real job overwrites the seed for its key on its first run,
-# and per-install learned values always take precedence over these.
+# Seed performance model (wall-seconds per source frame) **per board**, so a fresh
+# install can estimate a job's duration before it has run one. These are hardware-
+# specific -- the Cubie A7S numbers do NOT transfer to the Raspberry Pi 4/5, which
+# use different encoders -- so they are keyed by the detected board. Within a board
+# the keys match the learned model (see ``perf_key``); a real job overwrites the
+# seed for its key on its first run, and per-install learned values take precedence.
+# The Cubie values were measured with a 4K60 H.264 source. Boards without an entry
+# here (Pi 4/5, generic) stay unseeded -> no estimate until a job trains the model;
+# they need their own benchmarks before they get defaults.
 DEFAULT_PERF: dict = {
-    "h264:3840x2160:1080p-h264": {"spf": 0.0251},  # single hardware pass
-    "h264:3840x2160:540p-h264": {"spf": 0.0243},   # single hardware pass
-    "h264:3840x2160:720p-h264": {"spf": 0.0500},   # hardware 1080p + CPU finish
-    "h264:3840x2160:720p-h265": {"spf": 0.2297},   # CPU-only H.265 output
+    "cubie": {
+        "h264:3840x2160:1080p-h264": {"spf": 0.0251},  # single hardware pass
+        "h264:3840x2160:540p-h264": {"spf": 0.0243},   # single hardware pass
+        "h264:3840x2160:720p-h264": {"spf": 0.0500},   # hardware 1080p + CPU finish
+        "h264:3840x2160:720p-h265": {"spf": 0.2297},   # CPU-only H.265 output
+    },
+    # "pi4": {...}, "pi5": {...} -- TODO: add once benchmarked on those boards.
 }
 
 
@@ -467,7 +474,9 @@ class TranscodeManager:
         with self._perf_lock:
             entry = self._perf.get(key)
         if not isinstance(entry, dict):
-            entry = DEFAULT_PERF.get(key)  # fall back to the built-in seed
+            # Fall back to the built-in seed for THIS board only (the numbers are
+            # hardware-specific; a Pi must not use the Cubie's).
+            entry = DEFAULT_PERF.get(self._board, {}).get(key)
         spf = entry.get("spf") if isinstance(entry, dict) else None
         return estimate_seconds(spf, info.get("duration"), info.get("fps"))
 
