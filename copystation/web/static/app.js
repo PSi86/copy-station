@@ -813,16 +813,16 @@ function hidePvHint() {
   if (h) { h.hidden = true; h.innerHTML = ""; }
 }
 
-// Heavy sources (4K/HEVC) play here but stutter -- hint that a transcode gives
-// smooth playback, with a shortcut into the transcode (gear) dialog.
-function showPvHint(path) {
+// Heavy sources (bigger than 1080p / HEVC) play here but stutter -- hint that a
+// transcode gives smooth playback, with a shortcut into the transcode dialog.
+function showPvHint(path, info) {
   const h = document.getElementById("pv-hint");
   if (!h) return;
+  const res = info && info.width && info.height ? `${info.width}×${info.height} — ` : "";
   const btn = transcodeAvailable
     ? `<button id="pv-hint-tc" class="btn" type="button">Transcode…</button>` : "";
   h.innerHTML =
-    `<span>Playing the original — this may stutter. ` +
-    `Transcode it for smooth playback.</span>${btn}`;
+    `<span>${res}may stutter in the browser. Transcode for smooth playback.</span>${btn}`;
   h.hidden = false;
   const b = document.getElementById("pv-hint-tc");
   if (b) b.onclick = () => { closePreview(); openFileDialog(path); };
@@ -855,7 +855,7 @@ function openPreview(path) {
   if (previewAvailable) {
     fetch(previewInfoUrl(path), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && d.mode !== "direct" && gen === previewGen) showPvHint(path); })
+      .then((d) => { if (d && d.mode !== "direct" && gen === previewGen) showPvHint(path, d); })
       .catch(() => { /* no hint if the probe fails */ });
   }
 }
