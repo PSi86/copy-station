@@ -302,6 +302,14 @@ def test_build_gstreamer_cmd_4k_to_1080p_uses_decoder_half_scale():
     assert "aacparse" not in cmd and "name=d" not in cmd   # no audio -> linear pipeline
 
 
+def test_build_gstreamer_cmd_4k_to_540p_uses_quarter_scale():
+    # 4K -> 540p is an exact 1/4: decoder scale=2, single pass, no encoder scaler.
+    preset = {"id": "540p-h264", "height": 540, "vcodec": "libx264"}
+    cmd = build_gstreamer_cmd(_omx_encoder(), preset, "a", "b", INFO_4K_H264)
+    assert "scale=2" in cmd
+    assert not any(x.startswith("output-height") for x in cmd)
+
+
 def test_build_gstreamer_cmd_scales_bitrate_for_60fps():
     # 60fps needs ~2x the 30fps default (capped at 1.8x): 12M -> 21.6M.
     info = dict(INFO_4K_H264, fps=59.94)

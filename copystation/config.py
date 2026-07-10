@@ -203,9 +203,15 @@ DEFAULTS: dict[str, Any] = {
         # not apply to hardware encoders (they are bitrate-controlled). Argument
         # construction lives in ``copystation/transcode.py``.
         "presets": [
+            # On the Cubie the hardware decoder scales only by 1/2 or 1/4, so a
+            # target that is exactly the source height /2 or /4 is a single clean
+            # hardware pass (4K -> 1080p or 540p); other heights (e.g. 720p) are
+            # finished to the exact size by a short ffmpeg CPU pass. See encoders.py.
             {"id": "1080p-h264", "label": "1080p H.264", "height": 1080,
              "vcodec": "libx264", "crf": 21, "preset": "veryfast"},
             {"id": "720p-h264", "label": "720p H.264", "height": 720,
+             "vcodec": "libx264", "crf": 23, "preset": "veryfast"},
+            {"id": "540p-h264", "label": "540p H.264", "height": 540,
              "vcodec": "libx264", "crf": 23, "preset": "veryfast"},
             {"id": "720p-h265", "label": "720p H.265", "height": 720,
              "vcodec": "libx265", "crf": 28, "preset": "veryfast"},

@@ -136,8 +136,9 @@ boards differ a lot in what they can encode in hardware:
 > **GStreamer pipeline** on the Cubie: it hardware-**decodes** the source
 > (`omxh264dec` / `omxhevcvideodec`, so even a 4K clip never hits the CPU) and
 > downscales **in the decoder** via its `scale` property (1/2 or 1/4), then
-> hardware-encodes H.264. So a **4K→1080p** clip (an exact 1/2) is a single
-> hardware pass with the CPU essentially idle (~0.7× real-time for 4K60). The
+> hardware-encodes H.264. So a target that is exactly the source height /2 or /4
+> is a single hardware pass with the CPU essentially idle (~0.7× real-time for
+> 4K60) -- for a 4K source that is **1080p** (1/2) and **540p** (1/4). The
 > encoder's *own* scaler is deliberately not used -- it leaves a thin magenta line
 > on the bottom row -- so a target that is **not** a clean 1/2-step (e.g. 720p from
 > 4K) is decoded/downscaled to the nearest larger clean size in hardware and then

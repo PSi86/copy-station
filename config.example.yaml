@@ -210,13 +210,21 @@ transcode:
   #     source gets ~2x a 30fps one). CRF does NOTHING here -- so if a hardware
   #     transcode looks poor, RAISE `bitrate` (that is the only quality lever).
   # A per-preset `accel:` overrides the global one.
+  #
+  # Cubie A7S single-pass note: the hardware DECODER scales only by 1/2 or 1/4, so
+  # a `height` that is exactly the source height /2 or /4 is a single clean
+  # hardware pass -- for a 4K (2160p) source that is `1080p` (1/2) and `540p`
+  # (1/4). Any other height (e.g. `720p`) is hardware-scaled to the nearest larger
+  # clean size and then finished to the exact height by a short ffmpeg CPU pass
+  # (slower, more CPU). So `1080p` and `540p` are the fully-hardware presets for 4K.
   presets:
     # `bitrate` is shown on the H.264 presets so hardware quality is easy to tune;
     # remove it to fall back to the adaptive default. (720p H.265 output has no
     # hardware encoder on the Cubie, so it always runs on the CPU with `crf`.)
-    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 16M }
-    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 9M }
-    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 16M }   # 4K -> single HW pass (1/2)
+    - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 6M }    # 4K -> single HW pass (1/4)
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 9M }    # 4K -> HW 1080 + ffmpeg finish
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short

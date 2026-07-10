@@ -141,6 +141,17 @@ transcode:
   output_dirname: Transcoded
   acceleration: auto      # auto | cpu | <encoder>; Cubie A7S -> HW H.264 (omx)
   fallback_to_cpu: true
+  # The A733 hardware decoder scales only by 1/2 or 1/4, so from a 4K (2160p)
+  # source `1080p` (1/2) and `540p` (1/4) are a SINGLE clean hardware pass; `720p`
+  # is hardware-scaled to 1080p then finished to 720p by a short ffmpeg CPU pass
+  # (slower). `bitrate` is the hardware quality knob (crf is ignored there); a
+  # generous framerate-aware default applies when it is unset. Raise it if a clip
+  # looks soft. 720p H.265 output has no hardware encoder, so it runs on the CPU.
+  presets:
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 16M }   # single HW pass (1/2)
+    - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 6M }    # single HW pass (1/4)
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 9M }    # HW 1080 + ffmpeg finish
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 = CPU only
 
 # Optional GPIO user button (set the line from `gpioinfo`). Shutdown gesture
 # (DJI style): short click, release, then press and HOLD 3 s -- a plain long
