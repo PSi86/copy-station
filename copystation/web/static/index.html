@@ -40,12 +40,15 @@
 
     <section id="files-card" class="card" hidden>
       <h2>Files</h2>
-      <div class="row files-toolbar">
-        <select id="file-volume" class="select"></select>
-        <button id="file-refresh" class="btn" type="button">Refresh</button>
+      <div id="busy-hint" class="busy-hint" hidden></div>
+      <div class="files-body">
+        <div class="row files-toolbar">
+          <select id="file-volume" class="select"></select>
+          <button id="file-refresh" class="btn" type="button">Refresh</button>
+        </div>
+        <div id="file-path" class="breadcrumb muted"></div>
+        <ul id="file-list" class="filelist"></ul>
       </div>
-      <div id="file-path" class="breadcrumb muted"></div>
-      <ul id="file-list" class="filelist"></ul>
     </section>
 
     <section id="transcode-card" class="card" hidden>
@@ -88,16 +91,41 @@
         <label class="dlg-lbl" for="dlg-output">Output</label>
         <select id="dlg-output" class="select"></select>
         <span class="dlg-lbl">Path</span>
-        <span><span id="dlg-path" class="dlg-badge">--</span></span>
+        <span><span id="dlg-path" class="dlg-badge">--</span><span id="dlg-path-note" class="muted dlg-path-note"></span></span>
         <span class="dlg-lbl">Est. time</span>
         <span id="dlg-estimate" class="muted">--</span>
       </div>
 
       <div class="dialog-actions">
-        <button id="dlg-delete" class="btn danger" type="button" hidden>Delete…</button>
+        <button id="dlg-delete" class="btn danger" type="button" hidden>Delete</button>
         <span class="dlg-spacer"></span>
         <button id="dlg-cancel" class="btn" type="button">Cancel</button>
         <button id="dlg-transcode" class="btn primary" type="button">Transcode</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="folder-dialog" class="dialog">
+    <div class="dialog-body">
+      <div class="dialog-head">
+        <h3 id="fdlg-title" class="dlg-title">folder</h3>
+        <button id="fdlg-close" class="btn dlg-x" type="button" title="Close">✕</button>
+      </div>
+
+      <div class="dlg-grid">
+        <label class="dlg-lbl" for="fdlg-preset">Preset</label>
+        <select id="fdlg-preset" class="select"></select>
+        <label class="dlg-lbl" for="fdlg-output">Output</label>
+        <select id="fdlg-output" class="select"></select>
+      </div>
+
+      <div id="fdlg-summary" class="fdlg-summary">--</div>
+      <ul id="fdlg-files" class="filelist fdlg-files"></ul>
+
+      <div class="dialog-actions">
+        <span class="dlg-spacer"></span>
+        <button id="fdlg-cancel" class="btn" type="button">Cancel</button>
+        <button id="fdlg-transcode" class="btn primary" type="button">Transcode all</button>
       </div>
     </div>
   </dialog>

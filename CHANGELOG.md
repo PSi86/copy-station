@@ -36,7 +36,14 @@ all off by default, so existing status-only deployments are unaffected.
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),
   writing to a `Transcoded/` folder on the target volume (also downloadable).
-  Single-worker queue, configurable presets, cancel from the UI.
+  Single-worker queue, configurable presets, two-click cancel from the UI (a
+  first click arms the button so a long encode is never aborted by a stray click).
+- **Folder (batch) transcoding**: the ⚙ on a folder queues one independent job
+  per video file inside it under a single preset -- not one "folder job", so each
+  file picks its own hardware/CPU path and appears and cancels individually. The
+  dialog shows up front whether the files are handled uniformly or split across
+  the encoders (per-file HW / HW+CPU / CPU badges plus a count summary), via
+  `GET /api/transcode/folder-plan` and `POST /api/transcode/folder`.
 - **Board-aware hardware acceleration** with automatic **CPU fallback**
   (`transcode.acceleration`, `fallback_to_cpu`): uses the board's hardware
   encoder when it is present, otherwise software.
@@ -85,6 +92,14 @@ all off by default, so existing status-only deployments are unaffected.
   the daemon wires them through the status hub.
 
 ### Fixed
+- The web UI **disables browsing, downloads and the ⚙ controls while a copy or
+  transcode holds the volumes** (a hint explains why, and only the running job's
+  Cancel stays live), instead of letting those requests 503 against the busy
+  device.
+- A **canceled transcode again trains the duration-estimate model**: the source
+  is now probed while the volume is still mounted, so a long-enough canceled job's
+  sample is no longer silently dropped by a re-probe that failed because the
+  volume had already been unmounted.
 - Transcode output `EROFS`/read-only failures when the target card was also
   browsed: `mount_rw` now drops any other mount of the device, verifies
   writability up front, and fails early with a clear message instead of after

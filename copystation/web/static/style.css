@@ -169,6 +169,14 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .filelist .jobstats { margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .btn.tc-cancel { padding: 0.05rem 0.45rem; font-size: 0.85rem; line-height: 1.2; }
 .btn.tc-cancel:hover { border-color: var(--error); color: var(--error); }
+/* second-click confirm state: the button turns into a red "Cancel?" */
+.btn.tc-cancel.armed {
+  background: var(--error);
+  color: #2a0a05;
+  border-color: var(--error);
+  font-weight: 600;
+}
+.btn.tc-cancel.armed:hover { color: #2a0a05; filter: brightness(1.08); }
 /* download icon link on a finished job row */
 .dl { color: var(--accent); display: inline-flex; align-items: center; text-decoration: none; }
 .dl:hover { filter: brightness(1.2); }
@@ -228,10 +236,38 @@ footer { text-align: center; margin-top: 1rem; }
 .dlg-badge.hw { background: var(--ready); color: #06210f; }
 .dlg-badge.hwcpu { background: var(--detecting); color: #2a2300; }
 .dlg-badge.cpu { background: #3a4250; color: var(--fg); }
+/* plain-language explanation under the path badge (hidden when empty) */
+.dlg-path-note { display: block; margin-top: 0.3rem; font-size: 0.78rem; line-height: 1.35; }
+.dlg-path-note:empty { display: none; }
 
 .dialog-actions { display: flex; align-items: center; gap: 0.6rem; }
 .dlg-spacer { flex: 1 1 auto; }
+
+/* ----- busy state (a copy or transcode holds the volumes) ----- */
+.busy-hint {
+  background: #3a3320;
+  color: var(--detecting);
+  border: 1px solid #574a20;
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+/* Gray out and disable the whole browse body; the hint sits outside it and the
+   running job's Cancel button lives in a different card, so both stay live. */
+body.busy .files-body { opacity: 0.5; pointer-events: none; }
+.filelist .file .dirname { color: var(--muted); }
+.dl.disabled { color: var(--muted); cursor: default; pointer-events: none; opacity: 0.5; }
+
+/* ----- folder (batch) dialog ----- */
+.fdlg-summary { font-size: 0.85rem; margin: 0.2rem 0 0.7rem; }
+.fdlg-summary .muted { display: block; margin-top: 0.2rem; }
+.fdlg-files { max-height: 15rem; }
+.fdlg-files .dlg-badge { font-size: 0.7rem; }
 .btn.primary { background: var(--accent); color: #042036; border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { border-color: #5a2f2a; color: var(--error); }
 .btn.danger:hover { border-color: var(--error); background: #3a1512; }
+/* second-click confirm state: mirrors the job Cancel button (red "Delete?") */
+.btn.danger.armed { background: var(--error); color: #2a0a05; border-color: var(--error); font-weight: 600; }
+.btn.danger.armed:hover { background: var(--error); color: #2a0a05; filter: brightness(1.08); }
