@@ -207,6 +207,16 @@ def test_build_keeps_resolution_when_height_zero():
     assert cmd[cmd.index("-c:v") + 1] == "libx265"
 
 
+def test_build_cpu_bitrate_cmd_uses_bitrate_and_keeps_preset():
+    # The two-stage finishing pass encodes libx264 at a target bitrate (not CRF),
+    # so the preset ladder stays monotonic; the x264 speed preset still applies.
+    enc = cpu_encoder("libx264", rate_mode="bitrate")
+    cmd = build_ffmpeg_cmd(enc, {"height": 720, "bitrate": "9M", "preset": "veryfast"}, "a", "b")
+    assert cmd[cmd.index("-b:v") + 1] == "9M"
+    assert "-crf" not in cmd
+    assert cmd[cmd.index("-preset") + 1] == "veryfast"
+
+
 # --------------------------------------------------------------------------- #
 # GStreamer (Allwinner OpenMAX) hardware path -- Cubie A7S
 # --------------------------------------------------------------------------- #

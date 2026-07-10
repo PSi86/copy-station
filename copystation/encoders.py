@@ -180,8 +180,15 @@ def default_bitrate(height: int) -> str:
     return "2M"
 
 
-def cpu_encoder(vcodec: str) -> Encoder:
-    return Encoder(name="cpu", codec=str(vcodec or "libx264"), kind="sw", rate_mode="crf")
+def cpu_encoder(vcodec: str, rate_mode: str = "crf") -> Encoder:
+    """A software encoder. ``rate_mode`` is ``crf`` (quality) or ``bitrate`` (ABR).
+
+    ``bitrate`` is used for the GStreamer two-stage *finishing* pass, so the whole
+    preset ladder stays bitrate-consistent (a 720p finish targets the preset's
+    bitrate rather than a CRF, which otherwise made it smaller than a 540p hardware
+    encode).
+    """
+    return Encoder(name="cpu", codec=str(vcodec or "libx264"), kind="sw", rate_mode=rate_mode)
 
 
 def _hw_encoder(name: str) -> Encoder:
@@ -279,11 +286,12 @@ def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
     cmd += ["-c:v", encoder.codec]
     if encoder.rate_mode == "crf":
         cmd += ["-crf", str(preset.get("crf", 23))]
-        if encoder.kind == "sw":
-            cmd += ["-preset", str(preset.get("preset", "medium"))]
-    else:  # bitrate (hardware)
-        bitrate = str(preset.get("bitrate") or default_bitrate(height))
-        cmd += ["-b:v", bitrate]
+    else:  # bitrate (hardware V4L2 M2M, or a software finishing pass)
+        cmd += ["-b:v", str(preset.get("bitrate") or default_bitrate(height))]
+    # Software encoders take an x264/x265 speed preset in either rate mode; the
+    # hardware V4L2 encoders have none.
+    if encoder.kind == "sw":
+        cmd += ["-preset", str(preset.get("preset", "medium"))]
     cmd += list(encoder.extra_args)
 
     cmd += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]

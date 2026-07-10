@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import copystation.transcode as tc
-from copystation.mounts import NotFound, UnknownVolume
+from copystation.mounts import NotFound, PathEscapesVolume, UnknownVolume
 from copystation.status import State, StatusIndicator
 from copystation.transcode import (
     TranscodeBusy,
@@ -17,11 +17,13 @@ from copystation.transcode import (
     TranscodeUnavailable,
     UnknownPreset,
     estimate_output_bytes,
+    estimate_seconds,
     gst_progress_percent,
     gst_progress_position,
     mem_available_bytes,
     output_name,
     parse_bitrate,
+    perf_key,
     probe_video_info,
     progress_seconds,
     ram_budget,
@@ -98,7 +100,8 @@ def test_probe_video_info_skips_attached_pic_and_finds_audio(monkeypatch):
              "avg_frame_rate": "60000/1001", "r_frame_rate": "60000/1001",
              "disposition": {"attached_pic": 0}},
             {"codec_type": "audio", "codec_name": "aac"},
-        ]
+        ],
+        "format": {"duration": "56.89"},
     }
 
     class _R:
@@ -109,6 +112,7 @@ def test_probe_video_info_skips_attached_pic_and_finds_audio(monkeypatch):
     assert info["vcodec"] == "h264"
     assert (info["width"], info["height"]) == (3840, 2160)
     assert round(info["fps"], 2) == 59.94
+    assert info["duration"] == 56.89
     assert info["has_audio"] is True and info["acodec"] == "aac"
     assert info["container"] == "mp4"
 
@@ -539,6 +543,57 @@ def test_process_cubie_two_stage_for_non_half_target(tmp_path, monkeypatch):
     assert not (card / "Transcoded" / "clip_720p-h264.stage1.mp4").exists()  # cleaned up
 
 
+# --------------------------------------------------------------------------- #
+# Planning + the performance/estimate model
+# --------------------------------------------------------------------------- #
+
+def test_perf_key_and_estimate_seconds():
+    info = {"vcodec": "h264", "width": 3840, "height": 2160}
+    assert perf_key(info, "1080p-h264") == "h264:3840x2160:1080p-h264"
+    assert estimate_seconds(0.001, 60.0, 30.0) == pytest.approx(0.001 * 60 * 30)
+    assert estimate_seconds(None, 60.0, 30.0) is None
+    assert estimate_seconds(0.001, 0.0, 30.0) is None
+
+
+def test_perf_model_learns_persists_and_scales_with_fps(tmp_path):
+    mgr = _mgr(_FakeBrowse())
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}
+    info = {"vcodec": "h264", "width": 3840, "height": 2160, "duration": 60.0, "fps": 30.0}
+    assert mgr._estimate(info, "1080p-h264") is None            # no data yet
+    mgr._update_perf(info, "1080p-h264", 90.0)                  # first sample
+    assert (tmp_path / "perf.json").exists()
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(90.0)
+    # double the framerate -> ~double the estimated time (frame-count based)
+    assert mgr._estimate(dict(info, fps=60.0), "1080p-h264") == pytest.approx(180.0)
+    # a small deviation is kept, a large one overwrites (spec: overwrite on notable)
+    mgr._update_perf(info, "1080p-h264", 96.0)                  # +6.7% -> keep
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(90.0)
+    mgr._update_perf(info, "1080p-h264", 150.0)                 # +66% -> overwrite
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(150.0)
+    # a fresh manager reloads the persisted model
+    mgr2 = _mgr(_FakeBrowse())
+    mgr2._perf_file = str(tmp_path / "perf.json")
+    mgr2._perf = mgr2._load_perf()
+    assert mgr2._estimate(info, "1080p-h264") == pytest.approx(150.0)
+
+
+def test_plan_for_predicts_hw_hwcpu_and_cpu(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)   # 4K h264 source on a Cubie
+    hw = mgr.plan_for("sdb1", "clip.mp4", "1080p-h264")
+    assert hw["path"] == "hw" and hw["out_height"] == 1080
+    assert hw["info"]["width"] == 3840 and hw["info"]["size"] is not None
+    two = mgr.plan_for("sdb1", "clip.mp4", "720p-h264")
+    assert two["path"] == "hw+cpu" and two["out_height"] == 1080 and two["target_height"] == 720
+    # a codec the hardware can't take -> the CPU path
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "vp9", "width": 1920, "height": 1080, "fps": 30.0,
+        "has_audio": False, "acodec": None, "container": "webm", "duration": 10.0})
+    mgr._probe_cache.clear()
+    cpu = mgr.plan_for("sdb1", "clip.mp4", "1080p-h264")
+    assert cpu["path"] == "cpu"
+
+
 def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):
     card = _card(tmp_path)
     browse = _FakeBrowse({"sdb1": card})
@@ -801,3 +856,42 @@ def test_transcode_routes_absent_without_manager():
     client = TestClient(create_app(StationState(), Config(), transcode=None))
     assert client.get("/api/transcode").status_code == 404
     assert client.get("/api/settings").json()["features"]["transcode"] is False
+
+
+class _FakeDeleteBrowse:
+    """Minimal browse manager for the delete endpoint tests."""
+
+    def __init__(self, allow_delete=True):
+        self.allow_delete = allow_delete
+        self.deleted = []
+
+    def list_volumes(self):
+        return []
+
+    def delete_file(self, device, path):
+        if not self.allow_delete:
+            raise PathEscapesVolume("deletes are disabled")
+        if path == "missing":
+            raise NotFound("nope")
+        self.deleted.append((device, path))
+
+
+def test_api_delete_file_reports_feature_and_serialises():
+    browse = _FakeDeleteBrowse()
+    state = StationState()
+    client = TestClient(create_app(state, Config(), browse=browse, transcode=None))
+    assert client.get("/api/settings").json()["features"]["delete"] is True
+
+    res = client.delete("/api/files?device=sdb1&path=DCIM/x.mp4")
+    assert res.status_code == 200 and browse.deleted == [("sdb1", "DCIM/x.mp4")]
+    # a missing file -> 404 from the mapped BrowseError
+    assert client.delete("/api/files?device=sdb1&path=missing").status_code == 404
+    # refused while a copy is in progress
+    state.set_phase(State.COPYING)
+    assert client.delete("/api/files?device=sdb1&path=DCIM/x.mp4").status_code == 409
+
+
+def test_api_delete_disabled_feature_flag():
+    client = TestClient(create_app(StationState(), Config(),
+                                   browse=_FakeDeleteBrowse(allow_delete=False)))
+    assert client.get("/api/settings").json()["features"]["delete"] is False

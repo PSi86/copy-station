@@ -135,6 +135,10 @@ DEFAULTS: dict[str, Any] = {
         "files": {
             "enabled": True,
             "allow_download": True,
+            # Allow deleting a file from the ⚙ dialog (mounts the card read-write
+            # for the one delete, under the operation lock). Set false to keep the
+            # browser strictly read-only.
+            "allow_delete": True,
             # Where the browser mounts volumes read-only (separate from the
             # transfer mount base so the two never collide).
             "browse_base": "/run/copystation/browse",

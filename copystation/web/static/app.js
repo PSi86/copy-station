@@ -351,9 +351,9 @@ async function loadPresets() {
   }
 }
 
-async function submitTranscode(path) {
-  const preset = document.getElementById("tc-preset").value;
-  const output = document.getElementById("tc-output").value || fileState.device;
+async function submitTranscode(path, presetId, outputDevice) {
+  const preset = presetId || document.getElementById("tc-preset").value;
+  const output = outputDevice || document.getElementById("tc-output").value || fileState.device;
   if (!preset || !fileState.device) return;
   try {
     const res = await fetch("/api/transcode", {
@@ -372,6 +372,107 @@ async function submitTranscode(path) {
   }
 }
 
+// ---- file dialog (⚙) ------------------------------------------------------
+
+let deleteAvailable = false;
+const dlgState = { path: null };
+
+function pathLabel(p) {
+  return ({ hw: "Hardware", "hw+cpu": "Hardware + CPU finish", cpu: "CPU (software)" })[p] || p || "--";
+}
+function pathClass(p) {
+  return ({ hw: "hw", "hw+cpu": "hwcpu", cpu: "cpu" })[p] || "";
+}
+
+function baseName(path) {
+  return String(path || "").split("/").pop();
+}
+
+function openFileDialog(path) {
+  const dlg = document.getElementById("file-dialog");
+  dlgState.path = path;
+  document.getElementById("dlg-title").textContent = baseName(path);
+  // Mirror the main transcode controls; preselect the preset chosen there.
+  const dlgPreset = document.getElementById("dlg-preset");
+  const mainPreset = document.getElementById("tc-preset");
+  dlgPreset.innerHTML = mainPreset.innerHTML;
+  dlgPreset.value = mainPreset.value;
+  const dlgOut = document.getElementById("dlg-output");
+  dlgOut.innerHTML = document.getElementById("tc-output").innerHTML;
+  dlgOut.value = document.getElementById("tc-output").value || fileState.device;
+  for (const id of ["dlg-size", "dlg-codec", "dlg-res", "dlg-fps", "dlg-dur"]) {
+    document.getElementById(id).textContent = "…";
+  }
+  const badge = document.getElementById("dlg-path");
+  badge.textContent = "…";
+  badge.className = "dlg-badge";
+  document.getElementById("dlg-estimate").textContent = "…";
+  document.getElementById("dlg-delete").hidden = !deleteAvailable;
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", "");
+  refreshDialogPlan();
+}
+
+function closeDialog() {
+  const dlg = document.getElementById("file-dialog");
+  if (typeof dlg.close === "function") dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+async function refreshDialogPlan() {
+  const preset = document.getElementById("dlg-preset").value;
+  if (!fileState.device || !dlgState.path || !preset) return;
+  const url = `/api/transcode/plan?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(dlgState.path)}&preset=${encodeURIComponent(preset)}`;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    const badge = document.getElementById("dlg-path");
+    const est = document.getElementById("dlg-estimate");
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      badge.textContent = "--";
+      est.textContent = b.detail || `error ${res.status}`;
+      return;
+    }
+    const d = await res.json();
+    const info = d.info || {};
+    document.getElementById("dlg-size").textContent = info.size != null ? fmtBytes(info.size) : "--";
+    document.getElementById("dlg-codec").textContent =
+      (info.vcodec ? info.vcodec.toUpperCase() : "--") + (info.has_audio ? ` + ${info.acodec || "audio"}` : "");
+    document.getElementById("dlg-res").textContent =
+      info.width && info.height ? `${info.width}×${info.height}` : "--";
+    document.getElementById("dlg-fps").textContent =
+      info.fps ? `${Math.round(info.fps * 100) / 100} fps` : "--";
+    document.getElementById("dlg-dur").textContent =
+      info.duration ? fmtDuration(info.duration) : "--";
+    badge.textContent =
+      pathLabel(d.path) +
+      (d.path === "hw+cpu" && d.out_height ? ` · HW ${d.out_height}p→${d.target_height}p` : "");
+    badge.className = "dlg-badge " + pathClass(d.path);
+    est.textContent =
+      d.estimate_seconds != null ? `~${fmtDuration(d.estimate_seconds)} (from past jobs)` : "no data yet";
+  } catch (e) {
+    document.getElementById("dlg-estimate").textContent = "unavailable";
+  }
+}
+
+async function deleteCurrentFile() {
+  if (!dlgState.path) return;
+  if (!confirm(`Delete "${baseName(dlgState.path)}"? This permanently removes it from the card.`)) return;
+  try {
+    const url = `/api/files?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(dlgState.path)}`;
+    const res = await fetch(url, { method: "DELETE" });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(`Delete failed: ${b.detail || res.status}`);
+      return;
+    }
+    closeDialog();
+    loadDir(fileState.path); // refresh the (parent) listing
+  } catch (e) {
+    alert("Delete request failed");
+  }
+}
+
 async function initFeatures() {
   let features = {};
   try {
@@ -382,6 +483,7 @@ async function initFeatures() {
   }
 
   transcodeAvailable = !!features.transcode;
+  deleteAvailable = !!features.delete;
 
   if (features.files) {
     document.getElementById("files-card").hidden = false;
@@ -400,7 +502,7 @@ async function initFeatures() {
     document.getElementById("file-list").addEventListener("click", (e) => {
       const tc = e.target.closest("button.tc[data-file]");
       if (tc) {
-        submitTranscode(tc.getAttribute("data-file"));
+        openFileDialog(tc.getAttribute("data-file"));
         return;
       }
       const a = e.target.closest("a[data-dir]");
@@ -416,6 +518,24 @@ async function initFeatures() {
       const btn = e.target.closest("button.tc-cancel[data-job]");
       if (btn) cancelJob(btn.getAttribute("data-job"));
     });
+
+    // File dialog (opened by the ⚙ button on a file).
+    const dlg = document.getElementById("file-dialog");
+    document.getElementById("dlg-preset").addEventListener("change", refreshDialogPlan);
+    document.getElementById("dlg-close").addEventListener("click", closeDialog);
+    document.getElementById("dlg-cancel").addEventListener("click", closeDialog);
+    document.getElementById("dlg-delete").addEventListener("click", deleteCurrentFile);
+    document.getElementById("dlg-transcode").addEventListener("click", () => {
+      submitTranscode(
+        dlgState.path,
+        document.getElementById("dlg-preset").value,
+        document.getElementById("dlg-output").value || fileState.device
+      );
+      closeDialog();
+    });
+    // Click on the backdrop (outside the body) closes the dialog.
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) closeDialog(); });
+
     await loadPresets();
     loadJobs();
     setInterval(loadJobs, 1500);

@@ -136,6 +136,7 @@ web:
   files:
     enabled: true
     allow_download: true
+    allow_delete: true                     # allow deleting a file from the ⚙ dialog
     browse_base: /run/copystation/browse   # separate from the transfer mounts
     idle_unmount_seconds: 120              # release a browsed volume when idle
 

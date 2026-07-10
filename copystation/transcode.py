@@ -167,7 +167,7 @@ def probe_video_info(src: Any) -> dict:
     empty defaults, which makes ``gst_can_handle`` return False (CPU fallback).
     """
     info: dict = {
-        "vcodec": None, "width": 0, "height": 0, "fps": 0.0,
+        "vcodec": None, "width": 0, "height": 0, "fps": 0.0, "duration": None,
         "has_audio": False, "acodec": None,
         "container": Path(str(src)).suffix.lower().lstrip("."),
     }
@@ -175,11 +175,12 @@ def probe_video_info(src: Any) -> dict:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries",
              "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate"
-             ":stream_disposition=attached_pic",
+             ":stream_disposition=attached_pic:format=duration",
              "-of", "json", str(src)],
             capture_output=True, text=True, check=True,
         ).stdout
-        for st in json.loads(out).get("streams", []):
+        data = json.loads(out)
+        for st in data.get("streams", []):
             kind = st.get("codec_type")
             if kind == "video" and info["vcodec"] is None:
                 # Skip embedded cover art / thumbnails (e.g. the DJI MJPEG preview).
@@ -193,6 +194,10 @@ def probe_video_info(src: Any) -> dict:
             elif kind == "audio" and not info["has_audio"]:
                 info["has_audio"] = True
                 info["acodec"] = st.get("codec_name")
+        try:
+            info["duration"] = float((data.get("format") or {}).get("duration"))
+        except (TypeError, ValueError):
+            pass
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
         pass
     return info
@@ -269,6 +274,29 @@ def gst_progress_position(line: str) -> Optional[int]:
     return None
 
 
+def perf_key(info: dict, preset_id: str) -> str:
+    """Stable performance-model key: source codec + resolution + preset id.
+
+    Keyed by the source parameters that dominate transcode time (codec and
+    resolution) plus the preset (which fixes the target and the HW/CPU path).
+    Framerate is not in the key -- it is folded into the estimate as a frame count.
+    """
+    return (f"{str(info.get('vcodec') or '?').lower()}:"
+            f"{int(info.get('width') or 0)}x{int(info.get('height') or 0)}:{preset_id}")
+
+
+def estimate_seconds(spf: Optional[float], duration: Optional[float],
+                     fps: Optional[float]) -> Optional[float]:
+    """Estimated wall time = seconds-per-frame x frame count (duration x fps).
+
+    Framerate is folded in via the frame count, so a source at double the fps of
+    the learned sample estimates to double the time. ``None`` when unknown.
+    """
+    if not spf or not duration or not fps or duration <= 0 or fps <= 0:
+        return None
+    return spf * duration * fps
+
+
 class TranscodeManager:
     """Single-worker transcode job queue backed by ffmpeg."""
 
@@ -287,6 +315,9 @@ class TranscodeManager:
         self._ram_buffer = bool(tc.get("ram_buffer", True))
         self._ram_buffer_fraction = float(tc.get("ram_buffer_fraction", 2 / 3))
         self._work_base = "/run/copystation/transcode-work"
+        # Learned wall-time-per-frame per (source codec+resolution, preset), used
+        # to estimate a new job's duration. Persisted so it survives restarts.
+        self._perf_file = str(tc.get("perf_file", "/var/lib/copystation/transcode-perf.json"))
         self._available = ffmpeg_available()
         # Detect the board and probe which encoders ffmpeg actually has, once at
         # startup, so hardware acceleration can be picked per job without re-probing.
@@ -298,6 +329,9 @@ class TranscodeManager:
         )
         self._queue: "queue.Queue[int]" = queue.Queue()
         self._lock = threading.Lock()
+        self._perf_lock = threading.Lock()
+        self._perf: dict[str, Any] = self._load_perf()
+        self._probe_cache: dict[str, Any] = {}  # path -> (stat-sig, probed info)
         self._jobs: dict[int, dict] = {}
         self._order: list[int] = []
         self._seq = 0
@@ -338,6 +372,108 @@ class TranscodeManager:
     def _has_active_job(self) -> bool:
         with self._lock:
             return any(j["status"] in ("queued", "running") for j in self._jobs.values())
+
+    # ----- probing / planning / performance model -------------------------------
+
+    def _probe(self, src: Path) -> dict:
+        """`probe_video_info` with a small cache keyed by path + mtime + size."""
+        key = str(src)
+        try:
+            st = src.stat()
+            sig = (st.st_mtime, st.st_size)
+        except OSError:
+            sig = None
+        with self._lock:
+            cached = self._probe_cache.get(key)
+            if cached is not None and cached[0] == sig:
+                return cached[1]
+        info = probe_video_info(src)
+        with self._lock:
+            self._probe_cache[key] = (sig, info)
+        return info
+
+    def _plan(self, preset: dict, info: dict) -> tuple:
+        """Which path a (preset, source) will take: ``hw`` / ``hw+cpu`` / ``cpu``.
+
+        Returns ``(path, produced_height)``: ``hw`` is a single hardware pass,
+        ``hw+cpu`` a hardware decode-scale plus a CPU finishing pass, ``cpu`` a pure
+        software transcode.
+        """
+        encoders = self._encoders_for(preset)
+        first = encoders[0] if encoders else None
+        if first is not None and first.is_gstreamer and gst_can_handle(info):
+            target_h = int(preset.get("height", 0) or 0)
+            out_h = gstreamer_output_height(int(info.get("height") or 0), target_h)
+            if target_h > 0 and out_h > 0 and out_h != target_h:
+                return "hw+cpu", out_h
+            return "hw", out_h
+        return "cpu", int(preset.get("height", 0) or 0)
+
+    def plan_for(self, input_device: str, input_path: str, preset_id: str) -> dict:
+        """File properties + predicted path + duration estimate for the web dialog."""
+        if not self._available:
+            raise TranscodeUnavailable("ffmpeg is not installed on the station")
+        preset = self._preset(preset_id)                              # -> UnknownPreset
+        src = self._browse.resolve_input(input_device, input_path)    # -> BrowseError
+        info = dict(self._probe(src))
+        try:
+            info["size"] = src.stat().st_size
+        except OSError:
+            info["size"] = None
+        path_kind, out_h = self._plan(preset, info)
+        keep = ("vcodec", "width", "height", "fps", "duration",
+                "has_audio", "acodec", "container", "size")
+        return {
+            "preset": preset_id,
+            "info": {k: info.get(k) for k in keep},
+            "path": path_kind,
+            "out_height": out_h,
+            "target_height": int(preset.get("height", 0) or 0),
+            "estimate_seconds": self._estimate(info, preset_id),
+        }
+
+    def _load_perf(self) -> dict:
+        try:
+            data = json.loads(Path(self._perf_file).read_text())
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_perf(self) -> None:
+        try:
+            path = Path(self._perf_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._perf, indent=2, sort_keys=True))
+            tmp.replace(path)
+        except OSError as exc:  # pragma: no cover - best effort
+            _LOG.warning("Could not persist transcode perf model: %s", exc)
+
+    def _estimate(self, info: dict, preset_id: str) -> Optional[float]:
+        with self._perf_lock:
+            entry = self._perf.get(perf_key(info, preset_id))
+        spf = entry.get("spf") if isinstance(entry, dict) else None
+        return estimate_seconds(spf, info.get("duration"), info.get("fps"))
+
+    def _update_perf(self, info: dict, preset_id: str, wall_seconds: float) -> None:
+        """Learn/refresh seconds-per-frame for this source+preset after a job.
+
+        Only overwrites the stored value on a notable deviation (>15%), so normal
+        run-to-run noise does not churn the model.
+        """
+        duration, fps = info.get("duration"), info.get("fps")
+        if not duration or not fps or duration <= 0 or fps <= 0 or wall_seconds <= 0:
+            return
+        frames = duration * fps
+        spf = wall_seconds / frames
+        key = perf_key(info, preset_id)
+        with self._perf_lock:
+            cur = (self._perf.get(key) or {}).get("spf")
+            if cur and abs(spf - cur) / cur <= 0.15:
+                return
+            self._perf[key] = {"spf": spf, "wall": round(wall_seconds, 1),
+                               "frames": int(frames)}
+        self._save_perf()
 
     def snapshot(self) -> dict:
         now = time.monotonic()
@@ -407,6 +543,7 @@ class TranscodeManager:
                 "output_path": None,
                 "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
                 "hw": False,           # True if a hardware encoder was used
+                "path": None,          # "hw" | "hw+cpu" | "cpu" (chosen encode path)
                 "input_size": None,    # source file size in bytes
                 "output_size": None,   # transcoded file size in bytes (once done)
                 "ram_buffered": False, # True if staged through a RAM tmpfs
@@ -515,6 +652,12 @@ class TranscodeManager:
                         self._set(job_id, output_size=dst.stat().st_size)
                     except OSError:  # pragma: no cover - defensive
                         pass
+                    # Learn the wall-time-per-frame so future jobs can be estimated.
+                    try:
+                        self._update_perf(self._probe(src), preset_id,
+                                          time.monotonic() - started)
+                    except Exception:  # pragma: no cover - perf is best-effort
+                        pass
                     subprocess.run(["sync"], check=False)
                 finally:
                     self._browse.umount_rw(output_device)
@@ -622,7 +765,7 @@ class TranscodeManager:
         for idx, enc in enumerate(encoders):
             if enc.is_gstreamer:
                 if info is None:
-                    info = probe_video_info(src)
+                    info = self._probe(src)
                 if not gst_can_handle(info):
                     _LOG.info(
                         "Transcode #%d: %s cannot handle this source "
@@ -641,6 +784,7 @@ class TranscodeManager:
                 if enc.is_gstreamer:
                     self._run_gstreamer(job_id, src, dst, preset, info, enc, duration)
                 else:
+                    self._set(job_id, path="cpu")
                     self._run_encode(job_id, build_ffmpeg_cmd(enc, preset, src, dst),
                                      duration, "ffmpeg")
                 return
@@ -677,25 +821,31 @@ class TranscodeManager:
         target_h = int(preset.get("height", 0) or 0)
         out_h = gstreamer_output_height(int(info.get("height") or 0), target_h)
         if not (target_h > 0 and out_h > 0 and out_h != target_h):
+            self._set(job_id, path="hw")
             self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, dst, info),
                              duration, "gstreamer", src_fps=src_fps)
             return
-        # Two-stage: hardware decode-scale to out_h, then a CPU scale to target_h.
+        # Two-stage: hardware decode-scale to out_h (bar 0-50%), then a CPU scale to
+        # target_h (bar 50-100%). The finish is bitrate-controlled (not CRF) so the
+        # preset ladder stays monotonic (a 720p finish targets the preset's bitrate).
         stage1 = dst.parent / f"{dst.stem}.stage1.mp4"
         _LOG.info("Transcode #%d: HW %dp, then CPU finish -> %dp", job_id, out_h, target_h)
-        self._set(job_id, note=f"HW {out_h}p, CPU finish {target_h}p")
+        self._set(job_id, path="hw+cpu", note=f"pass 1/2: HW {out_h}p")
         try:
             self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, stage1, info),
-                             duration, "gstreamer", src_fps=src_fps)
-            self._set(job_id, encoder=f"{enc.name}+cpu", percent=0)
+                             duration, "gstreamer", src_fps=src_fps,
+                             pct_base=0.0, pct_span=50.0)
+            self._set(job_id, encoder=f"{enc.name}+cpu", note=f"pass 2/2: CPU {target_h}p")
             self._run_encode(job_id, build_ffmpeg_cmd(
-                cpu_encoder(str(preset.get("vcodec", "libx264"))), preset, stage1, dst),
-                duration, "ffmpeg")
+                cpu_encoder(str(preset.get("vcodec", "libx264")), rate_mode="bitrate"),
+                preset, stage1, dst),
+                duration, "ffmpeg", pct_base=50.0, pct_span=50.0)
         finally:
             _cleanup(stage1)
 
     def _run_encode(self, job_id: int, cmd: List[str], duration: Optional[float],
-                    engine: str = "ffmpeg", src_fps: Optional[float] = None) -> None:
+                    engine: str = "ffmpeg", src_fps: Optional[float] = None,
+                    pct_base: float = 0.0, pct_span: float = 100.0) -> None:
         """Run one encoder subprocess, tracking progress and honouring cancel.
 
         ``engine`` selects how progress is read: ffmpeg's ``-progress`` stream, or
@@ -705,6 +855,9 @@ class TranscodeManager:
         GStreamer job also gets a stall watchdog (the OMX stack can wedge; see
         ``GST_STALL_SECONDS``). GStreamer's stderr is merged into stdout so the
         ``progressreport`` lines are captured regardless of the chatty OMX output.
+
+        ``pct_base``/``pct_span`` map this stage's 0-100% onto a sub-range of the
+        job's bar, so a two-pass job fills 0-50% then 50-100% (not twice to 100%).
         """
         is_gst = engine == "gstreamer"
         stderr = subprocess.STDOUT if is_gst else subprocess.DEVNULL
@@ -741,6 +894,13 @@ class TranscodeManager:
             )
             watchdog.start()
 
+        def _emit(raw_pct: float) -> None:
+            # Map this stage's 0-100% onto [pct_base, pct_base+pct_span] of the bar.
+            scaled = pct_base + max(0.0, min(100.0, raw_pct)) * pct_span / 100.0
+            p = max(0, min(99, int(scaled)))
+            self._set(job_id, percent=p)
+            self._hub.set_transcode_progress(p / 100.0)  # LEDs + display
+
         try:
             assert proc.stdout is not None
             t0 = time.monotonic()  # encode start, for the GStreamer speed estimate
@@ -751,9 +911,7 @@ class TranscodeManager:
                 if is_gst:
                     pct = gst_progress_percent(line)
                     if pct is not None:
-                        p = max(0, min(99, int(pct)))
-                        self._set(job_id, percent=p)
-                        self._hub.set_transcode_progress(p / 100.0)  # LEDs + display
+                        _emit(pct)
                     pos = gst_progress_position(line)
                     if pos is not None:
                         elapsed = now - t0
@@ -767,9 +925,7 @@ class TranscodeManager:
                     continue
                 secs = progress_seconds(line)
                 if secs is not None and duration and duration > 0:
-                    pct = max(0, min(99, int(secs / duration * 100)))
-                    self._set(job_id, percent=pct)
-                    self._hub.set_transcode_progress(pct / 100.0)  # drives LEDs + display
+                    _emit(secs / duration * 100)
                 elif line.startswith("fps="):
                     try:
                         fps = float(line.split("=", 1)[1])
