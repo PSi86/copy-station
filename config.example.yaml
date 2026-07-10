@@ -232,6 +232,16 @@ transcode:
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # 4K -> HW 1080 + CPU finish, crf
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only, crf
 
+# In-browser video preview / playback. Clicking a file in the web browser plays
+# it directly (download moves to the gear dialog). Sources a browser plays well
+# (H.264 at/below `max_direct_height`, mp4/mov/webm) play smoothly; heavier ones
+# (4K, HEVC, ...) still play the original but may stutter, and the player shows a
+# hint to transcode the file (from the gear dialog) for smooth playback. Needs
+# ffprobe; enabled with the file browser unless turned off here.
+preview:
+  enabled: true
+  max_direct_height: 1080   # H.264 at/below this plays without the "transcode" hint
+
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
 # activation click (< max_click_seconds) followed by a 0.2-1.0 s release -- an

@@ -200,8 +200,46 @@ footer { text-align: center; margin-top: 1rem; }
   color: var(--fg);
   padding: 0;
 }
+.dialog.preview { width: min(48rem, calc(100vw - 2rem)); }
 .dialog::backdrop { background: rgba(6, 8, 12, 0.6); }
 .dialog-body { padding: 1rem; }
+
+/* ----- media preview / player ----- */
+.pv-media {
+  margin: 0.8rem 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 8rem;
+  background: #0c0e12;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pv-video, .pv-img { display: block; max-width: 100%; max-height: 70vh; }
+.pv-fallback { padding: 2rem 1rem; text-align: center; }
+/* "transcode for smooth playback" hint under the player (bigger-than-1080p/HEVC) */
+.pv-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.7rem 0 0.9rem;
+  padding: 0.55rem 0.7rem;
+  background: #3a3320;
+  color: var(--detecting);
+  border: 1px solid #574a20;
+  border-radius: 8px;
+  font-size: 0.83rem;
+}
+/* the attribute selector must win over `display: flex` above, or an empty bar
+   shows for direct-play videos (where the hint is never populated) */
+.pv-hint[hidden] { display: none; }
+.pv-hint span { flex: 1 1 12rem; }
+.pv-hint .btn { flex: 0 0 auto; }
+/* icon-only download button in the preview modal */
+.btn.dl-btn { display: inline-flex; align-items: center; padding: 0.35rem 0.6rem; }
+.btn.dl-btn svg { display: block; }
+a#dlg-download, a#pv-download { text-decoration: none; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
 .dlg-title { font-size: 1rem; margin: 0; word-break: break-all; }
 .btn.dlg-x { padding: 0.1rem 0.5rem; line-height: 1.2; }

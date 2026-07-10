@@ -97,6 +97,7 @@
       </div>
 
       <div class="dialog-actions">
+        <a id="dlg-download" class="btn" download hidden>Download</a>
         <button id="dlg-delete" class="btn danger" type="button" hidden>Delete</button>
         <span class="dlg-spacer"></span>
         <button id="dlg-cancel" class="btn" type="button">Cancel</button>
@@ -126,6 +127,21 @@
         <span class="dlg-spacer"></span>
         <button id="fdlg-cancel" class="btn" type="button">Cancel</button>
         <button id="fdlg-transcode" class="btn primary" type="button">Transcode all</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="preview-dialog" class="dialog preview">
+    <div class="dialog-body">
+      <div class="dialog-head">
+        <h3 id="pv-title" class="dlg-title">file</h3>
+        <button id="pv-close" class="btn dlg-x" type="button" title="Close">✕</button>
+      </div>
+      <div id="pv-media" class="pv-media"></div>
+      <div id="pv-hint" class="pv-hint" hidden></div>
+      <div class="dialog-actions">
+        <span class="dlg-spacer"></span>
+        <a id="pv-download" class="btn dl-btn" download title="Download" aria-label="Download"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></svg></a>
       </div>
     </div>
   </dialog>

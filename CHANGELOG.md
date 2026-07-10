@@ -32,6 +32,19 @@ all off by default, so existing status-only deployments are unaffected.
   when idle; path traversal (`..`, symlinks) is refused.
 - Optional **HTTP Basic auth** for the whole interface (`web.auth`), off by
   default and fail-safe (rejects when enabled without a password).
+- **In-browser preview / playback** (`/api/files/stream`): clicking a file now
+  plays the **original** in place (an `<video>`/`<img>` in a modal) instead of
+  downloading it -- instant, no wait. The stream is served **inline** with a real
+  content type and honours HTTP Range requests, so playback seeks and buffers
+  without fetching the whole (multi-GB) file. **Download moved to the ⚙ dialog**
+  (and is also offered inside the preview). Streaming obeys the same
+  `allow_download` gate as a download (exposed as a `download` capability flag).
+- **"Transcode for smooth playback" hint** (`preview` block, `/api/files/preview-info`):
+  sources a browser/SoC can't play smoothly (4K, HEVC, ...) still play the original
+  (which may stutter -- the Cubie's VPU decodes 4K60 at ~0.55x realtime, a hardware
+  ceiling), and the player shows a hint with a shortcut into the transcode dialog.
+  So a user gets an instant rough look and starts a transcode only when they want
+  smooth playback -- rather than always paying a transcode wait up front.
 
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),

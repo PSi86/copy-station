@@ -210,6 +210,55 @@ def test_download_disabled_when_configured(tmp_path):
     assert res.status_code == 403
 
 
+def test_stream_serves_inline_with_ranges(tmp_path):
+    client = _client(_FakeBrowse(Config(), _card(tmp_path)))
+    res = client.get("/api/files/stream", params={"device": "sdb1", "path": "DCIM/clip.mp4"})
+    assert res.status_code == 200
+    # Inline (played in place) with a real content type, and seekable.
+    assert res.headers["content-type"].startswith("video/mp4")
+    assert res.headers.get("content-disposition", "").startswith("inline")
+    assert res.headers.get("accept-ranges") == "bytes"
+    assert len(res.content) == 2048
+
+
+def test_stream_supports_range_request(tmp_path):
+    client = _client(_FakeBrowse(Config(), _card(tmp_path)))
+    res = client.get(
+        "/api/files/stream",
+        params={"device": "sdb1", "path": "DCIM/clip.mp4"},
+        headers={"Range": "bytes=0-99"},
+    )
+    assert res.status_code == 206
+    assert res.headers["content-range"] == "bytes 0-99/2048"
+    assert len(res.content) == 100
+
+
+def test_stream_obeys_the_download_gate(tmp_path):
+    # Streaming exposes the same bytes as a download, so allow_download=False
+    # blocks it too.
+    cfg = Config()
+    cfg.data["web"]["files"]["allow_download"] = False
+    client = _client(_FakeBrowse(cfg, _card(tmp_path)), config=cfg)
+    res = client.get("/api/files/stream", params={"device": "sdb1", "path": "DCIM/clip.mp4"})
+    assert res.status_code == 403
+
+
+def test_stream_traversal_is_403(tmp_path):
+    client = _client(_FakeBrowse(Config(), _card(tmp_path)))
+    res = client.get("/api/files/stream", params={"device": "sdb1", "path": "../../secret"})
+    assert res.status_code == 403
+
+
+def test_settings_download_flag(tmp_path):
+    card = _card(tmp_path)
+    assert _client(_FakeBrowse(Config(), card)).get(
+        "/api/settings").json()["features"]["download"] is True
+    cfg = Config()
+    cfg.data["web"]["files"]["allow_download"] = False
+    off = _client(_FakeBrowse(cfg, card), config=cfg)
+    assert off.get("/api/settings").json()["features"]["download"] is False
+
+
 def test_file_routes_absent_without_browser():
     # No BrowseManager -> the file endpoints are not registered at all.
     client = TestClient(create_app(StationState(), Config(), browse=None))

@@ -226,14 +226,15 @@ function renderFileList(entries) {
         `<li class="file dir">${nameCell}<span class="fmeta">${tcBtn}</span></li>`
       );
     } else {
-      // A download link only while idle; a plain name while busy (the device is
-      // held by the running job, so the download would 503).
+      // Clicking the name previews/plays the file in place (streamed with range
+      // requests -- no full download); download moved to the ⚙ dialog. Inert while
+      // busy (the device is held by the running job) or when downloads are off.
       let nameCell;
-      if (uiBusy) {
+      if (uiBusy || !downloadAvailable) {
         nameCell = `<span class="fname">${escapeHtml(e.name)}</span>`;
       } else {
-        const url = `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(full)}`;
-        nameCell = `<a class="fname" href="${url}" download>${escapeHtml(e.name)}</a>`;
+        const url = `/api/files/stream?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(full)}`;
+        nameCell = `<a class="fname" href="${url}" data-preview="${escapeHtml(full)}" title="Preview / play">${escapeHtml(e.name)}</a>`;
       }
       const tcBtn = transcodeAvailable
         ? `<button class="btn tc" type="button" data-file="${escapeHtml(full)}" title="Transcode this file"${dis}>⚙</button>`
@@ -483,6 +484,8 @@ async function submitTranscode(path, presetId, outputDevice) {
 // ---- file dialog (⚙) ------------------------------------------------------
 
 let deleteAvailable = false;
+let downloadAvailable = false;
+let previewAvailable = false;
 const dlgState = { path: null };
 
 function pathLabel(p) {
@@ -530,6 +533,9 @@ function openFileDialog(path) {
   document.getElementById("dlg-path-note").textContent = "";
   document.getElementById("dlg-estimate").textContent = "…";
   document.getElementById("dlg-delete").hidden = !deleteAvailable;
+  const dlDownload = document.getElementById("dlg-download");
+  dlDownload.hidden = !downloadAvailable;
+  if (downloadAvailable) dlDownload.href = downloadUrl(path);
   disarmDelete(); // start every dialog with the delete button un-armed
   if (typeof dlg.showModal === "function") dlg.showModal();
   else dlg.setAttribute("open", "");
@@ -736,6 +742,135 @@ async function submitFolder() {
   }
 }
 
+// ---- media preview / player (click a file name) --------------------------
+
+const PREVIEW_VIDEO_EXTS = new Set([
+  "mp4", "m4v", "mov", "webm", "ogg", "ogv", "mkv", "avi", "mts", "m2ts", "ts",
+  "mpg", "mpeg", "3gp", "wmv", "flv",
+]);
+const PREVIEW_IMAGE_EXTS = new Set([
+  "jpg", "jpeg", "png", "gif", "webp", "bmp", "avif", "svg",
+]);
+
+function extOf(name) {
+  const s = String(name);
+  const i = s.lastIndexOf(".");
+  return i >= 0 ? s.slice(i + 1).toLowerCase() : "";
+}
+
+function streamUrl(path) {
+  return `/api/files/stream?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
+function downloadUrl(path) {
+  return `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
+
+let previewGen = 0; // invalidates an in-flight open when the dialog is closed/reopened
+
+function previewInfoUrl(path) {
+  return `/api/files/preview-info?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
+
+// Dropping the media element cancels the in-flight stream, so the station stops
+// serving the file the moment the player closes.
+function stopPreviewMedia() {
+  previewGen++; // ignore any open() still awaiting preview-info
+  hidePvHint();
+  const media = document.getElementById("pv-media");
+  if (!media) return;
+  const v = media.querySelector("video");
+  if (v) {
+    try { v.pause(); } catch (e) { /* ignore */ }
+    v.removeAttribute("src");
+    v.load();
+  }
+  media.innerHTML = "";
+}
+
+function newPreviewVideo() {
+  const media = document.getElementById("pv-media");
+  media.innerHTML =
+    `<video class="pv-video" controls autoplay playsinline></video>` +
+    `<p class="pv-fallback muted" hidden>This file can't be played in the browser — use Download.</p>`;
+  return media.querySelector("video");
+}
+function showPreviewFallback() {
+  const media = document.getElementById("pv-media");
+  const v = media && media.querySelector("video");
+  if (v) v.hidden = true;
+  const fb = media && media.querySelector(".pv-fallback");
+  if (fb) fb.hidden = false;
+}
+
+function playDirectVideo(path) {
+  const v = newPreviewVideo();
+  v.addEventListener("error", showPreviewFallback);
+  v.src = streamUrl(path);
+  // `autoplay` alone is often ignored for videos with sound; an explicit play()
+  // inside the click gesture starts it (falls back to the play button if blocked).
+  const p = v.play();
+  if (p && p.catch) p.catch(() => { /* autoplay blocked -- user presses play */ });
+}
+
+function hidePvHint() {
+  const h = document.getElementById("pv-hint");
+  if (h) { h.hidden = true; h.innerHTML = ""; }
+}
+
+// Heavy sources (bigger than 1080p / HEVC) play here but stutter -- hint that a
+// transcode gives smooth playback, with a shortcut into the transcode dialog.
+function showPvHint(path, info) {
+  const h = document.getElementById("pv-hint");
+  if (!h) return;
+  const res = info && info.width && info.height ? `${info.width}×${info.height} — ` : "";
+  const btn = transcodeAvailable
+    ? `<button id="pv-hint-tc" class="btn" type="button">Transcode…</button>` : "";
+  h.innerHTML =
+    `<span>${res}may stutter in the browser. Transcode for smooth playback.</span>${btn}`;
+  h.hidden = false;
+  const b = document.getElementById("pv-hint-tc");
+  if (b) b.onclick = () => { closePreview(); openFileDialog(path); };
+}
+
+function openPreview(path) {
+  if (!downloadAvailable) return; // streaming obeys the same gate as download
+  const gen = ++previewGen;
+  const dlg = document.getElementById("preview-dialog");
+  document.getElementById("pv-title").textContent = baseName(path);
+  document.getElementById("pv-download").href = downloadUrl(path);
+  hidePvHint();
+  const media = document.getElementById("pv-media");
+  const ext = extOf(baseName(path));
+  media.innerHTML = "";
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", "");
+
+  if (PREVIEW_IMAGE_EXTS.has(ext)) {
+    media.innerHTML = `<img class="pv-img" src="${streamUrl(path)}" alt="${escapeHtml(baseName(path))}">`;
+    return;
+  }
+  if (!PREVIEW_VIDEO_EXTS.has(ext)) {
+    media.innerHTML = `<p class="pv-fallback muted">No inline preview for this file type — use Download.</p>`;
+    return;
+  }
+  // Play the ORIGINAL directly -- instant, no wait (it may stutter for 4K/HEVC).
+  playDirectVideo(path);
+  // Ask the server whether it will stutter; if so, show the transcode hint.
+  if (previewAvailable) {
+    fetch(previewInfoUrl(path), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.mode !== "direct" && gen === previewGen) showPvHint(path, d); })
+      .catch(() => { /* no hint if the probe fails */ });
+  }
+}
+
+function closePreview() {
+  stopPreviewMedia();
+  const dlg = document.getElementById("preview-dialog");
+  if (typeof dlg.close === "function") dlg.close();
+  else dlg.removeAttribute("open");
+}
+
 async function initFeatures() {
   let features = {};
   try {
@@ -747,6 +882,8 @@ async function initFeatures() {
 
   transcodeAvailable = !!features.transcode;
   deleteAvailable = !!features.delete;
+  downloadAvailable = !!features.download;
+  previewAvailable = !!features.preview;
 
   if (features.files) {
     document.getElementById("files-card").hidden = false;
@@ -778,11 +915,27 @@ async function initFeatures() {
         openFileDialog(tc.getAttribute("data-file"));
         return;
       }
+      const pv = e.target.closest("a[data-preview]");
+      if (pv) {
+        // Let ctrl/cmd/shift-click fall through to the href (open the raw stream
+        // in a new tab); a plain click opens the in-app player.
+        if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        openPreview(pv.getAttribute("data-preview"));
+        return;
+      }
       const a = e.target.closest("a[data-dir]");
       if (!a) return;
       e.preventDefault();
       loadDir(a.getAttribute("data-dir"));
     });
+
+    // Media preview / player (opened by clicking a file name).
+    const pvdlg = document.getElementById("preview-dialog");
+    document.getElementById("pv-close").addEventListener("click", closePreview);
+    pvdlg.addEventListener("click", (e) => { if (e.target === pvdlg) closePreview(); });
+    // Native <dialog> close (Esc / backdrop) must also stop the stream.
+    pvdlg.addEventListener("close", stopPreviewMedia);
   }
 
   if (transcodeAvailable) {

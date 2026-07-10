@@ -187,7 +187,7 @@ def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
     try:
         from .web import start_web_server
 
-        browse, transcode = _build_web_features(hub, config)
+        browse, transcode, preview = _build_web_features(hub, config)
         start_web_server(
             hub.state,
             web_cfg.get("host", "0.0.0.0"),
@@ -195,6 +195,7 @@ def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
             config=config,
             browse=browse,
             transcode=transcode,
+            preview=preview,
         )
         return True
     except Exception as exc:
@@ -209,10 +210,10 @@ def _build_web_features(hub: StatusHub, config: Config):
     feature yields ``None``, and the web app simply hides that panel. Never lets
     an optional feature stop the (status) web interface from coming up.
 
-    Returns ``(browse, transcode)`` where ``browse`` is passed to the web app
-    only to expose the file endpoints -- it is ``None`` unless the file browser
+    Returns ``(browse, transcode, preview)`` where ``browse`` is passed to the web
+    app only to expose the file endpoints -- it is ``None`` unless the file browser
     itself is enabled, even when transcoding (which needs its own mount access)
-    is on.
+    is on. ``preview`` is the in-browser player backend.
     """
     files_enabled = (config.get("web", {}) or {}).get("files", {}).get("enabled", True)
     transcode_enabled = bool((config.get("transcode", {}) or {}).get("enabled"))
@@ -235,8 +236,21 @@ def _build_web_features(hub: StatusHub, config: Config):
         except Exception as exc:  # pragma: no cover - defensive
             _LOG.warning("Transcoding unavailable: %s", exc)
 
+    # In-browser preview/playback needs the file browser and ffmpeg; enabled with
+    # the browser unless explicitly turned off (preview.enabled: false).
+    preview = None
+    preview_enabled = (config.get("preview", {}) or {}).get("enabled", True)
+    if files_enabled and browse is not None and preview_enabled:
+        try:
+            from .preview import PreviewManager
+
+            preview = PreviewManager(config, browse, hub.state)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("Video preview unavailable: %s", exc)
+
     # Only expose the file endpoints when the browser itself is enabled.
-    return (browse if files_enabled else None), transcode
+    browse_out = browse if files_enabled else None
+    return browse_out, transcode, (preview if files_enabled else None)
 
 
 def run_simulation(args: argparse.Namespace, config: Config) -> int:

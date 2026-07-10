@@ -26,19 +26,20 @@ def start_web_server(
     config: "Optional[Config]" = None,
     browse: Any = None,
     transcode: Any = None,
+    preview: Any = None,
 ) -> threading.Thread:
     """Start the web server in a daemon thread and return the thread.
 
     Imports are local so the rest of the daemon runs even if FastAPI/uvicorn are
     not installed (the caller logs and continues). ``config`` enables auth and
-    gates the optional file-browser/transcode features; ``browse``/``transcode``
-    are the managers backing them (``None`` when disabled/unavailable).
+    gates the optional file-browser/transcode features; ``browse``/``transcode``/
+    ``preview`` are the managers backing them (``None`` when disabled/unavailable).
     """
     import uvicorn
 
     from .app import create_app
 
-    app = create_app(state, config, browse=browse, transcode=transcode)
+    app = create_app(state, config, browse=browse, transcode=transcode, preview=preview)
     uvicorn_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(uvicorn_config)
     # We are not on the main thread, so uvicorn must not install signal handlers.

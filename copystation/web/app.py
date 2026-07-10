@@ -38,6 +38,7 @@ from ..mounts import (
     PathEscapesVolume,
     UnknownVolume,
 )
+from ..preview import PreviewUnavailable
 from ..status import State
 from ..transcode import TranscodeBusy, TranscodeError, TranscodeUnavailable, UnknownPreset
 
@@ -111,13 +112,15 @@ def create_app(
     config: "Optional[Config]" = None,
     browse: Any = None,
     transcode: Any = None,
+    preview: Any = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
     ``config`` enables auth and gates the file/transcode features. ``browse`` is
-    a :class:`copystation.mounts.BrowseManager` (file access) and ``transcode`` a
-    :class:`copystation.transcode.TranscodeManager`; either may be ``None`` when
-    the corresponding feature is disabled or its dependencies are missing.
+    a :class:`copystation.mounts.BrowseManager` (file access), ``transcode`` a
+    :class:`copystation.transcode.TranscodeManager` and ``preview`` a
+    :class:`copystation.preview.PreviewManager`; any may be ``None`` when the
+    corresponding feature is disabled or its dependencies are missing.
     """
     auth = _build_auth_dependency(config)
     app = FastAPI(
@@ -129,6 +132,7 @@ def create_app(
 
     files_enabled = browse is not None
     transcode_enabled = transcode is not None
+    preview_enabled = preview is not None and bool(getattr(preview, "available", False))
 
     @app.get("/api/status")
     def get_status() -> JSONResponse:
@@ -145,6 +149,8 @@ def create_app(
                     "files": files_enabled,
                     "transcode": transcode_enabled,
                     "delete": files_enabled and bool(getattr(browse, "allow_delete", False)),
+                    "download": files_enabled and bool(getattr(browse, "allow_download", False)),
+                    "preview": preview_enabled,
                 },
             }
         )
@@ -183,6 +189,28 @@ def create_app(
             media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             return FileResponse(str(target), filename=target.name, media_type=media_type)
 
+        @app.get("/api/files/stream")
+        def stream_file(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> FileResponse:
+            # Same data exposure as a download (so it obeys the same allow_download
+            # gate), but served **inline** with a real content type so the browser
+            # plays it in place instead of downloading. Starlette's FileResponse
+            # honours HTTP Range requests, so a <video> can seek and buffer without
+            # fetching the whole (possibly multi-GB) file.
+            try:
+                target = browse.resolve_file(device, path)
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            return FileResponse(
+                str(target),
+                filename=target.name,
+                media_type=media_type,
+                content_disposition_type="inline",
+            )
+
         @app.delete("/api/files")
         def delete_file(
             device: str = Query(...),
@@ -202,6 +230,23 @@ def create_app(
             finally:
                 state.operation_lock.release()
             return JSONResponse({"deleted": path})
+
+    if preview is not None:
+
+        @app.get("/api/files/preview-info")
+        def preview_info(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> JSONResponse:
+            # Whether the source plays in a browser as-is ("direct") or plays but
+            # stutters ("transcode" -> the player hints to transcode for smooth
+            # playback), plus its media properties.
+            try:
+                return JSONResponse(preview.info(device, path))
+            except PreviewUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
 
     if transcode is not None:
 
