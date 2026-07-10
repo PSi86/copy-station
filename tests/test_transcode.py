@@ -543,6 +543,71 @@ def test_process_cubie_two_stage_for_non_half_target(tmp_path, monkeypatch):
     assert not (card / "Transcoded" / "clip_720p-h264.stage1.mp4").exists()  # cleaned up
 
 
+def _cubie_mgr_with_perf(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)   # 4K h264 -> 1080p = single-stage HW
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "h264", "width": 3840, "height": 2160, "fps": 59.94, "duration": 56.9,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+    return mgr, card
+
+
+def _run_cancel(mgr, monkeypatch, progress_line):
+    """Submit a 1080p job whose (faked) encode emits ``progress_line`` then is
+    canceled mid-run; run it to completion and return the finished job snapshot."""
+    # Advance the monotonic clock on every read so the live estimate sees non-zero
+    # elapsed wall time (the whole fake job otherwise runs within one clock tick).
+    ticks = [1000.0]
+
+    def _mono():
+        ticks[0] += 1.0
+        return ticks[0]
+
+    monkeypatch.setattr(tc.time, "monotonic", _mono)
+    holder = {}
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            self.returncode = None
+            self.stdout = iter([progress_line])
+
+        def wait(self):
+            mgr._jobs[holder["id"]]["status"] = "canceled"  # cancel arrives mid-encode
+            self.returncode = -15
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    holder["id"] = job["id"]
+    mgr._process(job["id"])
+    return mgr.snapshot()["jobs"][0]
+
+
+def test_cancel_keeps_a_stable_perf_sample(tmp_path, monkeypatch):
+    mgr, _ = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    # 12 s of output produced (>= the 10 s stability threshold) before the cancel.
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:20): 12 / 56 seconds (21.4 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf.get("h264:3840x2160:1080p-h264", {}).get("spf", 0) > 0  # learned
+    # internal tracking fields never leak into the API
+    assert "perf_spf" not in result and "perf_stable" not in result
+
+
+def test_cancel_too_short_learns_nothing(tmp_path, monkeypatch):
+    mgr, _ = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    # only 2 s of output -> not stable -> the model is left untouched
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:03): 2 / 56 seconds (3.6 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf == {}
+
+
 # --------------------------------------------------------------------------- #
 # Planning + the performance/estimate model
 # --------------------------------------------------------------------------- #

@@ -53,6 +53,13 @@ MAX_HISTORY = 20
 # kill surfaces as a normal failure and falls back to the CPU encoder.
 GST_STALL_SECONDS = 90
 
+# A canceled single-pass job still trains the estimate model once it has produced
+# at least this many seconds of output -- enough that the startup transient
+# (mount, preroll, first GOP) is amortized and the measured seconds-per-frame is
+# stable. Two-stage jobs are not tracked this way (a partial measurement is not
+# representative of the total), so they only train the model on full completion.
+PERF_STABLE_MIN_OUTPUT_SEC = 10
+
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -198,7 +205,8 @@ def probe_video_info(src: Any) -> dict:
             info["duration"] = float((data.get("format") or {}).get("duration"))
         except (TypeError, ValueError):
             pass
-    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError,
+            AttributeError, TypeError):
         pass
     return info
 
@@ -481,23 +489,39 @@ class TranscodeManager:
         return estimate_seconds(spf, info.get("duration"), info.get("fps"))
 
     def _update_perf(self, info: dict, preset_id: str, wall_seconds: float) -> None:
-        """Learn/refresh seconds-per-frame for this source+preset after a job.
-
-        Only overwrites the stored value on a notable deviation (>15%), so normal
-        run-to-run noise does not churn the model.
-        """
+        """Train the model from a COMPLETED job's total wall time over its frames."""
         duration, fps = info.get("duration"), info.get("fps")
         if not duration or not fps or duration <= 0 or fps <= 0 or wall_seconds <= 0:
             return
         frames = duration * fps
-        spf = wall_seconds / frames
+        self._record_perf(info, preset_id, wall_seconds / frames,
+                          wall=wall_seconds, frames=int(frames))
+
+    def _record_perf(self, info: dict, preset_id: str, spf: float,
+                     wall: Optional[float] = None, frames: Optional[int] = None) -> None:
+        """Compare a measured seconds-per-frame with the stored value for this
+        source+preset and overwrite it on a notable deviation (>15%).
+
+        Shared by completed jobs (spf from the total wall time) and canceled jobs
+        (spf tracked live once it stabilised), so a long-enough canceled job still
+        refreshes the estimate. Small run-to-run noise is ignored so the model does
+        not churn.
+        """
+        if not spf or spf <= 0:
+            return
+        if not (info.get("vcodec") and info.get("width") and info.get("height")):
+            return  # incomplete source info -> unusable key
         key = perf_key(info, preset_id)
         with self._perf_lock:
             cur = (self._perf.get(key) or {}).get("spf")
             if cur and abs(spf - cur) / cur <= 0.15:
                 return
-            self._perf[key] = {"spf": spf, "wall": round(wall_seconds, 1),
-                               "frames": int(frames)}
+            entry: dict = {"spf": spf}
+            if wall is not None:
+                entry["wall"] = round(wall, 1)
+            if frames is not None:
+                entry["frames"] = frames
+            self._perf[key] = entry
         self._save_perf()
 
     def snapshot(self) -> dict:
@@ -521,6 +545,8 @@ class TranscodeManager:
         """Copy of a job for the API, with live elapsed/ETA for a running one."""
         j = dict(job)
         started = j.pop("started", None)
+        j.pop("perf_spf", None)      # internal tracking, not part of the API
+        j.pop("perf_stable", None)
         j["elapsed_seconds"] = None
         j["eta_seconds"] = None
         if j["status"] == "running" and started is not None:
@@ -569,6 +595,8 @@ class TranscodeManager:
                 "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
                 "hw": False,           # True if a hardware encoder was used
                 "path": None,          # "hw" | "hw+cpu" | "cpu" (chosen encode path)
+                "perf_spf": None,      # internal: live seconds-per-frame estimate
+                "perf_stable": False,  # internal: True once that estimate stabilised
                 "input_size": None,    # source file size in bytes
                 "output_size": None,   # transcoded file size in bytes (once done)
                 "ram_buffered": False, # True if staged through a RAM tmpfs
@@ -697,6 +725,17 @@ class TranscodeManager:
                 self._hub.finish_transcode(prev_phase)
             except _Canceled:
                 self._set(job_id, status="canceled")
+                # A single-stage job that ran long enough still trains the estimate
+                # model (its live seconds-per-frame had stabilised before the abort).
+                with self._lock:
+                    j = self._jobs.get(job_id) or {}
+                    spf = j.get("perf_spf") if j.get("perf_stable") else None
+                if spf:
+                    try:
+                        self._record_perf(self._probe(src), preset_id, spf)
+                        _LOG.info("Transcode #%d canceled -- kept a stable perf sample", job_id)
+                    except Exception:  # pragma: no cover - perf is best-effort
+                        pass
                 _LOG.info("Transcode #%d canceled", job_id)
                 self._hub.finish_transcode(prev_phase)  # a cancel is not an error
             except (BrowseError, TranscodeError) as exc:
@@ -785,12 +824,11 @@ class TranscodeManager:
         if duration is None:
             duration = probe_duration(src)
         encoders = self._encoders_for(preset)
-        info: Optional[dict] = None  # source media info, probed once if a GStreamer
-        last_exc: Optional[TranscodeError] = None  # encoder is among the candidates
+        info = self._probe(src)          # source media info (codec/dims/fps/duration)
+        src_fps = info.get("fps")        # for the live perf estimate (single-stage)
+        last_exc: Optional[TranscodeError] = None
         for idx, enc in enumerate(encoders):
             if enc.is_gstreamer:
-                if info is None:
-                    info = self._probe(src)
                 if not gst_can_handle(info):
                     _LOG.info(
                         "Transcode #%d: %s cannot handle this source "
@@ -811,7 +849,7 @@ class TranscodeManager:
                 else:
                     self._set(job_id, path="cpu")
                     self._run_encode(job_id, build_ffmpeg_cmd(enc, preset, src, dst),
-                                     duration, "ffmpeg")
+                                     duration, "ffmpeg", src_fps=src_fps, track_perf=True)
                 return
             except _Canceled:
                 _cleanup(dst)
@@ -848,7 +886,7 @@ class TranscodeManager:
         if not (target_h > 0 and out_h > 0 and out_h != target_h):
             self._set(job_id, path="hw")
             self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, dst, info),
-                             duration, "gstreamer", src_fps=src_fps)
+                             duration, "gstreamer", src_fps=src_fps, track_perf=True)
             return
         # Two-stage: hardware decode-scale to out_h (bar 0-50%), then a CPU scale to
         # target_h (bar 50-100%). The finish is CRF (quality-controlled): the
@@ -873,7 +911,8 @@ class TranscodeManager:
 
     def _run_encode(self, job_id: int, cmd: List[str], duration: Optional[float],
                     engine: str = "ffmpeg", src_fps: Optional[float] = None,
-                    pct_base: float = 0.0, pct_span: float = 100.0) -> None:
+                    pct_base: float = 0.0, pct_span: float = 100.0,
+                    track_perf: bool = False) -> None:
         """Run one encoder subprocess, tracking progress and honouring cancel.
 
         ``engine`` selects how progress is read: ffmpeg's ``-progress`` stream, or
@@ -886,6 +925,11 @@ class TranscodeManager:
 
         ``pct_base``/``pct_span`` map this stage's 0-100% onto a sub-range of the
         job's bar, so a two-pass job fills 0-50% then 50-100% (not twice to 100%).
+
+        ``track_perf`` (single-stage encodes only) records a live seconds-per-frame
+        estimate on the job -- from the job's wall time over the output produced --
+        flagged stable once enough output exists, so a canceled job can still train
+        the estimate model. It needs ``src_fps``.
         """
         is_gst = engine == "gstreamer"
         stderr = subprocess.STDOUT if is_gst else subprocess.DEVNULL
@@ -929,6 +973,23 @@ class TranscodeManager:
             self._set(job_id, percent=p)
             self._hub.set_transcode_progress(p / 100.0)  # LEDs + display
 
+        with self._lock:
+            job_started = (self._jobs.get(job_id) or {}).get("started")
+
+        def _track(output_pos: Optional[float]) -> None:
+            # Live seconds-per-frame (single-stage only): the job's wall time so far
+            # over the output frames produced. Marked stable once enough output
+            # exists that the startup transient is amortized, so a canceled job that
+            # ran long enough can still train the estimate model.
+            if not (track_perf and src_fps and src_fps > 0 and job_started
+                    and output_pos and output_pos > 0):
+                return
+            elapsed = time.monotonic() - job_started
+            if elapsed <= 0:
+                return
+            self._set(job_id, perf_spf=elapsed / (output_pos * src_fps),
+                      perf_stable=output_pos >= PERF_STABLE_MIN_OUTPUT_SEC)
+
         try:
             assert proc.stdout is not None
             t0 = time.monotonic()  # encode start, for the GStreamer speed estimate
@@ -942,6 +1003,7 @@ class TranscodeManager:
                         _emit(pct)
                     pos = gst_progress_position(line)
                     if pos is not None:
+                        _track(pos)
                         elapsed = now - t0
                         if elapsed > 0.5:  # let the first second settle
                             speed = pos / elapsed
@@ -953,6 +1015,7 @@ class TranscodeManager:
                     continue
                 secs = progress_seconds(line)
                 if secs is not None and duration and duration > 0:
+                    _track(secs)
                     _emit(secs / duration * 100)
                 elif line.startswith("fps="):
                     try:
