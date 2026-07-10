@@ -245,6 +245,13 @@ async function loadVolumes() {
 
 // ---- transcode -----------------------------------------------------------
 
+// preset id -> human label, kept fresh from the /api/transcode snapshot so job
+// rows can show which preset a job uses (in the queue and while it runs).
+const presetLabels = {};
+function updatePresetLabels(presets) {
+  for (const p of presets || []) presetLabels[p.id] = p.label || p.id;
+}
+
 function renderJobs(jobs) {
   const el = document.getElementById("tc-jobs");
   if (!jobs || jobs.length === 0) {
@@ -258,6 +265,10 @@ function renderJobs(jobs) {
       // on the first line, the progress bar and a stats line below.
       const enc = j.encoder ? ` · ${j.encoder}${j.hw ? " (hw)" : ""}` : "";
       const name = (j.filename || j.input_path || `job ${j.id}`) + enc;
+      const presetLabel = presetLabels[j.preset] || j.preset || "";
+      const presetChip = presetLabel
+        ? `<span class="role preset" title="preset">${escapeHtml(presetLabel)}</span>`
+        : "";
 
       let statusRight = "";
       if (j.status === "done" && j.output_path) {
@@ -304,7 +315,7 @@ function renderJobs(jobs) {
       return `<li class="file jobitem">
         <div class="jobhead">
           <span class="jobname">${escapeHtml(name)}</span>
-          <span class="jobright">${statusRight}${cancel}</span>
+          <span class="jobright">${presetChip}${statusRight}${cancel}</span>
         </div>${bar}${stats}
       </li>`;
     })
@@ -323,7 +334,11 @@ async function cancelJob(id) {
 async function loadJobs() {
   try {
     const res = await fetch("/api/transcode", { cache: "no-store" });
-    if (res.ok) renderJobs((await res.json()).jobs || []);
+    if (res.ok) {
+      const data = await res.json();
+      updatePresetLabels(data.presets);
+      renderJobs(data.jobs || []);
+    }
   } catch (e) {
     /* transient */
   }
@@ -335,6 +350,7 @@ async function loadPresets() {
     const res = await fetch("/api/transcode", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    updatePresetLabels(data.presets);
     sel.innerHTML = (data.presets || [])
       .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label || p.id)}</option>`)
       .join("");

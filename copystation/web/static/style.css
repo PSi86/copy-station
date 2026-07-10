@@ -170,6 +170,7 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .btn.tc-cancel { padding: 0.05rem 0.45rem; font-size: 0.85rem; line-height: 1.2; }
 .btn.tc-cancel:hover { border-color: var(--error); color: var(--error); }
 .filelist .file .storage-track { height: 6px; margin-top: 0.35rem; width: 100%; }
+.role.preset { background: #2f2a45; color: #b9a8ff; }
 .role.queued { background: #3a4250; color: var(--fg); }
 .role.running { background: var(--copying); color: #042036; }
 .role.done { background: var(--ready); color: #06210f; }
