@@ -145,6 +145,7 @@ def create_app(
                     "files": files_enabled,
                     "transcode": transcode_enabled,
                     "delete": files_enabled and bool(getattr(browse, "allow_delete", False)),
+                    "download": files_enabled and bool(getattr(browse, "allow_download", False)),
                 },
             }
         )
@@ -182,6 +183,28 @@ def create_app(
             # by MIME type, so octet-stream would save "clip.mp4" as ".bin".
             media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             return FileResponse(str(target), filename=target.name, media_type=media_type)
+
+        @app.get("/api/files/stream")
+        def stream_file(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> FileResponse:
+            # Same data exposure as a download (so it obeys the same allow_download
+            # gate), but served **inline** with a real content type so the browser
+            # plays it in place instead of downloading. Starlette's FileResponse
+            # honours HTTP Range requests, so a <video> can seek and buffer without
+            # fetching the whole (possibly multi-GB) file.
+            try:
+                target = browse.resolve_file(device, path)
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+            return FileResponse(
+                str(target),
+                filename=target.name,
+                media_type=media_type,
+                content_disposition_type="inline",
+            )
 
         @app.delete("/api/files")
         def delete_file(

@@ -32,6 +32,14 @@ all off by default, so existing status-only deployments are unaffected.
   when idle; path traversal (`..`, symlinks) is refused.
 - Optional **HTTP Basic auth** for the whole interface (`web.auth`), off by
   default and fail-safe (rejects when enabled without a password).
+- **In-browser preview / playback** (`/api/files/stream`): clicking a file now
+  plays it in place (an `<video>`/`<img>` in a modal) instead of downloading it.
+  The stream is served **inline** with a real content type and honours HTTP Range
+  requests, so a video seeks and buffers without fetching the whole (multi-GB)
+  file. **Download moved to the ⚙ dialog** (and is also offered inside the
+  preview). Streaming obeys the same `allow_download` gate as a download (exposed
+  as a `download` capability flag); a codec the browser can't decode (e.g. HEVC in
+  Chrome) falls back to a download prompt.
 
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),
