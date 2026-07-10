@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -38,13 +38,9 @@ from ..mounts import (
     PathEscapesVolume,
     UnknownVolume,
 )
-from ..preview import PreviewBusy, PreviewError, PreviewUnavailable
+from ..preview import PreviewUnavailable
 from ..status import State
 from ..transcode import TranscodeBusy, TranscodeError, TranscodeUnavailable, UnknownPreset
-
-# HLS media types.
-_M3U8 = "application/vnd.apple.mpegurl"
-_MPEGTS = "video/mp2t"
 
 
 class TranscodeRequest(BaseModel):
@@ -242,79 +238,15 @@ def create_app(
             device: str = Query(...),
             path: str = Query(...),
         ) -> JSONResponse:
-            # Whether the source plays as-is ("direct") or needs an HLS transcode
-            # ("hls"), plus its media properties, for the player to pick a source.
+            # Whether the source plays in a browser as-is ("direct") or plays but
+            # stutters ("transcode" -> the player hints to transcode for smooth
+            # playback), plus its media properties.
             try:
                 return JSONResponse(preview.info(device, path))
             except PreviewUnavailable as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from exc
             except BrowseError as exc:
                 raise _browse_http_error(exc) from exc
-
-        @app.get("/api/files/preview/index.m3u8")
-        def preview_playlist(
-            device: str = Query(...),
-            path: str = Query(...),
-        ) -> Response:
-            try:
-                return Response(preview.playlist(device, path), media_type=_M3U8)
-            except PreviewUnavailable as exc:
-                raise HTTPException(status_code=501, detail=str(exc)) from exc
-            except BrowseError as exc:
-                raise _browse_http_error(exc) from exc
-            except PreviewError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.get("/api/files/preview/seg-{n}.ts")
-        def preview_segment(
-            n: int,
-            device: str = Query(...),
-            path: str = Query(...),
-        ) -> StreamingResponse:
-            # One HLS segment, transcoded on demand (full random seek). Refused
-            # while the station is busy; the transcoder is torn down on disconnect.
-            try:
-                chunks = preview.iter_segment(device, path, n)
-            except PreviewBusy as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except PreviewUnavailable as exc:
-                raise HTTPException(status_code=501, detail=str(exc)) from exc
-            except BrowseError as exc:
-                raise _browse_http_error(exc) from exc
-            return StreamingResponse(chunks, media_type=_MPEGTS)
-
-        @app.get("/api/files/preview-proxy")
-        def preview_proxy_status(
-            device: str = Query(...),
-            path: str = Query(...),
-        ) -> JSONResponse:
-            # Start / poll a one-time downscaled proxy transcode used to review
-            # sources the SoC can't decode fast enough for a live stream (4K).
-            try:
-                return JSONResponse(preview.proxy_status(device, path))
-            except PreviewBusy as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except PreviewUnavailable as exc:
-                raise HTTPException(status_code=501, detail=str(exc)) from exc
-            except BrowseError as exc:
-                raise _browse_http_error(exc) from exc
-
-        @app.delete("/api/files/preview-proxy")
-        def preview_proxy_cancel(
-            device: str = Query(...),
-            path: str = Query(...),
-        ) -> JSONResponse:
-            return JSONResponse({"canceled": bool(preview.cancel_proxy(device, path))})
-
-        @app.get("/api/files/preview-proxy/{key}.mp4")
-        def preview_proxy_file(key: str) -> FileResponse:
-            # The finished proxy, played back directly (inline, HTTP Range -> seek).
-            try:
-                target = preview.proxy_file(key)
-            except BrowseError as exc:
-                raise _browse_http_error(exc) from exc
-            return FileResponse(str(target), media_type="video/mp4",
-                                content_disposition_type="inline")
 
     if transcode is not None:
 

@@ -765,43 +765,17 @@ function downloadUrl(path) {
   return `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
 }
 
-let currentHls = null;
 let previewGen = 0; // invalidates an in-flight open when the dialog is closed/reopened
-let proxyPoll = null; // {path, timer} while a proxy transcode is being awaited
 
-function proxyStatusUrl(path) {
-  return `/api/files/preview-proxy?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
-}
-
-function hlsUrl(path) {
-  return `/api/files/preview/index.m3u8?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
-}
 function previewInfoUrl(path) {
   return `/api/files/preview-info?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
 }
 
-function destroyHls() {
-  if (currentHls) {
-    try { currentHls.destroy(); } catch (e) { /* ignore */ }
-    currentHls = null;
-  }
-}
-
-// Dropping the media element (and the hls.js instance) cancels the in-flight
-// stream / transcode so the station stops working the moment the player closes.
-function clearProxyPoll() {
-  if (proxyPoll && proxyPoll.timer) clearTimeout(proxyPoll.timer);
-  proxyPoll = null;
-}
-
+// Dropping the media element cancels the in-flight stream, so the station stops
+// serving the file the moment the player closes.
 function stopPreviewMedia() {
-  previewGen++; // abort any open() still awaiting preview-info / proxy
-  // Cancel a running proxy transcode so the station's VPU is freed at once.
-  if (proxyPoll && proxyPoll.path) {
-    fetch(proxyStatusUrl(proxyPoll.path), { method: "DELETE" }).catch(() => {});
-  }
-  clearProxyPoll();
-  destroyHls();
+  previewGen++; // ignore any open() still awaiting preview-info
+  hidePvHint();
   const media = document.getElementById("pv-media");
   if (!media) return;
   const v = media.querySelector("video");
@@ -834,89 +808,33 @@ function playDirectVideo(path) {
   v.src = streamUrl(path);
 }
 
-function showPreviewMessage(msg) {
-  const media = document.getElementById("pv-media");
-  if (media) media.innerHTML = `<p class="pv-fallback muted">${escapeHtml(msg)}</p>`;
+function hidePvHint() {
+  const h = document.getElementById("pv-hint");
+  if (h) { h.hidden = true; h.innerHTML = ""; }
 }
 
-function renderProxyProgress(pct) {
-  const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
-  const media = document.getElementById("pv-media");
-  media.innerHTML =
-    `<div class="pv-prep">` +
-    `<p class="muted">Preparing smooth preview… ${p}%</p>` +
-    `<div class="storage-track"><div class="storage-used" style="width:${p}%"></div></div>` +
-    `<p class="pv-prep-note muted">Transcoding a downscaled copy so it plays smoothly ` +
-    `(4K can't be decoded live on this device). Cached for next time.</p>` +
-    `</div>`;
+// Heavy sources (4K/HEVC) play here but stutter -- hint that a transcode gives
+// smooth playback, with a shortcut into the transcode (gear) dialog.
+function showPvHint(path) {
+  const h = document.getElementById("pv-hint");
+  if (!h) return;
+  const btn = transcodeAvailable
+    ? `<button id="pv-hint-tc" class="btn" type="button">Transcode…</button>` : "";
+  h.innerHTML =
+    `<span>Playing the original — this may stutter. ` +
+    `Transcode it for smooth playback.</span>${btn}`;
+  h.hidden = false;
+  const b = document.getElementById("pv-hint-tc");
+  if (b) b.onclick = () => { closePreview(); openFileDialog(path); };
 }
 
-// For sources the device can't decode live (4K/HEVC): transcode a downscaled H.264
-// proxy once, show progress, then play THAT file (smooth, natively seekable).
-function playProxy(path, gen) {
-  renderProxyProgress(0);
-  const poll = async () => {
-    if (gen !== previewGen) return; // dialog closed/reopened
-    try {
-      const res = await fetch(proxyStatusUrl(path), { cache: "no-store" });
-      if (gen !== previewGen) return;
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}));
-        showPreviewMessage(res.status === 409
-          ? "Station busy — try again once it's idle."
-          : (b.detail || `error ${res.status}`));
-        return;
-      }
-      const d = await res.json();
-      if (gen !== previewGen) return;
-      if (d.state === "ready" && d.url) {
-        clearProxyPoll();
-        const v = newPreviewVideo();
-        v.addEventListener("error", showPreviewFallback);
-        v.src = d.url;
-        return;
-      }
-      if (d.state === "error") {
-        clearProxyPoll();
-        showPreviewMessage(d.error ? `Preview failed: ${d.error}` : "Preview failed — try Download.");
-        return;
-      }
-      renderProxyProgress(d.percent || 0);
-      proxyPoll = { path, timer: setTimeout(poll, 1500) };
-    } catch (e) {
-      if (gen === previewGen) proxyPoll = { path, timer: setTimeout(poll, 2000) };
-    }
-  };
-  proxyPoll = { path, timer: null };
-  poll();
-}
-
-// A live, hardware-downscaled 1080p HLS transcode (for 4K/HEVC/... sources).
-function playHlsVideo(path) {
-  const v = newPreviewVideo();
-  const url = hlsUrl(path);
-  if (window.Hls && window.Hls.isSupported()) {
-    const hls = new Hls({ maxBufferLength: 20, maxMaxBufferLength: 40 });
-    currentHls = hls;
-    hls.on(window.Hls.Events.ERROR, (evt, data) => {
-      if (data && data.fatal) showPreviewFallback();
-    });
-    hls.loadSource(url);
-    hls.attachMedia(v);
-  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
-    v.addEventListener("error", showPreviewFallback); // Safari native HLS
-    v.src = url;
-  } else {
-    showPreviewFallback();
-  }
-}
-
-async function openPreview(path) {
+function openPreview(path) {
   if (!downloadAvailable) return; // streaming obeys the same gate as download
   const gen = ++previewGen;
   const dlg = document.getElementById("preview-dialog");
   document.getElementById("pv-title").textContent = baseName(path);
   document.getElementById("pv-download").href = downloadUrl(path);
+  hidePvHint();
   const media = document.getElementById("pv-media");
   const ext = extOf(baseName(path));
   media.innerHTML = "";
@@ -931,21 +849,15 @@ async function openPreview(path) {
     media.innerHTML = `<p class="pv-fallback muted">No inline preview for this file type — use Download.</p>`;
     return;
   }
-  // Video: ask the server whether it plays as-is or needs a live 1080p transcode
-  // (4K/HEVC stutter when the browser decodes them raw over the AP).
-  media.innerHTML = `<p class="pv-fallback muted">Loading…</p>`;
-  let mode = "direct";
+  // Play the ORIGINAL directly -- instant, no wait (it may stutter for 4K/HEVC).
+  playDirectVideo(path);
+  // Ask the server whether it will stutter; if so, show the transcode hint.
   if (previewAvailable) {
-    try {
-      const res = await fetch(previewInfoUrl(path), { cache: "no-store" });
-      if (res.ok) mode = (await res.json()).mode || "direct";
-    } catch (e) { /* fall back to the direct stream */ }
+    fetch(previewInfoUrl(path), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.mode !== "direct" && gen === previewGen) showPvHint(path); })
+      .catch(() => { /* no hint if the probe fails */ });
   }
-  if (gen !== previewGen) return; // closed / reopened while awaiting
-  // 4K/HEVC/... can't be decoded live on this SoC -> transcode a downscaled proxy
-  // once and play that; browser-friendly sources play directly.
-  if (mode === "hls") playProxy(path, gen);
-  else playDirectVideo(path);
 }
 
 function closePreview() {

@@ -233,30 +233,14 @@ transcode:
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only, crf
 
 # In-browser video preview / playback. Clicking a file in the web browser plays
-# it instead of downloading (download moves to the gear dialog). Sources that a
-# browser can already play (H.264, <= max_direct_height, mp4/mov/webm) are streamed
-# as-is; everything else (4K, HEVC, mkv, ...) is transcoded LIVE to a seekable HLS
-# stream at `height`/`fps` so 4K footage can be reviewed without stuttering. On the
-# Cubie the hardware encoder is used (ffmpeg does the seek, GStreamer OMX the
-# decode/scale/encode); other boards use ffmpeg on the CPU. Needs ffmpeg; enabled
-# with the file browser unless turned off here. Previews run only while idle.
+# it directly (download moves to the gear dialog). Sources a browser plays well
+# (H.264 at/below `max_direct_height`, mp4/mov/webm) play smoothly; heavier ones
+# (4K, HEVC, ...) still play the original but may stutter, and the player shows a
+# hint to transcode the file (from the gear dialog) for smooth playback. Needs
+# ffprobe; enabled with the file browser unless turned off here.
 preview:
   enabled: true
-  max_direct_height: 1080   # sources at/below this (H.264, mp4/mov/webm) stream as-is
-  acceleration: auto        # auto (hardware when available) | cpu
-  # Sources the browser/SoC can't play smoothly (4K, HEVC, ...) are transcoded to a
-  # downscaled H.264 **proxy file** once, then played back directly (smooth + fully
-  # seekable). Generating it takes ~1.5x the clip length on the Cubie and is cached.
-  proxy_height: 540         # proxy height (540 = fast/small; 720/1080 = sharper/slower)
-  proxy_bitrate: 6M         # proxy video bitrate
-  cache_dir: /var/cache/copystation/preview
-  cache_max_mb: 2048        # evict the oldest proxies past this budget
-  fallback_to_cpu: true     # transcode on the CPU if the hardware encoder fails
-  # HLS live-preview knobs (used only if the frontend requests the live path):
-  height: 1080              # live-stream transcode height
-  fps: 30                   # live-stream framerate cap (hardware path can't cap fps)
-  bitrate: 8M               # live-stream video bitrate
-  segment_seconds: 4        # HLS segment length
+  max_direct_height: 1080   # H.264 at/below this plays without the "transcode" hint
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short

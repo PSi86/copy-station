@@ -217,9 +217,22 @@ footer { text-align: center; margin-top: 1rem; }
 }
 .pv-video, .pv-img { display: block; max-width: 100%; max-height: 70vh; }
 .pv-fallback { padding: 2rem 1rem; text-align: center; }
-.pv-prep { width: 100%; padding: 1.5rem 1.2rem; }
-.pv-prep .storage-track { height: 10px; margin: 0.5rem 0; }
-.pv-prep-note { font-size: 0.78rem; margin: 0.4rem 0 0; }
+/* "transcode for smooth playback" hint under the player (heavy 4K/HEVC sources) */
+.pv-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  background: #3a3320;
+  color: var(--detecting);
+  border: 1px solid #574a20;
+  border-radius: 8px;
+  font-size: 0.83rem;
+}
+.pv-hint span { flex: 1 1 12rem; }
+.pv-hint .btn { flex: 0 0 auto; }
 a#dlg-download, a#pv-download { text-decoration: none; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
 .dlg-title { font-size: 1rem; margin: 0; word-break: break-all; }

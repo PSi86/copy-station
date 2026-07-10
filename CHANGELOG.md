@@ -33,29 +33,18 @@ all off by default, so existing status-only deployments are unaffected.
 - Optional **HTTP Basic auth** for the whole interface (`web.auth`), off by
   default and fail-safe (rejects when enabled without a password).
 - **In-browser preview / playback** (`/api/files/stream`): clicking a file now
-  plays it in place (an `<video>`/`<img>` in a modal) instead of downloading it.
-  The stream is served **inline** with a real content type and honours HTTP Range
-  requests, so a video seeks and buffers without fetching the whole (multi-GB)
-  file. **Download moved to the ⚙ dialog** (and is also offered inside the
-  preview). Streaming obeys the same `allow_download` gate as a download (exposed
-  as a `download` capability flag); a codec the browser can't decode (e.g. HEVC in
-  Chrome) falls back to a download prompt.
-- **Proxy preview for un-playable sources** (`preview` block, `/api/files/preview-proxy`):
-  sources a browser can't play smoothly -- 4K, HEVC, mkv, ... -- are transcoded
-  **once** to a downscaled H.264 file (default 540p, hardware-accelerated on the
-  Cubie), with a progress bar, then played back **directly** (smooth and fully
-  seekable) and **cached** for next time. This is the way to review 4K on the
-  A733: the SoC decodes 4K60 at ~0.55x realtime, so a *live* stream of 4K
-  cannot be smooth (a decode ceiling) -- transcode-then-play sidesteps it.
-  Generating the proxy takes ~1.5x the clip length; it holds the operation lock
-  (serialised with copies/transcodes) and is canceled the moment the viewer
-  closes. Browser-friendly sources (H.264 <=1080p) still play directly.
-- **Live HLS preview** (`/api/files/preview/*`) is also available: a seekable VOD
-  where each segment is transcoded on demand (`ffmpeg` input-seek into a GStreamer
-  OMX decode->encode, downscale **in the decoder** -- no CPU element may sit between
-  the OMX decoder and encoder or the shared VPU buffer pool SIGSEGVs). The default
-  frontend uses the proxy instead (the A733 can't decode 4K fast enough for a live
-  stream). `hls.js` is vendored locally for browsers without native HLS.
+  plays the **original** in place (an `<video>`/`<img>` in a modal) instead of
+  downloading it -- instant, no wait. The stream is served **inline** with a real
+  content type and honours HTTP Range requests, so playback seeks and buffers
+  without fetching the whole (multi-GB) file. **Download moved to the ⚙ dialog**
+  (and is also offered inside the preview). Streaming obeys the same
+  `allow_download` gate as a download (exposed as a `download` capability flag).
+- **"Transcode for smooth playback" hint** (`preview` block, `/api/files/preview-info`):
+  sources a browser/SoC can't play smoothly (4K, HEVC, ...) still play the original
+  (which may stutter -- the Cubie's VPU decodes 4K60 at ~0.55x realtime, a hardware
+  ceiling), and the player shows a hint with a shortcut into the transcode dialog.
+  So a user gets an instant rough look and starts a transcode only when they want
+  smooth playback -- rather than always paying a transcode wait up front.
 
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),
