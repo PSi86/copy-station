@@ -67,8 +67,11 @@ _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 # rest still transcode on the CPU. Non-video files (photos, sidecars) are skipped.
 VIDEO_EXTS = frozenset({
     "mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "ts",
-    "mpg", "mpeg", "wmv", "flv", "3gp", "3g2", "mxf", "insv", "lrv",
+    "mpg", "mpeg", "wmv", "flv", "3gp", "3g2", "mxf", "insv",
 })
+# Deliberately NOT here: ``.lrv`` (DJI/Insta360 low-resolution preview proxies) --
+# they are not worth transcoding and share a stem with the real clip, so they
+# would only collide on the output name (e.g. DJI_0001.LRV vs DJI_0001.MP4).
 
 
 def is_video_file(name: str) -> bool:
@@ -162,6 +165,26 @@ def output_name(input_name: str, preset_id: str, container: str = "mp4") -> str:
     stem = sanitize_component(Path(str(input_name)).stem)
     preset = sanitize_component(preset_id)
     return f"{stem}_{preset}.{container}"
+
+
+def unique_output_path(path: Path) -> Path:
+    """``path``, or the first free ``<stem>_<n><suffix>`` if it already exists.
+
+    Guards against silently overwriting an existing output -- most importantly two
+    different sources in a batch that map to the same name (``DJI_0001.MP4`` and
+    ``DJI_0001.MOV`` both produce ``DJI_0001_<preset>.mp4``), but also a re-run of
+    the same file. The single transcode worker runs under the operation lock, so
+    the existence check cannot race another job.
+    """
+    if not path.exists():
+        return path
+    parent, stem, suffix = path.parent, path.stem, path.suffix
+    n = 2
+    while True:
+        candidate = parent / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 def probe_duration(src: Any) -> Optional[float]:
@@ -823,7 +846,13 @@ class TranscodeManager:
                     src_info = self._probe(src)
                     out_dir = out_root / self._output_dirname
                     out_dir.mkdir(parents=True, exist_ok=True)
-                    dst = out_dir / out_name
+                    # Never clobber an existing output (e.g. two sources in a batch
+                    # that map to the same name): fall back to <stem>_2, _3, ...
+                    dst = unique_output_path(out_dir / out_name)
+                    if dst.name != out_name:
+                        out_name = dst.name
+                        out_rel = f"{self._output_dirname}/{out_name}"
+                        self._set(job_id, filename=out_name, output_path=out_rel)
                     self._encode(job_id, src, dst, self._preset(preset_id))
                     try:
                         self._set(job_id, output_size=dst.stat().st_size)

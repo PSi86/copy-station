@@ -92,6 +92,11 @@ all off by default, so existing status-only deployments are unaffected.
   the daemon wires them through the status hub.
 
 ### Fixed
+- Transcoding **never overwrites an existing output** of the same name -- it falls
+  back to `<stem>_2`, `_3`, ... This matters most for a folder batch where two
+  sources map to the same output name (`DJI_0001.MP4` + `DJI_0001.MOV` both ->
+  `DJI_0001_<preset>.mp4`); previously the second job silently clobbered the
+  first. `.lrv` low-resolution proxy files are excluded from folder submission.
 - The web UI **disables browsing, downloads and the ⚙ controls while a copy or
   transcode holds the volumes** (a hint explains why, and only the running job's
   Cancel stays live), instead of letting those requests 503 against the busy

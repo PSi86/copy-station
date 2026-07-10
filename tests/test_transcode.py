@@ -28,6 +28,7 @@ from copystation.transcode import (
     progress_seconds,
     ram_budget,
     sanitize_component,
+    unique_output_path,
 )
 
 pytest.importorskip("fastapi")
@@ -46,6 +47,15 @@ def test_output_name_and_sanitize():
     assert output_name("DJI_0001.MP4", "720p-h264") == "DJI_0001_720p-h264.mp4"
     assert sanitize_component("../../etc/passwd") == "passwd"
     assert sanitize_component("weird name*?.mov") == "weird_name_.mov"
+
+
+def test_unique_output_path(tmp_path):
+    p = tmp_path / "clip_720p-h264.mp4"
+    assert unique_output_path(p) == p          # free name -> unchanged
+    p.write_bytes(b"one")
+    assert unique_output_path(p) == tmp_path / "clip_720p-h264_2.mp4"
+    (tmp_path / "clip_720p-h264_2.mp4").write_bytes(b"two")
+    assert unique_output_path(p) == tmp_path / "clip_720p-h264_3.mp4"
 
 
 @pytest.mark.parametrize(
@@ -313,6 +323,45 @@ def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
     assert browse.ops.index("release:sdb1") < browse.ops.index("mount_rw:sdb1")
     # Same device -> no separate read-only input mount (read from the rw mount).
     assert "mount_ro:sdb1" not in browse.ops
+
+
+def test_process_does_not_overwrite_existing_output(tmp_path, monkeypatch):
+    # A pre-existing output of the same name (e.g. from another source in a batch)
+    # must survive: the new job is written to <stem>_2 instead of clobbering it.
+    card = _card(tmp_path)
+    existing = card / "Transcoded" / "clip_720p-h264.mp4"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"KEEP-ME")
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    class _FakeProc:
+        def __init__(self, cmd, **kw):
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["out_time=00:00:05.000000\n", "progress=end\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert existing.read_bytes() == b"KEEP-ME"  # original untouched
+    assert result["output_path"] == "Transcoded/clip_720p-h264_2.mp4"
+    assert result["filename"] == "clip_720p-h264_2.mp4"
+    assert (card / "Transcoded" / "clip_720p-h264_2.mp4").read_bytes() == b"encoded"
 
 
 def test_process_takes_over_phase_and_restores_it(tmp_path, monkeypatch):
@@ -767,6 +816,9 @@ def _cubie_folder_mgr(tmp_path, monkeypatch):
 def test_is_video_file():
     assert tc.is_video_file("DJI_0001.MP4") and tc.is_video_file("clip.mkv")
     assert not tc.is_video_file("notes.txt") and not tc.is_video_file("cover.jpg")
+    # .lrv proxies are intentionally excluded (low-res previews that collide with
+    # the real clip's output name).
+    assert not tc.is_video_file("DJI_0001.LRV")
 
 
 def test_plan_folder_lists_videos_with_per_file_paths(tmp_path, monkeypatch):
