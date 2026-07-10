@@ -806,6 +806,10 @@ function playDirectVideo(path) {
   const v = newPreviewVideo();
   v.addEventListener("error", showPreviewFallback);
   v.src = streamUrl(path);
+  // `autoplay` alone is often ignored for videos with sound; an explicit play()
+  // inside the click gesture starts it (falls back to the play button if blocked).
+  const p = v.play();
+  if (p && p.catch) p.catch(() => { /* autoplay blocked -- user presses play */ });
 }
 
 function hidePvHint() {
