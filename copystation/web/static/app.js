@@ -245,6 +245,14 @@ async function loadVolumes() {
 
 // ---- transcode -----------------------------------------------------------
 
+// A crisp inline download glyph (arrow into a tray); `currentColor` so it takes
+// the link colour. Inline SVG avoids depending on an emoji/icon font.
+const DL_ICON =
+  '<svg class="ic" viewBox="0 0 24 24" width="15" height="15" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M12 3v11"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></svg>';
+
 // preset id -> human label, kept fresh from the /api/transcode snapshot so job
 // rows can show which preset a job uses (in the queue and while it runs).
 const presetLabels = {};
@@ -273,7 +281,7 @@ function renderJobs(jobs) {
       let statusRight = "";
       if (j.status === "done" && j.output_path) {
         const url = `/api/files/download?device=${encodeURIComponent(j.output_device)}&path=${encodeURIComponent(j.output_path)}`;
-        statusRight = `<a href="${url}" download>download</a>`;
+        statusRight = `<a class="dl" href="${url}" download title="Download" aria-label="Download">${DL_ICON}</a>`;
       } else if (j.status === "error") {
         statusRight = `<span class="role error" title="${escapeHtml(j.error || "")}">error</span>`;
       } else if (j.status === "queued") {
