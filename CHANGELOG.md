@@ -40,21 +40,22 @@ all off by default, so existing status-only deployments are unaffected.
   preview). Streaming obeys the same `allow_download` gate as a download (exposed
   as a `download` capability flag); a codec the browser can't decode (e.g. HEVC in
   Chrome) falls back to a download prompt.
-- **Live HLS transcoding for the preview** (`preview` block, `/api/files/preview/*`):
+- **Proxy preview for un-playable sources** (`preview` block, `/api/files/preview-proxy`):
   sources a browser can't play smoothly -- 4K, HEVC, mkv, ... -- are transcoded
-  **on the fly** to a seekable ~1080p H.264 HLS stream so they can be reviewed
-  without downloading. The playlist is a full VOD (seek anywhere); each segment is
-  transcoded independently on demand (`ffmpeg` input-seek), so a jump just fetches
-  that segment. On the Cubie the **hardware encoder** is used for H.264 sources --
-  ffmpeg does the seek and stream-copy, piped into a GStreamer OMX decode->encode
-  with the **downscale done in the decoder** (`scale` property; no CPU element may
-  sit between the OMX decoder and encoder or the shared VPU buffer pool SIGSEGVs).
-  Other sources / boards use ffmpeg on the CPU. Browser-friendly sources
-  (H.264 <=1080p) still play directly (no transcode). Previews are serialised
-  (single hardware encoder) and only run while the station is idle. `hls.js` is
-  vendored locally for browsers without native HLS (the AP is offline).
-  Note: the A733 decodes 4K60 at ~0.55x realtime, so live previews of high-framerate
-  4K play but buffer -- that is a decode ceiling, not smooth on this SoC.
+  **once** to a downscaled H.264 file (default 540p, hardware-accelerated on the
+  Cubie), with a progress bar, then played back **directly** (smooth and fully
+  seekable) and **cached** for next time. This is the way to review 4K on the
+  A733: the SoC decodes 4K60 at ~0.55x realtime, so a *live* stream of 4K
+  cannot be smooth (a decode ceiling) -- transcode-then-play sidesteps it.
+  Generating the proxy takes ~1.5x the clip length; it holds the operation lock
+  (serialised with copies/transcodes) and is canceled the moment the viewer
+  closes. Browser-friendly sources (H.264 <=1080p) still play directly.
+- **Live HLS preview** (`/api/files/preview/*`) is also available: a seekable VOD
+  where each segment is transcoded on demand (`ffmpeg` input-seek into a GStreamer
+  OMX decode->encode, downscale **in the decoder** -- no CPU element may sit between
+  the OMX decoder and encoder or the shared VPU buffer pool SIGSEGVs). The default
+  frontend uses the proxy instead (the A733 can't decode 4K fast enough for a live
+  stream). `hls.js` is vendored locally for browsers without native HLS.
 
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),

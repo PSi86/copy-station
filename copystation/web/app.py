@@ -283,6 +283,39 @@ def create_app(
                 raise _browse_http_error(exc) from exc
             return StreamingResponse(chunks, media_type=_MPEGTS)
 
+        @app.get("/api/files/preview-proxy")
+        def preview_proxy_status(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> JSONResponse:
+            # Start / poll a one-time downscaled proxy transcode used to review
+            # sources the SoC can't decode fast enough for a live stream (4K).
+            try:
+                return JSONResponse(preview.proxy_status(device, path))
+            except PreviewBusy as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except PreviewUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+
+        @app.delete("/api/files/preview-proxy")
+        def preview_proxy_cancel(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> JSONResponse:
+            return JSONResponse({"canceled": bool(preview.cancel_proxy(device, path))})
+
+        @app.get("/api/files/preview-proxy/{key}.mp4")
+        def preview_proxy_file(key: str) -> FileResponse:
+            # The finished proxy, played back directly (inline, HTTP Range -> seek).
+            try:
+                target = preview.proxy_file(key)
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            return FileResponse(str(target), media_type="video/mp4",
+                                content_disposition_type="inline")
+
     if transcode is not None:
 
         @app.get("/api/transcode")

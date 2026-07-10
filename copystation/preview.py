@@ -25,11 +25,15 @@ device, like the rest of the transcode subsystem.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -38,13 +42,26 @@ from .encoders import (
     _GST_DECODERS,
     available_encoders,
     available_gst_elements,
+    build_ffmpeg_cmd,
+    build_gstreamer_cmd,
     decoder_scale_factor,
     detect_board,
     gst_can_handle,
+    select_encoders,
 )
 from .mounts import BrowseError
 from .status import State
-from .transcode import parse_bitrate, probe_duration, probe_video_info
+from .transcode import (
+    gst_progress_percent,
+    parse_bitrate,
+    probe_duration,
+    probe_video_info,
+    progress_seconds,
+)
+
+# Cache-file key: 16 lowercase hex chars (a truncated SHA-1). Validates the path
+# segment of the proxy-file endpoint (no traversal -- the server mints the key).
+_PROXY_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 
 _LOG = logging.getLogger("copystation.preview")
 
@@ -191,6 +208,14 @@ class PreviewManager:
         self._seg_seconds = float(pv.get("segment_seconds", 4))
         self._max_direct_height = int(pv.get("max_direct_height", 1080))
         self._acceleration = str(pv.get("acceleration", "auto")).strip().lower()
+        # Proxy previews: a downscaled H.264 file transcoded once, then played back
+        # directly (smooth + natively seekable) -- the way to review 4K on a SoC
+        # that can't decode 4K in real time for a live stream.
+        self._proxy_height = int(pv.get("proxy_height", 540))
+        self._proxy_bitrate = pv.get("proxy_bitrate", "6M")
+        self._proxy_fallback_cpu = bool(pv.get("fallback_to_cpu", True))
+        self._cache_dir = Path(pv.get("cache_dir", "/var/cache/copystation/preview"))
+        self._cache_max = int(pv.get("cache_max_mb", 2048)) * 1024 * 1024
         self._available = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
         self._board = detect_board()
         self._encoders_avail = (
@@ -198,6 +223,8 @@ class PreviewManager:
         )
         self._lock = threading.Lock()  # one preview transcode at a time (single VPU)
         self._probe_cache: dict[str, Any] = {}
+        self._proxy_lock = threading.Lock()
+        self._proxies: dict[str, dict] = {}  # key -> {state, percent, error, proc}
         if not self._available:
             _LOG.warning("Preview enabled but ffmpeg/ffprobe not found on PATH.")
 
@@ -319,6 +346,190 @@ class PreviewManager:
                         _terminate(proc)
 
         return _stream()
+
+    # ----- proxy preview (transcode once, then play the file) --------------- #
+
+    def _proxy_key(self, device: str, path: str, src: Path) -> str:
+        try:
+            st = src.stat()
+            sig = f"{int(st.st_mtime)}:{st.st_size}"
+        except OSError:
+            sig = "0:0"
+        raw = f"{device}|{path}|{sig}|{self._proxy_height}"
+        return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+    def _proxy_dst(self, key: str) -> Path:
+        return self._cache_dir / f"{key}.mp4"
+
+    def _set_proxy(self, key: str, **fields: Any) -> None:
+        with self._proxy_lock:
+            job = self._proxies.get(key)
+            if job is not None:
+                job.update(fields)
+
+    def proxy_status(self, device: str, path: str) -> dict:
+        """State of a source's proxy: ``ready`` (with ``url``), ``transcoding``
+        (with ``percent``) or ``error``. Starts the transcode on first call.
+
+        The proxy is a one-time downscaled H.264 file kept in a local cache; once
+        ready it is played back directly (smooth, natively seekable) -- unlike the
+        live stream, which the A733 cannot decode fast enough for 4K.
+        """
+        if not self._available:
+            raise PreviewUnavailable("ffmpeg is not installed on the station")
+        src = self._browse.resolve_file(device, path)  # -> BrowseError
+        key = self._proxy_key(device, path, src)
+        dst = self._proxy_dst(key)
+        with self._proxy_lock:
+            job = self._proxies.get(key)
+            ready = dst.exists() and dst.stat().st_size > 0 and (job is None or job.get("state") == "ready")
+            if ready:
+                return {"state": "ready", "percent": 100, "url": f"/api/files/preview-proxy/{key}.mp4"}
+            if job is None or job.get("state") == "error":
+                # (Re)start: refuse if a copy/transcode already holds the volumes.
+                if self._state is not None and self._state.phase in (State.COPYING, State.TRANSCODING):
+                    raise PreviewBusy("the station is busy -- try again once it is idle")
+                job = {"state": "transcoding", "percent": 0, "error": None, "proc": None,
+                       "poked": time.monotonic()}
+                self._proxies[key] = job
+                threading.Thread(target=self._run_proxy, name=f"copystation-proxy-{key}",
+                                 args=(src, dst, key), daemon=True).start()
+            else:
+                job["poked"] = time.monotonic()
+            state, percent, error = job.get("state"), job.get("percent", 0), job.get("error")
+        resp: dict = {"state": state, "percent": percent}
+        if state == "ready":
+            resp["url"] = f"/api/files/preview-proxy/{key}.mp4"
+        elif state == "error":
+            resp["error"] = error
+        return resp
+
+    def proxy_file(self, key: str) -> Path:
+        """Absolute path of a ready proxy file (validated key), for the web layer."""
+        if not _PROXY_KEY_RE.match(key or ""):
+            raise BrowseError(f"bad proxy key {key!r}")
+        dst = self._proxy_dst(key)
+        if not dst.is_file():
+            from .mounts import NotFound
+            raise NotFound(f"proxy {key} not found")
+        return dst
+
+    def cancel_proxy(self, device: str, path: str) -> bool:
+        """Abort a running proxy transcode (called when the viewer closes)."""
+        try:
+            src = self._browse.resolve_file(device, path)
+        except BrowseError:
+            return False
+        key = self._proxy_key(device, path, src)
+        with self._proxy_lock:
+            job = self._proxies.get(key)
+            proc = job.get("proc") if job and job.get("state") == "transcoding" else None
+            if job is not None and job.get("state") == "transcoding":
+                job["state"] = "canceled"
+        if proc is not None:
+            _terminate(proc)
+            return True
+        return False
+
+    def _run_proxy(self, src: Path, dst: Path, key: str) -> None:
+        # Hold the operation lock so a proxy never collides with a copy or a
+        # transcode on the single VPU (non-blocking: bail if the station got busy).
+        lock = getattr(self._state, "operation_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            self._set_proxy(key, state="error", error="station busy")
+            return
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            info = self._probe(src)
+            duration = info.get("duration") or probe_duration(src)
+            preset = {"id": "proxy", "height": self._proxy_height, "vcodec": "libx264",
+                      "bitrate": self._proxy_bitrate, "crf": 23, "preset": "veryfast"}
+            encoders = select_encoders(
+                preset, board=self._board, available=self._encoders_avail,
+                acceleration=self._acceleration, fallback_to_cpu=self._proxy_fallback_cpu)
+            tmp = dst.with_suffix(".part.mp4")
+            last_exc: Optional[Exception] = None
+            for enc in encoders:
+                if self._proxy_canceled(key):
+                    break
+                try:
+                    if enc.is_gstreamer and gst_can_handle(info):
+                        self._run_proxy_encode(
+                            key, build_gstreamer_cmd(enc, preset, src, tmp, info), duration, gst=True)
+                    else:
+                        self._run_proxy_encode(
+                            key, build_ffmpeg_cmd(enc, preset, src, tmp), duration, gst=False)
+                    os.replace(tmp, dst)
+                    self._set_proxy(key, state="ready", percent=100)
+                    self._reap_cache()
+                    return
+                except Exception as exc:  # try the next encoder (CPU fallback)
+                    last_exc = exc
+                    _unlink(tmp)
+                    if self._proxy_canceled(key):
+                        break
+            if self._proxy_canceled(key):
+                _unlink(tmp)
+                self._set_proxy(key, state="error", error="canceled")
+            else:
+                _LOG.warning("Preview proxy for %s failed: %s", src, last_exc)
+                self._set_proxy(key, state="error", error=str(last_exc or "transcode failed"))
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _proxy_canceled(self, key: str) -> bool:
+        with self._proxy_lock:
+            return (self._proxies.get(key) or {}).get("state") == "canceled"
+
+    def _run_proxy_encode(self, key: str, cmd: List[str], duration: Optional[float],
+                          gst: bool) -> None:
+        stderr = subprocess.STDOUT if gst else subprocess.DEVNULL
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, text=True)
+        self._set_proxy(key, proc=proc)
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.strip()
+                if gst:
+                    pct = gst_progress_percent(line)
+                    if pct is not None:
+                        self._set_proxy(key, percent=max(0, min(99, int(pct))))
+                else:
+                    secs = progress_seconds(line)
+                    if secs is not None and duration and duration > 0:
+                        self._set_proxy(key, percent=max(0, min(99, int(secs / duration * 100))))
+            proc.wait()
+        finally:
+            self._set_proxy(key, proc=None)
+        if self._proxy_canceled(key):
+            raise PreviewError("canceled")
+        if proc.returncode != 0:
+            raise PreviewError(f"transcode exited with code {proc.returncode}")
+
+    def _reap_cache(self) -> None:
+        """Keep the proxy cache under the byte budget (drop the oldest first)."""
+        try:
+            files = sorted(self._cache_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+        except OSError:  # pragma: no cover - cache dir vanished
+            return
+        total = sum(p.stat().st_size for p in files)
+        for p in files:
+            if total <= self._cache_max:
+                break
+            try:
+                sz = p.stat().st_size
+                p.unlink()
+                total -= sz
+            except OSError:  # pragma: no cover - best effort
+                pass
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:  # pragma: no cover - best effort
+        pass
 
 
 def _terminate(proc: subprocess.Popen) -> None:

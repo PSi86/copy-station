@@ -250,6 +250,72 @@ def test_iter_segment_unavailable(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Proxy preview (transcode-once, then play the file)
+# --------------------------------------------------------------------------- #
+
+class _EncProc(_FakeProc):
+    """Fake transcoder: writes the output file its command names, exits 0."""
+
+    def __init__(self, cmd, **kw):
+        super().__init__(cmd, **kw)
+        out = next((a.split("=", 1)[1] for a in cmd if a.startswith("location=")), cmd[-1])
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_bytes(b"PROXY-MP4")
+        self.stdout = io.StringIO("out_time=00:00:05.000000\nprogress=end\n")
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+
+
+def _wait_ready(mgr, device="sdb1", path="clip.mp4", tries=100):
+    import time as _t
+    for _ in range(tries):
+        s = mgr.proxy_status(device, path)
+        if s["state"] in ("ready", "error"):
+            return s
+        _t.sleep(0.02)
+    return mgr.proxy_status(device, path)
+
+
+def test_proxy_status_transcodes_then_ready(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch, board="pi5")  # CPU ffmpeg proxy
+    mgr._cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pv.subprocess, "Popen", _EncProc)
+
+    first = mgr.proxy_status("sdb1", "clip.mp4")
+    assert first["state"] in ("transcoding", "ready")
+    s = _wait_ready(mgr)
+    assert s["state"] == "ready" and s["url"].endswith(".mp4")
+    # the finished proxy is served by proxy_file
+    key = s["url"].rsplit("/", 1)[1][:-4]
+    assert mgr.proxy_file(key).read_bytes() == b"PROXY-MP4"
+    # a second request returns the cached result (no new transcode)
+    assert mgr.proxy_status("sdb1", "clip.mp4")["state"] == "ready"
+
+
+def test_proxy_status_refused_when_busy(tmp_path, monkeypatch):
+    state = StationState()
+    state.set_phase(State.COPYING)
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr._state = state
+    mgr._cache_dir = tmp_path / "cache"
+    with pytest.raises(PreviewBusy):
+        mgr.proxy_status("sdb1", "clip.mp4")
+
+
+def test_proxy_file_rejects_bad_key(tmp_path, monkeypatch):
+    from copystation.mounts import BrowseError, NotFound
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr._cache_dir = tmp_path / "cache"
+    with pytest.raises(BrowseError):
+        mgr.proxy_file("../etc/passwd")       # not a 16-hex key -> rejected
+    with pytest.raises(NotFound):
+        mgr.proxy_file("0123456789abcdef")     # valid shape but absent
+
+
+# --------------------------------------------------------------------------- #
 # Web endpoints
 # --------------------------------------------------------------------------- #
 
@@ -293,8 +359,35 @@ def test_api_preview_unknown_volume_is_404(tmp_path, monkeypatch):
                       params={"device": "sdX", "path": "clip.mp4"}).status_code == 404
 
 
+def test_api_preview_proxy_flow(tmp_path, monkeypatch):
+    import time as _t
+    mgr = _mgr(tmp_path, monkeypatch, board="pi5")
+    mgr._cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pv.subprocess, "Popen", _EncProc)
+    client = TestClient(create_app(StationState(), Config(), browse=mgr._browse, preview=mgr))
+
+    s = client.get("/api/files/preview-proxy", params={"device": "sdb1", "path": "clip.mp4"}).json()
+    assert s["state"] in ("transcoding", "ready")
+    for _ in range(100):
+        s = client.get("/api/files/preview-proxy", params={"device": "sdb1", "path": "clip.mp4"}).json()
+        if s["state"] == "ready":
+            break
+        _t.sleep(0.02)
+    assert s["state"] == "ready" and s["url"].endswith(".mp4")
+
+    served = client.get(s["url"])
+    assert served.status_code == 200
+    assert served.content == b"PROXY-MP4"
+    assert served.headers["content-type"].startswith("video/mp4")
+    # cancel endpoint is well-formed (job already finished -> canceled: false)
+    assert client.delete("/api/files/preview-proxy",
+                         params={"device": "sdb1", "path": "clip.mp4"}).status_code == 200
+
+
 def test_preview_routes_absent_without_manager():
     client = TestClient(create_app(StationState(), Config(), browse=None, preview=None))
     assert client.get("/api/files/preview-info",
+                      params={"device": "sdb1", "path": "x"}).status_code == 404
+    assert client.get("/api/files/preview-proxy",
                       params={"device": "sdb1", "path": "x"}).status_code == 404
     assert client.get("/api/settings").json()["features"]["preview"] is False

@@ -767,6 +767,11 @@ function downloadUrl(path) {
 
 let currentHls = null;
 let previewGen = 0; // invalidates an in-flight open when the dialog is closed/reopened
+let proxyPoll = null; // {path, timer} while a proxy transcode is being awaited
+
+function proxyStatusUrl(path) {
+  return `/api/files/preview-proxy?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
 
 function hlsUrl(path) {
   return `/api/files/preview/index.m3u8?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
@@ -784,8 +789,18 @@ function destroyHls() {
 
 // Dropping the media element (and the hls.js instance) cancels the in-flight
 // stream / transcode so the station stops working the moment the player closes.
+function clearProxyPoll() {
+  if (proxyPoll && proxyPoll.timer) clearTimeout(proxyPoll.timer);
+  proxyPoll = null;
+}
+
 function stopPreviewMedia() {
-  previewGen++; // abort any open() still awaiting preview-info
+  previewGen++; // abort any open() still awaiting preview-info / proxy
+  // Cancel a running proxy transcode so the station's VPU is freed at once.
+  if (proxyPoll && proxyPoll.path) {
+    fetch(proxyStatusUrl(proxyPoll.path), { method: "DELETE" }).catch(() => {});
+  }
+  clearProxyPoll();
   destroyHls();
   const media = document.getElementById("pv-media");
   if (!media) return;
@@ -817,6 +832,63 @@ function playDirectVideo(path) {
   const v = newPreviewVideo();
   v.addEventListener("error", showPreviewFallback);
   v.src = streamUrl(path);
+}
+
+function showPreviewMessage(msg) {
+  const media = document.getElementById("pv-media");
+  if (media) media.innerHTML = `<p class="pv-fallback muted">${escapeHtml(msg)}</p>`;
+}
+
+function renderProxyProgress(pct) {
+  const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+  const media = document.getElementById("pv-media");
+  media.innerHTML =
+    `<div class="pv-prep">` +
+    `<p class="muted">Preparing smooth preview… ${p}%</p>` +
+    `<div class="storage-track"><div class="storage-used" style="width:${p}%"></div></div>` +
+    `<p class="pv-prep-note muted">Transcoding a downscaled copy so it plays smoothly ` +
+    `(4K can't be decoded live on this device). Cached for next time.</p>` +
+    `</div>`;
+}
+
+// For sources the device can't decode live (4K/HEVC): transcode a downscaled H.264
+// proxy once, show progress, then play THAT file (smooth, natively seekable).
+function playProxy(path, gen) {
+  renderProxyProgress(0);
+  const poll = async () => {
+    if (gen !== previewGen) return; // dialog closed/reopened
+    try {
+      const res = await fetch(proxyStatusUrl(path), { cache: "no-store" });
+      if (gen !== previewGen) return;
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        showPreviewMessage(res.status === 409
+          ? "Station busy — try again once it's idle."
+          : (b.detail || `error ${res.status}`));
+        return;
+      }
+      const d = await res.json();
+      if (gen !== previewGen) return;
+      if (d.state === "ready" && d.url) {
+        clearProxyPoll();
+        const v = newPreviewVideo();
+        v.addEventListener("error", showPreviewFallback);
+        v.src = d.url;
+        return;
+      }
+      if (d.state === "error") {
+        clearProxyPoll();
+        showPreviewMessage(d.error ? `Preview failed: ${d.error}` : "Preview failed — try Download.");
+        return;
+      }
+      renderProxyProgress(d.percent || 0);
+      proxyPoll = { path, timer: setTimeout(poll, 1500) };
+    } catch (e) {
+      if (gen === previewGen) proxyPoll = { path, timer: setTimeout(poll, 2000) };
+    }
+  };
+  proxyPoll = { path, timer: null };
+  poll();
 }
 
 // A live, hardware-downscaled 1080p HLS transcode (for 4K/HEVC/... sources).
@@ -870,7 +942,9 @@ async function openPreview(path) {
     } catch (e) { /* fall back to the direct stream */ }
   }
   if (gen !== previewGen) return; // closed / reopened while awaiting
-  if (mode === "hls") playHlsVideo(path);
+  // 4K/HEVC/... can't be decoded live on this SoC -> transcode a downscaled proxy
+  // once and play that; browser-friendly sources play directly.
+  if (mode === "hls") playProxy(path, gen);
   else playDirectVideo(path);
 }
 

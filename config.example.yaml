@@ -242,12 +242,21 @@ transcode:
 # with the file browser unless turned off here. Previews run only while idle.
 preview:
   enabled: true
-  height: 1080              # transcoded preview height (keeps aspect ratio)
-  fps: 30                   # cap the preview framerate (a 4K60 source plays as 30)
-  bitrate: 8M               # preview video bitrate
-  segment_seconds: 4        # HLS segment length (smaller = snappier seek, more spawns)
   max_direct_height: 1080   # sources at/below this (H.264, mp4/mov/webm) stream as-is
   acceleration: auto        # auto (hardware when available) | cpu
+  # Sources the browser/SoC can't play smoothly (4K, HEVC, ...) are transcoded to a
+  # downscaled H.264 **proxy file** once, then played back directly (smooth + fully
+  # seekable). Generating it takes ~1.5x the clip length on the Cubie and is cached.
+  proxy_height: 540         # proxy height (540 = fast/small; 720/1080 = sharper/slower)
+  proxy_bitrate: 6M         # proxy video bitrate
+  cache_dir: /var/cache/copystation/preview
+  cache_max_mb: 2048        # evict the oldest proxies past this budget
+  fallback_to_cpu: true     # transcode on the CPU if the hardware encoder fails
+  # HLS live-preview knobs (used only if the frontend requests the live path):
+  height: 1080              # live-stream transcode height
+  fps: 30                   # live-stream framerate cap (hardware path can't cap fps)
+  bitrate: 8M               # live-stream video bitrate
+  segment_seconds: 4        # HLS segment length
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
