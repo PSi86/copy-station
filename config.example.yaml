@@ -232,6 +232,23 @@ transcode:
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # 4K -> HW 1080 + CPU finish, crf
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only, crf
 
+# In-browser video preview / playback. Clicking a file in the web browser plays
+# it instead of downloading (download moves to the gear dialog). Sources that a
+# browser can already play (H.264, <= max_direct_height, mp4/mov/webm) are streamed
+# as-is; everything else (4K, HEVC, mkv, ...) is transcoded LIVE to a seekable HLS
+# stream at `height`/`fps` so 4K footage can be reviewed without stuttering. On the
+# Cubie the hardware encoder is used (ffmpeg does the seek, GStreamer OMX the
+# decode/scale/encode); other boards use ffmpeg on the CPU. Needs ffmpeg; enabled
+# with the file browser unless turned off here. Previews run only while idle.
+preview:
+  enabled: true
+  height: 1080              # transcoded preview height (keeps aspect ratio)
+  fps: 30                   # cap the preview framerate (a 4K60 source plays as 30)
+  bitrate: 8M               # preview video bitrate
+  segment_seconds: 4        # HLS segment length (smaller = snappier seek, more spawns)
+  max_direct_height: 1080   # sources at/below this (H.264, mp4/mov/webm) stream as-is
+  acceleration: auto        # auto (hardware when available) | cpu
+
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short
 # activation click (< max_click_seconds) followed by a 0.2-1.0 s release -- an

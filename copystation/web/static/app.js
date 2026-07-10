@@ -485,6 +485,7 @@ async function submitTranscode(path, presetId, outputDevice) {
 
 let deleteAvailable = false;
 let downloadAvailable = false;
+let previewAvailable = false;
 const dlgState = { path: null };
 
 function pathLabel(p) {
@@ -764,8 +765,28 @@ function downloadUrl(path) {
   return `/api/files/download?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
 }
 
-// Dropping the media element cancels its (possibly large) in-flight stream.
+let currentHls = null;
+let previewGen = 0; // invalidates an in-flight open when the dialog is closed/reopened
+
+function hlsUrl(path) {
+  return `/api/files/preview/index.m3u8?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
+function previewInfoUrl(path) {
+  return `/api/files/preview-info?device=${encodeURIComponent(fileState.device)}&path=${encodeURIComponent(path)}`;
+}
+
+function destroyHls() {
+  if (currentHls) {
+    try { currentHls.destroy(); } catch (e) { /* ignore */ }
+    currentHls = null;
+  }
+}
+
+// Dropping the media element (and the hls.js instance) cancels the in-flight
+// stream / transcode so the station stops working the moment the player closes.
 function stopPreviewMedia() {
+  previewGen++; // abort any open() still awaiting preview-info
+  destroyHls();
   const media = document.getElementById("pv-media");
   if (!media) return;
   const v = media.querySelector("video");
@@ -777,30 +798,80 @@ function stopPreviewMedia() {
   media.innerHTML = "";
 }
 
-function openPreview(path) {
+function newPreviewVideo() {
+  const media = document.getElementById("pv-media");
+  media.innerHTML =
+    `<video class="pv-video" controls autoplay playsinline></video>` +
+    `<p class="pv-fallback muted" hidden>This file can't be played in the browser — use Download.</p>`;
+  return media.querySelector("video");
+}
+function showPreviewFallback() {
+  const media = document.getElementById("pv-media");
+  const v = media && media.querySelector("video");
+  if (v) v.hidden = true;
+  const fb = media && media.querySelector(".pv-fallback");
+  if (fb) fb.hidden = false;
+}
+
+function playDirectVideo(path) {
+  const v = newPreviewVideo();
+  v.addEventListener("error", showPreviewFallback);
+  v.src = streamUrl(path);
+}
+
+// A live, hardware-downscaled 1080p HLS transcode (for 4K/HEVC/... sources).
+function playHlsVideo(path) {
+  const v = newPreviewVideo();
+  const url = hlsUrl(path);
+  if (window.Hls && window.Hls.isSupported()) {
+    const hls = new Hls({ maxBufferLength: 20, maxMaxBufferLength: 40 });
+    currentHls = hls;
+    hls.on(window.Hls.Events.ERROR, (evt, data) => {
+      if (data && data.fatal) showPreviewFallback();
+    });
+    hls.loadSource(url);
+    hls.attachMedia(v);
+  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.addEventListener("error", showPreviewFallback); // Safari native HLS
+    v.src = url;
+  } else {
+    showPreviewFallback();
+  }
+}
+
+async function openPreview(path) {
   if (!downloadAvailable) return; // streaming obeys the same gate as download
+  const gen = ++previewGen;
   const dlg = document.getElementById("preview-dialog");
   document.getElementById("pv-title").textContent = baseName(path);
   document.getElementById("pv-download").href = downloadUrl(path);
   const media = document.getElementById("pv-media");
   const ext = extOf(baseName(path));
-  if (PREVIEW_VIDEO_EXTS.has(ext)) {
-    media.innerHTML =
-      `<video class="pv-video" controls autoplay playsinline src="${streamUrl(path)}"></video>` +
-      `<p class="pv-fallback muted" hidden>This format can't be played in the browser — use Download.</p>`;
-    const v = media.querySelector("video");
-    // Codecs the browser can't decode (e.g. HEVC in Chrome) -> offer download.
-    v.addEventListener("error", () => {
-      v.hidden = true;
-      media.querySelector(".pv-fallback").hidden = false;
-    });
-  } else if (PREVIEW_IMAGE_EXTS.has(ext)) {
-    media.innerHTML = `<img class="pv-img" src="${streamUrl(path)}" alt="${escapeHtml(baseName(path))}">`;
-  } else {
-    media.innerHTML = `<p class="pv-fallback muted">No inline preview for this file type — use Download.</p>`;
-  }
+  media.innerHTML = "";
   if (typeof dlg.showModal === "function") dlg.showModal();
   else dlg.setAttribute("open", "");
+
+  if (PREVIEW_IMAGE_EXTS.has(ext)) {
+    media.innerHTML = `<img class="pv-img" src="${streamUrl(path)}" alt="${escapeHtml(baseName(path))}">`;
+    return;
+  }
+  if (!PREVIEW_VIDEO_EXTS.has(ext)) {
+    media.innerHTML = `<p class="pv-fallback muted">No inline preview for this file type — use Download.</p>`;
+    return;
+  }
+  // Video: ask the server whether it plays as-is or needs a live 1080p transcode
+  // (4K/HEVC stutter when the browser decodes them raw over the AP).
+  media.innerHTML = `<p class="pv-fallback muted">Loading…</p>`;
+  let mode = "direct";
+  if (previewAvailable) {
+    try {
+      const res = await fetch(previewInfoUrl(path), { cache: "no-store" });
+      if (res.ok) mode = (await res.json()).mode || "direct";
+    } catch (e) { /* fall back to the direct stream */ }
+  }
+  if (gen !== previewGen) return; // closed / reopened while awaiting
+  if (mode === "hls") playHlsVideo(path);
+  else playDirectVideo(path);
 }
 
 function closePreview() {
@@ -822,6 +893,7 @@ async function initFeatures() {
   transcodeAvailable = !!features.transcode;
   deleteAvailable = !!features.delete;
   downloadAvailable = !!features.download;
+  previewAvailable = !!features.preview;
 
   if (features.files) {
     document.getElementById("files-card").hidden = false;

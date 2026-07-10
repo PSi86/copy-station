@@ -40,6 +40,18 @@ all off by default, so existing status-only deployments are unaffected.
   preview). Streaming obeys the same `allow_download` gate as a download (exposed
   as a `download` capability flag); a codec the browser can't decode (e.g. HEVC in
   Chrome) falls back to a download prompt.
+- **Live HLS transcoding for the preview** (`preview` block, `/api/files/preview/*`):
+  sources a browser can't play smoothly -- 4K, HEVC, mkv, ... -- are transcoded
+  **on the fly** to a seekable 1080p30 H.264 HLS stream so they can be reviewed
+  without downloading or stuttering. The playlist is a full VOD (seek anywhere);
+  each segment is transcoded independently on demand (`ffmpeg` input-seek), so a
+  jump just fetches that segment. On the Cubie the **hardware encoder** is used --
+  ffmpeg does the seek and stream-copy, piped into a GStreamer OMX
+  decode->scale->encode -- so the seek never touches the OMX pipeline; other boards
+  use ffmpeg on the CPU. Browser-friendly sources (H.264 <=1080p) still play
+  directly (no transcode). Previews are serialised (single hardware encoder) and
+  only run while the station is idle. `hls.js` is vendored locally for browsers
+  without native HLS (the AP is offline).
 
 #### Video transcoding (optional)
 - **ffmpeg** transcoding/resolution change from the web UI (`/api/transcode`),
