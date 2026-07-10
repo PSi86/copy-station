@@ -82,7 +82,7 @@ def test_build_ffmpeg_segment_cmd():
 
 
 def test_build_hw_segment_cmds_pipes_ffmpeg_seek_into_gstreamer():
-    info = {"vcodec": "h264", "has_audio": True, "acodec": "aac"}
+    info = {"vcodec": "h264", "height": 2160, "has_audio": True, "acodec": "aac"}
     ff, gst = build_hw_segment_cmds("/card/x.mp4", info, 8.0, 4.0, 1080, 30, "8M")
     # ffmpeg does the seek + stream-copy (no decode) to mpegts on stdout
     assert ff[0] == "ffmpeg" and "copy" in ff and ff[-1] == "pipe:1"
@@ -92,13 +92,18 @@ def test_build_hw_segment_cmds_pipes_ffmpeg_seek_into_gstreamer():
     assert "fdsrc" in gst and "omxh264dec" in gst and "omxh264videoenc" in gst
     assert "fdsink" in gst
     assert "aacparse" in gst  # AAC audio carried through
+    # The downscale is in the DECODER (scale property); NO CPU element between the
+    # OMX decoder and encoder (that deadlocks/SIGSEGVs the shared VPU buffer pool).
+    assert "scale=1" in gst  # 4K -> 1080p is an exact 1/2 decoder downscale
+    assert "videoscale" not in gst and "videorate" not in gst
 
 
 def test_build_hw_segment_cmds_hevc_and_no_audio():
-    info = {"vcodec": "hevc", "has_audio": False, "acodec": None}
+    info = {"vcodec": "hevc", "height": 2160, "has_audio": False, "acodec": None}
     ff, gst = build_hw_segment_cmds("/card/x.mp4", info, 0.0, 4.0, 1080, 30, "8M")
     assert "-an" in ff                    # drop audio
     assert "omxhevcvideodec" in gst       # HEVC hardware decoder
+    assert "scale=1" in gst
     assert "aacparse" not in gst
 
 
@@ -206,6 +211,26 @@ def test_iter_segment_uses_hardware_on_cubie(tmp_path, monkeypatch):
     monkeypatch.setattr(pv.subprocess, "Popen", _Rec)
     b"".join(mgr.iter_segment("sdb1", "clip.mp4", 2))
     assert spawned == ["ffmpeg", "gst-launch-1.0"]  # ffmpeg-seek | gst-omx pipe
+
+
+def test_iter_segment_hevc_falls_back_to_cpu_on_cubie(tmp_path, monkeypatch):
+    # HEVC decode loses framerate on the OMX path (broken bitrate), so an HEVC
+    # source uses the CPU ffmpeg path even on the Cubie.
+    mgr = _mgr(tmp_path, monkeypatch, board="cubie",
+               encoders=("omxh264videoenc", "omxhevcvideodec", "libx264"),
+               info={"vcodec": "hevc", "width": 3840, "height": 2160, "fps": 100.0,
+                     "duration": 10.0, "has_audio": False, "acodec": None,
+                     "container": "mp4"})
+    spawned = []
+
+    class _Rec(_FakeProc):
+        def __init__(self, cmd, **kw):
+            super().__init__(cmd, **kw)
+            spawned.append(cmd[0])
+
+    monkeypatch.setattr(pv.subprocess, "Popen", _Rec)
+    b"".join(mgr.iter_segment("sdb1", "clip.mp4", 0))
+    assert spawned == ["ffmpeg"]  # single CPU ffmpeg, not the gst-omx pipe
 
 
 def test_iter_segment_refused_when_busy(tmp_path, monkeypatch):

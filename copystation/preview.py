@@ -38,6 +38,7 @@ from .encoders import (
     _GST_DECODERS,
     available_encoders,
     available_gst_elements,
+    decoder_scale_factor,
     detect_board,
     gst_can_handle,
 )
@@ -138,9 +139,17 @@ def build_hw_segment_cmds(src: Any, info: dict, start: float, seg_seconds: float
 
     ffmpeg does the **seek** (fast, input-seek) and **stream-copies** the
     compressed video (plus AAC audio when present) as MPEG-TS to stdout; GStreamer
-    reads it on stdin, hardware-decodes, scales to ``height``, caps to ``fps`` and
-    hardware-encodes H.264, muxing MPEG-TS to stdout. So GStreamer only ever runs
-    forward -- the seek never touches the (seek-averse) OMX pipeline.
+    reads it on stdin, hardware-decodes+downscales and hardware-encodes H.264,
+    muxing MPEG-TS to stdout. So GStreamer only ever runs forward -- the seek never
+    touches the (seek-averse) OMX pipeline.
+
+    The downscale is done **in the decoder** via its ``scale`` property (0=full,
+    1=1/2, 2=1/4) -- *no CPU element (videoscale/videorate) may sit between the OMX
+    decoder and encoder*, or the shared VPU buffer pool fails to configure and the
+    pipeline SIGSEGVs. So the produced height is the source divided by 1/2/4 to the
+    nearest clean size not below ``height`` (exact height is not needed for a
+    preview), and ``fps`` is **not** capped on this path (frame dropping would need
+    that forbidden CPU element; the A733 decode is the bottleneck anyway).
     """
     aac_audio = bool(info.get("has_audio")) and str(info.get("acodec") or "").lower() == "aac"
     ff = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -153,10 +162,10 @@ def build_hw_segment_cmds(src: Any, info: dict, start: float, seg_seconds: float
     vcodec = str(info.get("vcodec") or "h264").lower()
     parse, decoder = _GST_DECODERS.get(vcodec, ("h264parse", "omxh264dec"))
     bps = parse_bitrate(bitrate) or 8_000_000
+    scale = decoder_scale_factor(int(info.get("height") or 0), int(height))
+    dec = [decoder] + ([] if scale == 0 else [f"scale={scale}"])
     gst = ["gst-launch-1.0", "-q", "fdsrc", "!", "tsdemux", "name=d",
-           "d.", "!", "queue", "!", parse, "!", decoder, "!",
-           "videoscale", "!", f"video/x-raw,height={int(height)}", "!",
-           "videorate", "!", f"video/x-raw,framerate={int(fps)}/1", "!",
+           "d.", "!", "queue", "!", parse, "!", *dec, "!", "queue", "!",
            "omxh264videoenc", "control-rate=variable", f"target-bitrate={bps}", "!",
            "h264parse", "!", "mpegtsmux", "name=mux", "!", "fdsink"]
     if aac_audio:
@@ -250,9 +259,14 @@ class PreviewManager:
     def _use_hardware(self, info: dict) -> bool:
         if self._acceleration in ("cpu", "software", "none"):
             return False
+        # H.264 sources only on the hardware preview path: ``omxhevcvideodec`` does
+        # not propagate a framerate, so the H.264 encoder's (time-based) rate control
+        # fails and it emits a ~100x oversized segment. An HEVC source therefore
+        # falls back to the (correct, if slow) CPU ffmpeg path.
         return (
             self._board == "cubie"
             and "omxh264videoenc" in self._encoders_avail
+            and str(info.get("vcodec") or "").lower() in ("h264", "avc1")
             and gst_can_handle(info)
         )
 
