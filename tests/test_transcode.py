@@ -159,6 +159,24 @@ class _FakeBrowse:
             raise NotFound(path)
         return p
 
+    def list_dir(self, device, rel):
+        root = self.roots.get(device)
+        if root is None:
+            raise UnknownVolume(device)
+        target = (root / rel) if rel else root
+        if not target.is_dir():
+            raise NotFound(rel)
+        entries = []
+        for child in sorted(target.iterdir()):
+            is_dir = child.is_dir()
+            entries.append({
+                "name": child.name,
+                "is_dir": is_dir,
+                "size": None if is_dir else child.stat().st_size,
+                "mtime": child.stat().st_mtime,
+            })
+        return {"device": device, "path": rel or "", "entries": entries}
+
     def mount_ro(self, device):
         self.ops.append(f"mount_ro:{device}")
         return self.roots[device]
@@ -711,6 +729,92 @@ def test_plan_for_predicts_hw_hwcpu_and_cpu(tmp_path, monkeypatch):
     assert cpu["path"] == "cpu"
 
 
+# --------------------------------------------------------------------------- #
+# Folder (batch) planning + submission
+# --------------------------------------------------------------------------- #
+
+def _folder_probe(src):
+    """Vary the probed info by filename so a folder plan mixes HW and CPU paths."""
+    name = Path(src).name.lower()
+    if name.endswith((".mp4", ".mov")):  # 4K H.264 -> hardware-decodable
+        return {"vcodec": "h264", "width": 3840, "height": 2160, "fps": 59.94,
+                "duration": 10.0, "has_audio": False, "acodec": None,
+                "container": name.rsplit(".", 1)[-1]}
+    # a VP9 source the OMX pipeline can't decode -> CPU path
+    return {"vcodec": "vp9", "width": 1920, "height": 1080, "fps": 30.0,
+            "duration": 10.0, "has_audio": False, "acodec": None, "container": "mkv"}
+
+
+def _folder_card(tmp_path):
+    card = tmp_path / "card"
+    dcim = card / "DCIM"
+    dcim.mkdir(parents=True)
+    for n in ("a.mp4", "b.mov", "d.mkv"):
+        (dcim / n).write_bytes(b"\x00" * 32)
+    (dcim / "c.txt").write_text("not a video")  # skipped
+    return card
+
+
+def _cubie_folder_mgr(tmp_path, monkeypatch):
+    mgr = _mgr(_FakeBrowse({"sdb1": _folder_card(tmp_path)}))
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_video_info", _folder_probe)
+    return mgr
+
+
+def test_is_video_file():
+    assert tc.is_video_file("DJI_0001.MP4") and tc.is_video_file("clip.mkv")
+    assert not tc.is_video_file("notes.txt") and not tc.is_video_file("cover.jpg")
+
+
+def test_plan_folder_lists_videos_with_per_file_paths(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    plan = mgr.plan_folder("sdb1", "DCIM", "1080p-h264")
+    # non-video (c.txt) is skipped; the rest are listed sorted.
+    assert [f["name"] for f in plan["files"]] == ["a.mp4", "b.mov", "d.mkv"]
+    assert plan["count"] == 3
+    by = {f["name"]: f["plan"] for f in plan["files"]}
+    assert by == {"a.mp4": "hw", "b.mov": "hw", "d.mkv": "cpu"}
+    assert plan["counts"] == {"hw": 2, "hw+cpu": 0, "cpu": 1}
+    # 720p splits the two 4K sources into a HW+CPU finish; VP9 stays on the CPU.
+    plan720 = mgr.plan_folder("sdb1", "DCIM", "720p-h264")
+    assert plan720["counts"] == {"hw": 0, "hw+cpu": 2, "cpu": 1}
+
+
+def test_submit_folder_queues_one_job_per_video(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    result = mgr.submit_folder("sdb1", "DCIM", "720p-h264")
+    assert result["count"] == 3
+    assert sorted(j["input_path"] for j in result["jobs"]) == [
+        "DCIM/a.mp4", "DCIM/b.mov", "DCIM/d.mkv"
+    ]
+    assert all(j["status"] == "queued" and j["preset"] == "720p-h264"
+               for j in result["jobs"])
+    # The batch owns the queue: a further single submit is refused as busy.
+    assert mgr._has_active_job() is True
+    with pytest.raises(TranscodeBusy):
+        mgr.submit("sdb1", "DCIM/a.mp4", "720p-h264")
+
+
+def test_submit_folder_no_videos_errors(tmp_path, monkeypatch):
+    card = tmp_path / "card"
+    (card / "empty").mkdir(parents=True)
+    (card / "empty" / "notes.txt").write_text("x")
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    with pytest.raises(tc.TranscodeError):
+        mgr.submit_folder("sdb1", "empty", "720p-h264")
+
+
+def test_submit_folder_blocked_when_active(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    mgr.submit("sdb1", "DCIM/a.mp4", "720p-h264")  # one job already active
+    with pytest.raises(TranscodeBusy):
+        mgr.submit_folder("sdb1", "DCIM", "720p-h264")
+
+
 def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):
     card = _card(tmp_path)
     browse = _FakeBrowse({"sdb1": card})
@@ -928,6 +1032,33 @@ class _FakeManager:
     def cancel(self, job_id):
         return job_id == 7
 
+    def plan_folder(self, device, path, preset):
+        if not self._available:
+            raise TranscodeUnavailable("no ffmpeg")
+        if preset == "bad":
+            raise UnknownPreset("bad")
+        if device == "sdX":
+            raise UnknownVolume("sdX")
+        return {
+            "preset": preset, "folder": path, "count": 2,
+            "counts": {"hw": 1, "hw+cpu": 0, "cpu": 1},
+            "files": [{"name": "a.mp4", "plan": "hw"}, {"name": "b.mkv", "plan": "cpu"}],
+            "estimate_seconds": 20.0,
+        }
+
+    def submit_folder(self, device, path, preset, output_device=None):
+        if not self._available:
+            raise TranscodeUnavailable("no ffmpeg")
+        if preset == "busy":
+            raise TranscodeBusy("a copy is in progress")
+        if preset == "empty":
+            raise tc.TranscodeError("no video files in this folder")
+        if device == "sdX":
+            raise UnknownVolume("sdX")
+        self.jobs = [{"id": 7, "status": "queued", "input_path": f"{path}/a.mp4"},
+                     {"id": 8, "status": "queued", "input_path": f"{path}/b.mkv"}]
+        return {"jobs": self.jobs, "count": 2}
+
 
 def _client(transcode):
     return TestClient(create_app(StationState(), Config(), browse=None, transcode=transcode))
@@ -967,6 +1098,40 @@ def test_api_transcode_cancel():
     client = _client(_FakeManager())
     assert client.delete("/api/transcode/7").status_code == 200
     assert client.delete("/api/transcode/8").status_code == 404
+
+
+def test_api_folder_plan_and_submit():
+    client = _client(_FakeManager())
+    p = client.get("/api/transcode/folder-plan",
+                   params={"device": "sdb1", "path": "DCIM", "preset": "720p-h264"})
+    assert p.status_code == 200
+    body = p.json()
+    assert body["count"] == 2 and body["counts"]["hw"] == 1
+    assert [f["plan"] for f in body["files"]] == ["hw", "cpu"]
+
+    r = client.post("/api/transcode/folder",
+                    json={"device": "sdb1", "path": "DCIM", "preset": "720p-h264"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 2 and len(r.json()["jobs"]) == 2
+
+
+def test_api_folder_errors():
+    client = _client(_FakeManager())
+    assert client.get("/api/transcode/folder-plan",
+                      params={"device": "sdX", "path": "D", "preset": "720p-h264"}).status_code == 404
+    assert client.get("/api/transcode/folder-plan",
+                      params={"device": "sdb1", "path": "D", "preset": "bad"}).status_code == 400
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "busy"}).status_code == 409
+    # a folder with no video files -> 400 (TranscodeError)
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "empty"}).status_code == 400
+
+
+def test_api_folder_unavailable_is_501():
+    client = _client(_FakeManager(available=False))
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "720p-h264"}).status_code == 501
 
 
 def test_transcode_routes_absent_without_manager():

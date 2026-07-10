@@ -62,6 +62,19 @@ PERF_STABLE_MIN_OUTPUT_SEC = 10
 
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Extensions treated as transcodable video when a whole folder is submitted. The
+# GStreamer hardware path only takes a subset (see ``encoders._GST_DEMUX``); the
+# rest still transcode on the CPU. Non-video files (photos, sidecars) are skipped.
+VIDEO_EXTS = frozenset({
+    "mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "ts",
+    "mpg", "mpeg", "wmv", "flv", "3gp", "3g2", "mxf", "insv", "lrv",
+})
+
+
+def is_video_file(name: str) -> bool:
+    """Whether ``name`` has a known video extension (for folder submission)."""
+    return Path(str(name)).suffix.lower().lstrip(".") in VIDEO_EXTS
+
 
 class TranscodeError(Exception):
     """Base class for transcode errors (mapped to HTTP codes by the web layer)."""
@@ -460,6 +473,57 @@ class TranscodeManager:
             "estimate_seconds": self._estimate(info, preset_id),
         }
 
+    def plan_folder(self, input_device: str, input_path: str, preset_id: str) -> dict:
+        """Per-file plan for every video in a folder, for the batch dialog.
+
+        Lists the folder (non-recursive), probes each video file and predicts which
+        path (``hw`` / ``hw+cpu`` / ``cpu``) the chosen preset takes for it, so the
+        dialog can show up front whether the files are handled uniformly or split
+        across the hardware and CPU encoders. Submitting creates one job per file.
+        """
+        if not self._available:
+            raise TranscodeUnavailable("ffmpeg is not installed on the station")
+        preset = self._preset(preset_id)                            # -> UnknownPreset
+        listing = self._browse.list_dir(input_device, input_path)   # -> BrowseError
+        folder = listing.get("path", "")
+        files: List[dict] = []
+        counts: dict[str, int] = {"hw": 0, "hw+cpu": 0, "cpu": 0}
+        for entry in listing.get("entries", []):
+            name = entry.get("name", "")
+            if entry.get("is_dir") or not is_video_file(name):
+                continue
+            rel = f"{folder}/{name}" if folder else name
+            try:
+                src = self._browse.resolve_input(input_device, rel)
+                info = dict(self._probe(src))
+            except BrowseError:  # a file vanished mid-listing -> skip it
+                continue
+            path_kind, out_h = self._plan(preset, info)
+            counts[path_kind] = counts.get(path_kind, 0) + 1
+            files.append({
+                "name": name,
+                "path": rel,
+                "vcodec": info.get("vcodec"),
+                "width": info.get("width"),
+                "height": info.get("height"),
+                "fps": info.get("fps"),
+                "duration": info.get("duration"),
+                "size": entry.get("size"),
+                "plan": path_kind,
+                "out_height": out_h,
+                "estimate_seconds": self._estimate(info, preset_id),
+            })
+        total = sum(f["estimate_seconds"] for f in files if f["estimate_seconds"])
+        return {
+            "preset": preset_id,
+            "folder": folder,
+            "target_height": int(preset.get("height", 0) or 0),
+            "count": len(files),
+            "counts": counts,
+            "files": files,
+            "estimate_seconds": total or None,
+        }
+
     def _load_perf(self) -> dict:
         try:
             data = json.loads(Path(self._perf_file).read_text())
@@ -559,6 +623,34 @@ class TranscodeManager:
 
     # ----- submission -----------------------------------------------------------
 
+    @staticmethod
+    def _new_job(job_id: int, input_device: str, input_path: str,
+                 output_device: str, preset_id: str) -> dict:
+        """A fresh queued-job record (shared by single and batch submission)."""
+        return {
+            "id": job_id,
+            "status": "queued",
+            "input_device": input_device,
+            "input_path": input_path,
+            "output_device": output_device,
+            "preset": str(preset_id),
+            "percent": 0,
+            "filename": None,
+            "output_path": None,
+            "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
+            "hw": False,           # True if a hardware encoder was used
+            "path": None,          # "hw" | "hw+cpu" | "cpu" (chosen encode path)
+            "perf_spf": None,      # internal: live seconds-per-frame estimate
+            "perf_stable": False,  # internal: True once that estimate stabilised
+            "input_size": None,    # source file size in bytes
+            "output_size": None,   # transcoded file size in bytes (once done)
+            "ram_buffered": False, # True if staged through a RAM tmpfs
+            "fps": None,           # live encode rate (frames/second)
+            "speed": None,         # ffmpeg speed relative to realtime (e.g. "2.5x")
+            "error": None,
+            "started": None,       # wall clock (time.monotonic) when it starts running
+        }
+
     def submit(
         self,
         input_device: str,
@@ -582,29 +674,7 @@ class TranscodeManager:
         with self._lock:
             self._seq += 1
             job_id = self._seq
-            job = {
-                "id": job_id,
-                "status": "queued",
-                "input_device": input_device,
-                "input_path": input_path,
-                "output_device": out_dev,
-                "preset": str(preset_id),
-                "percent": 0,
-                "filename": None,
-                "output_path": None,
-                "encoder": None,       # which encoder actually ran (cpu / h264_v4l2m2m ...)
-                "hw": False,           # True if a hardware encoder was used
-                "path": None,          # "hw" | "hw+cpu" | "cpu" (chosen encode path)
-                "perf_spf": None,      # internal: live seconds-per-frame estimate
-                "perf_stable": False,  # internal: True once that estimate stabilised
-                "input_size": None,    # source file size in bytes
-                "output_size": None,   # transcoded file size in bytes (once done)
-                "ram_buffered": False, # True if staged through a RAM tmpfs
-                "fps": None,           # live encode rate (frames/second)
-                "speed": None,         # ffmpeg speed relative to realtime (e.g. "2.5x")
-                "error": None,
-                "started": None,       # wall clock (time.monotonic) when it starts running
-            }
+            job = self._new_job(job_id, input_device, input_path, out_dev, preset_id)
             self._jobs[job_id] = job
             self._order.append(job_id)
             self._trim_history()
@@ -614,6 +684,52 @@ class TranscodeManager:
         _LOG.info("Transcode queued (#%d): %s:%s -> %s [%s]",
                   job_id, input_device, input_path, out_dev, preset_id)
         return snap
+
+    def submit_folder(
+        self,
+        input_device: str,
+        input_path: str,
+        preset_id: str,
+        output_device: Optional[str] = None,
+    ) -> dict:
+        """Queue one independent job per video file in a folder (single preset).
+
+        A folder is *not* one 'folder job': each file becomes its own job that the
+        single worker runs one after another (so each picks its own hw/cpu path and
+        appears/cancels individually). Like :meth:`submit`, it refuses if a copy or
+        another transcode is already active, so the batch owns the queue.
+        """
+        if not self._available:
+            raise TranscodeUnavailable("ffmpeg is not installed on the station")
+        self._preset(preset_id)  # validate early -> UnknownPreset
+        if self._state.phase is State.COPYING:
+            raise TranscodeBusy("a copy is in progress -- try again once it finishes")
+        if self._has_active_job():
+            raise TranscodeBusy("a transcode is already in progress")
+        listing = self._browse.list_dir(input_device, input_path)  # -> BrowseError
+        folder = listing.get("path", "")
+        names = [e.get("name", "") for e in listing.get("entries", [])
+                 if not e.get("is_dir") and is_video_file(e.get("name", ""))]
+        if not names:
+            raise TranscodeError("no video files in this folder")
+        out_dev = output_device or input_device
+        snaps: List[dict] = []
+        with self._lock:
+            for name in names:
+                rel = f"{folder}/{name}" if folder else name
+                self._seq += 1
+                job_id = self._seq
+                job = self._new_job(job_id, input_device, rel, out_dev, preset_id)
+                self._jobs[job_id] = job
+                self._order.append(job_id)
+                snaps.append(dict(job))
+            self._trim_history()
+        for snap in snaps:
+            self._queue.put(snap["id"])
+        self._ensure_worker()
+        _LOG.info("Transcode batch queued (%d files): %s:%s -> %s [%s]",
+                  len(snaps), input_device, folder or "/", out_dev, preset_id)
+        return {"jobs": snaps, "count": len(snaps)}
 
     def cancel(self, job_id: int) -> bool:
         with self._lock:

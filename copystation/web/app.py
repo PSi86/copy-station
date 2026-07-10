@@ -226,6 +226,42 @@ def create_app(
             except BrowseError as exc:
                 raise _browse_http_error(exc) from exc
 
+        @app.get("/api/transcode/folder-plan")
+        def get_transcode_folder_plan(
+            device: str = Query(...),
+            path: str = Query(...),
+            preset: str = Query(...),
+        ) -> JSONResponse:
+            # Per-file plan for every video in a folder, so the batch dialog can
+            # show whether the files are handled uniformly (hw / hw+cpu / cpu).
+            try:
+                return JSONResponse(transcode.plan_folder(device, path, preset))
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+
+        @app.post("/api/transcode/folder")
+        def post_transcode_folder(req: TranscodeRequest) -> JSONResponse:
+            # Queue one job per video file in the folder (a single preset for all).
+            try:
+                result = transcode.submit_folder(
+                    req.device, req.path, req.preset, req.output_device
+                )
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except TranscodeBusy as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            except TranscodeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(result)
+
         @app.post("/api/transcode")
         def post_transcode(req: TranscodeRequest) -> JSONResponse:
             try:
