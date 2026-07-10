@@ -851,8 +851,11 @@ class TranscodeManager:
                              duration, "gstreamer", src_fps=src_fps)
             return
         # Two-stage: hardware decode-scale to out_h (bar 0-50%), then a CPU scale to
-        # target_h (bar 50-100%). The finish is bitrate-controlled (not CRF) so the
-        # preset ladder stays monotonic (a 720p finish targets the preset's bitrate).
+        # target_h (bar 50-100%). The finish is CRF (quality-controlled): the
+        # bitrate-limited hardware encoder is the quality bottleneck, so the CPU
+        # finish encodes to a quality target (preset ``crf``) rather than a capped
+        # bitrate. The hardware intermediate is a generous bitrate (see
+        # default_bitrate) so it preserves detail for the finish.
         stage1 = dst.parent / f"{dst.stem}.stage1.mp4"
         _LOG.info("Transcode #%d: HW %dp, then CPU finish -> %dp", job_id, out_h, target_h)
         self._set(job_id, path="hw+cpu", note=f"pass 1/2: HW {out_h}p")
@@ -862,7 +865,7 @@ class TranscodeManager:
                              pct_base=0.0, pct_span=50.0)
             self._set(job_id, encoder=f"{enc.name}+cpu", note=f"pass 2/2: CPU {target_h}p")
             self._run_encode(job_id, build_ffmpeg_cmd(
-                cpu_encoder(str(preset.get("vcodec", "libx264")), rate_mode="bitrate"),
+                cpu_encoder(str(preset.get("vcodec", "libx264"))),  # CRF (quality)
                 preset, stage1, dst),
                 duration, "ffmpeg", pct_base=50.0, pct_span=50.0)
         finally:

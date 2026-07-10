@@ -74,10 +74,11 @@ def test_available_encoders_empty_on_error():
 
 
 def test_default_bitrate_scales_with_height():
-    assert default_bitrate(1080) == "12M"
-    assert default_bitrate(720) == "8M"
-    assert default_bitrate(480) == "4M"
-    assert default_bitrate(0) == "24M"   # unknown/original -> generous
+    assert default_bitrate(1080) == "16M"
+    assert default_bitrate(720) == "10M"
+    assert default_bitrate(540) == "8M"
+    assert default_bitrate(480) == "5M"
+    assert default_bitrate(0) == "40M"   # unknown/original -> generous
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +192,7 @@ def test_build_hardware_cmd_uses_bitrate_not_crf():
     assert cmd[cmd.index("-c:v") + 1] == "h264_v4l2m2m"
     assert "-crf" not in cmd
     assert "-preset" not in cmd            # V4L2 M2M has no x264 speed preset
-    assert cmd[cmd.index("-b:v") + 1] == "12M"  # height-based default bitrate
+    assert cmd[cmd.index("-b:v") + 1] == "16M"  # height-based default bitrate
     assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
 
 
@@ -307,7 +308,7 @@ def test_build_gstreamer_cmd_4k_to_1080p_uses_decoder_half_scale():
     assert "scale=1" in cmd
     assert not any(x.startswith("output-width") or x.startswith("output-height") for x in cmd)
     assert "control-rate=variable" in cmd
-    assert "target-bitrate=12000000" in cmd           # 1080p default 12M -> bits/s
+    assert "target-bitrate=16000000" in cmd           # 1080p default 16M -> bits/s
     assert cmd[-1] == "location=/out/b.mp4"
     assert "aacparse" not in cmd and "name=d" not in cmd   # no audio -> linear pipeline
 
@@ -324,7 +325,7 @@ def test_build_gstreamer_cmd_scales_bitrate_for_60fps():
     # 60fps needs ~2x the 30fps default (capped at 1.8x): 12M -> 21.6M.
     info = dict(INFO_4K_H264, fps=59.94)
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 1080, "vcodec": "libx264"}, "a", "b", info)
-    assert f"target-bitrate={int(12_000_000 * 1.8)}" in cmd
+    assert f"target-bitrate={int(16_000_000 * 1.8)}" in cmd
     assert "scale=1" in cmd
 
 
@@ -344,7 +345,7 @@ def test_build_gstreamer_cmd_hevc_source_uses_hevc_decoder():
     assert "h265parse" in cmd and "omxhevcvideodec" in cmd and "scale=1" in cmd
     assert "omxh264videoenc" in cmd                   # output is still H.264
     assert not any(x.startswith("output-height") for x in cmd)
-    assert "target-bitrate=12000000" in cmd           # sized to the 1080p HW stage
+    assert "target-bitrate=16000000" in cmd           # sized to the 1080p HW stage
 
 
 def test_build_gstreamer_cmd_carries_aac_audio_through_named_mux():
@@ -358,4 +359,4 @@ def test_build_gstreamer_cmd_keeps_resolution_when_height_zero():
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 0, "vcodec": "libx264"}, "a", "b", INFO_4K_H264)
     assert not any(x.startswith("scale=") for x in cmd)   # no decoder downscale
     assert not any(x.startswith("output-width") or x.startswith("output-height") for x in cmd)
-    assert "target-bitrate=24000000" in cmd           # default_bitrate(2160) = 24M
+    assert "target-bitrate=40000000" in cmd           # default_bitrate(2160) = 40M

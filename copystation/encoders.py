@@ -168,16 +168,18 @@ def default_bitrate(height: int) -> str:
     """
     h = int(height or 0)
     if h <= 0 or h >= 2160:
-        return "24M"
+        return "40M"
     if h >= 1440:
-        return "16M"
+        return "24M"
     if h >= 1080:
-        return "12M"
+        return "16M"
     if h >= 720:
+        return "10M"
+    if h >= 540:
         return "8M"
     if h >= 480:
-        return "4M"
-    return "2M"
+        return "5M"
+    return "4M"
 
 
 def cpu_encoder(vcodec: str, rate_mode: str = "crf") -> Encoder:

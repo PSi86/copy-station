@@ -164,13 +164,17 @@ boards differ a lot in what they can encode in hardware:
   The job list shows which encoder actually ran (e.g. `omxh264videoenc (hw)`,
   `h264_v4l2m2m (hw)` or `cpu`).
 
-> **Hardware quality knob.** On the Cubie the encoder targets a bitrate, so `crf`
-> does nothing there -- if a hardware transcode looks soft or blocky, **raise the
-> preset's `bitrate`** (e.g. `bitrate: 20M` for high-motion 4K60 drone footage).
-> A preset can carry both: `crf` is used when it falls back to the CPU, `bitrate`
-> when the hardware encoder runs. Software (CRF) encodes of high-detail footage
-> can be several times larger than a fixed-bitrate hardware encode -- that size
-> difference is the quality you tune with `bitrate`.
+> **Hardware quality knob.** The Allwinner hardware encoder is bitrate-controlled
+> and **ignores everything else** (CABAC/B-frames/GOP/`crf` have no effect -- only
+> `target-bitrate` moves the needle), and it is not very efficient. So if a
+> single-pass hardware transcode (4K -> 1080p/540p) looks soft or blocky, **raise
+> the preset's `bitrate`** (the examples use 24M for 1080p, 12M for 540p; go higher
+> for demanding footage). The two-stage 4K -> 720p path finishes on the CPU, so it
+> is quality-targeted by `crf` instead -- a high-detail 60fps clip can then produce
+> a large file, which is simply the quality you asked for. A preset carries both
+> knobs; each path uses its own (the ⚙ dialog shows which path a file will take).
+> For the best quality/size, a CPU (`crf`) preset beats the hardware encoder -- at
+> the cost of speed.
 
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
