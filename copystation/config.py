@@ -135,6 +135,10 @@ DEFAULTS: dict[str, Any] = {
         "files": {
             "enabled": True,
             "allow_download": True,
+            # Allow deleting a file from the ⚙ dialog (mounts the card read-write
+            # for the one delete, under the operation lock). Set false to keep the
+            # browser strictly read-only.
+            "allow_delete": True,
             # Where the browser mounts volumes read-only (separate from the
             # transfer mount base so the two never collide).
             "browse_base": "/run/copystation/browse",
@@ -171,9 +175,10 @@ DEFAULTS: dict[str, Any] = {
         "output_dirname": "Transcoded",
         "max_jobs": 1,
         # Video encoder selection:
-        #   auto     -> use the board's hardware encoder when ffmpeg has it
-        #               (Pi 4: h264_v4l2m2m; Cubie A7S: h264/hevc_v4l2m2m; the
-        #               Pi 5 has no HW encoder -> CPU), else software.
+        #   auto     -> use the board's hardware encoder when it is present
+        #               (Pi 4: ffmpeg h264_v4l2m2m; Cubie A7S: GStreamer
+        #               omxh264videoenc for H.264 -- HEVC output stays on the CPU;
+        #               Pi 5 has no HW encoder), else software.
         #   cpu      -> always software (libx264/libx265).
         #   <name>   -> force a specific ffmpeg encoder (e.g. h264_v4l2m2m).
         # A per-preset ``accel`` overrides this. See copystation/encoders.py.
@@ -202,9 +207,15 @@ DEFAULTS: dict[str, Any] = {
         # not apply to hardware encoders (they are bitrate-controlled). Argument
         # construction lives in ``copystation/transcode.py``.
         "presets": [
+            # On the Cubie the hardware decoder scales only by 1/2 or 1/4, so a
+            # target that is exactly the source height /2 or /4 is a single clean
+            # hardware pass (4K -> 1080p or 540p); other heights (e.g. 720p) are
+            # finished to the exact size by a short ffmpeg CPU pass. See encoders.py.
             {"id": "1080p-h264", "label": "1080p H.264", "height": 1080,
              "vcodec": "libx264", "crf": 21, "preset": "veryfast"},
             {"id": "720p-h264", "label": "720p H.264", "height": 720,
+             "vcodec": "libx264", "crf": 23, "preset": "veryfast"},
+            {"id": "540p-h264", "label": "540p H.264", "height": 540,
              "vcodec": "libx264", "crf": 23, "preset": "veryfast"},
             {"id": "720p-h265", "label": "720p H.265", "height": 720,
              "vcodec": "libx265", "crf": 28, "preset": "veryfast"},

@@ -94,6 +94,7 @@ class BrowseManager:
         self._rw_base = self._base.with_name(self._base.name + "-rw")
         self._idle = float(files_cfg.get("idle_unmount_seconds", 120))
         self._allow_download = bool(files_cfg.get("allow_download", True))
+        self._allow_delete = bool(files_cfg.get("allow_delete", True))
         self._lock = threading.RLock()
         # sys_name -> {"path": Path, "last": monotonic}
         self._mounts: dict[str, dict[str, Any]] = {}
@@ -103,6 +104,10 @@ class BrowseManager:
     @property
     def allow_download(self) -> bool:
         return self._allow_download
+
+    @property
+    def allow_delete(self) -> bool:
+        return self._allow_delete
 
     # ----- volume discovery -----------------------------------------------------
 
@@ -275,6 +280,31 @@ class BrowseManager:
         if not self._allow_download:
             raise PathEscapesVolume("downloads are disabled")
         return self.resolve_input(sys_name, rel)
+
+    def delete_file(self, sys_name: str, rel: str) -> None:
+        """Delete one file from a volume read-write (subject to ``allow_delete``).
+
+        Mirrors the transcode output path: drop any read-only browse mount, mount
+        the device read-write, remove the (regular) file, sync and unmount. Must be
+        called under the station operation lock so no copy/transcode touches the
+        device at the same time. Refuses directories and anything that escapes the
+        volume root.
+        """
+        if not self._allow_delete:
+            raise PathEscapesVolume("deletes are disabled")
+        self.release(sys_name)  # drop any read-only browse mount of this device
+        root = self.mount_rw(sys_name)
+        try:
+            target = safe_resolve(root, rel)
+            if not target.exists():
+                raise NotFound(f"{rel!r} does not exist")
+            if not target.is_file():
+                raise NotFound(f"{rel!r} is not a file")
+            target.unlink()
+            subprocess.run(["sync"], check=False)
+            _LOG.info("Deleted %s:%s", sys_name, rel)
+        finally:
+            self.umount_rw(sys_name)
 
     # ----- idle reaper / shutdown ----------------------------------------------
 

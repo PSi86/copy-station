@@ -62,6 +62,22 @@ if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   echo ">> Installing ffmpeg (optional video transcoding) ..."
   apt-get install -y ffmpeg || echo "   -> ffmpeg not installed; transcoding will be unavailable."
 
+  # On the Allwinner A733 (Cubie A7S) the hardware H.264 encoder + H.264/H.265
+  # decoders are GStreamer OpenMAX elements (omxh264videoenc / omxh264dec /
+  # omxhevcvideodec). The vendor OMX plugin already ships in the Radxa image, so
+  # we do NOT install gstreamer1.0-omx (that would pull a conflicting generic
+  # one); we only add the standard tools + plugins our pipeline needs
+  # (gst-launch/gst-inspect, qtdemux/mp4mux/matroskademux/aacparse from -good,
+  # h264parse/h265parse from -bad). Cubie-only and best-effort -- the Pi uses
+  # ffmpeg, and a missing element just makes the transcoder fall back to the CPU.
+  MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
+  if printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s|allwinner"; then
+    echo ">> Installing GStreamer for A733 hardware transcoding ..."
+    apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+      || echo "   -> GStreamer incomplete; hardware transcoding will fall back to the CPU."
+  fi
+
   # exFAT support so camera/SD cards mount (package name differs by release:
   # Bullseye = exfat-fuse + exfat-utils; Bookworm/Trixie = exfatprogs).
   echo ">> Installing exFAT support ..."

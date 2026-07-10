@@ -136,6 +136,7 @@ web:
   files:
     enabled: true
     allow_download: true
+    allow_delete: true                     # allow deleting a file from the ⚙ dialog
     browse_base: /run/copystation/browse   # separate from the transfer mounts
     idle_unmount_seconds: 120              # release a browsed volume when idle
 
@@ -175,13 +176,17 @@ transcode:
   enabled: false
   output_dirname: Transcoded
   max_jobs: 1
-  # Hardware acceleration. `auto` uses the board's hardware encoder when the
-  # installed ffmpeg supports it and falls back to the CPU otherwise:
-  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware)
+  # Hardware acceleration. `auto` uses the board's hardware encoder when it is
+  # present and falls back to the CPU otherwise:
+  #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware, via ffmpeg)
   #   * Raspberry Pi 5  -> no hardware encoder exists -> CPU (libx264/libx265)
-  #   * Radxa Cubie A7S -> the A733 HW H.264/H.265 encoders are only reachable via
-  #                        GStreamer OpenMAX (omxh264videoenc / omxhevcvideoenc),
-  #                        NOT ffmpeg, so auto resolves to CPU here.
+  #   * Radxa Cubie A7S -> H.264 in hardware via GStreamer OpenMAX
+  #                        (omxh264videoenc), with hardware H.264/H.265 *decode*
+  #                        (omxh264dec / omxhevcvideodec) so even 4K input is
+  #                        offloaded. H.265 *output* has no hardware encoder and
+  #                        stays on the CPU. Needs the gstreamer1.0 OMX plugin
+  #                        (present on Radxa images); the daemon runs as root, so
+  #                        it can open the /dev/cedar_dev + /dev/dma_heap nodes.
   # Set `cpu` to force software, or a specific ffmpeg encoder name (e.g.
   # h264_v4l2m2m) to force hardware. `fallback_to_cpu` retries on the CPU if the
   # hardware encoder fails at runtime.
@@ -196,16 +201,36 @@ transcode:
   ram_buffer_fraction: 0.66  # use up to ~two thirds of the free RAM
   # Selectable presets. `height` downscales to that many lines keeping the aspect
   # ratio (width auto, even); `height: 0` keeps the source resolution. `vcodec`
-  # is the software codec and picks the family (h264/hevc); `crf` drives software
-  # quality, `bitrate` (optional) drives the hardware encoder (a height-based
-  # default is used otherwise). A per-preset `accel:` overrides the global one.
-  # `preset` is the software speed preset -- `veryfast` is a good SBC default
-  # (much faster than `medium`); `ultrafast` = max speed / bigger files,
-  # `fast`/`medium`/`slow` = smaller files. Ignored by hardware encoders.
+  # is the software codec and picks the family (h264/hevc). There are two separate
+  # quality knobs, one per encode path:
+  #   * software / CPU: `crf` (lower = better + bigger) plus `preset` speed
+  #     (`veryfast` is a good SBC default; `ultrafast` = fastest/biggest,
+  #     `fast`/`medium`/`slow` = smaller). BOTH are ignored by hardware encoders.
+  #   * hardware (Cubie A7S OMX H.264, Pi 4 V4L2): `bitrate` (e.g. `16M`). If it
+  #     is unset, a generous height- AND framerate-aware default is used (a 60fps
+  #     source gets ~2x a 30fps one). CRF does NOTHING here -- so if a hardware
+  #     transcode looks poor, RAISE `bitrate` (that is the only quality lever).
+  # A per-preset `accel:` overrides the global one.
+  #
+  # Cubie A7S single-pass note: the hardware DECODER scales only by 1/2 or 1/4, so
+  # a `height` that is exactly the source height /2 or /4 is a single clean
+  # hardware pass -- for a 4K (2160p) source that is `1080p` (1/2) and `540p`
+  # (1/4). Any other height (e.g. `720p`) is hardware-scaled to the nearest larger
+  # clean size and then finished to the exact height by a short ffmpeg CPU pass
+  # (slower, more CPU). So `1080p` and `540p` are the fully-hardware presets for 4K.
   presets:
-    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast }
-    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast }
-    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }
+    # A preset carries BOTH knobs; each encode path uses its own (the ⚙ dialog
+    # shows which path a file+preset takes):
+    #   * single hardware pass (4K -> 1080p/540p): uses `bitrate`. The Allwinner
+    #     encoder is inefficient and ignores everything but the bitrate, so these
+    #     are generous -- a low bitrate is why hardware output looked soft.
+    #   * HW + CPU finish (4K -> 720p) and CPU-only (H.265): the CPU pass uses
+    #     `crf` (quality-targeted). A high-detail 60fps source is hard to compress,
+    #     so a good crf can still produce a large file -- that is the quality.
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 24M }   # 4K -> single HW pass (1/2), bitrate
+    - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }   # 4K -> single HW pass (1/4), bitrate
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # 4K -> HW 1080 + CPU finish, crf
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only, crf
 
 # Optional GPIO user button. Wire a momentary button between the GPIO line and
 # GND and keep active_low + bias: pull_up. Every gesture starts with a short

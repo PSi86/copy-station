@@ -169,7 +169,20 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .filelist .jobstats { margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .btn.tc-cancel { padding: 0.05rem 0.45rem; font-size: 0.85rem; line-height: 1.2; }
 .btn.tc-cancel:hover { border-color: var(--error); color: var(--error); }
+/* second-click confirm state: the button turns into a red "Cancel?" */
+.btn.tc-cancel.armed {
+  background: var(--error);
+  color: #2a0a05;
+  border-color: var(--error);
+  font-weight: 600;
+}
+.btn.tc-cancel.armed:hover { color: #2a0a05; filter: brightness(1.08); }
+/* download icon link on a finished job row */
+.dl { color: var(--accent); display: inline-flex; align-items: center; text-decoration: none; }
+.dl:hover { filter: brightness(1.2); }
+.dl .ic { display: block; }
 .filelist .file .storage-track { height: 6px; margin-top: 0.35rem; width: 100%; }
+.role.preset { background: #2f2a45; color: #b9a8ff; }
 .role.queued { background: #3a4250; color: var(--fg); }
 .role.running { background: var(--copying); color: #042036; }
 .role.done { background: var(--ready); color: #06210f; }
@@ -177,3 +190,84 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .role.error { background: var(--error); color: #2a0a05; }
 
 footer { text-align: center; margin-top: 1rem; }
+
+/* ----- file dialog (native <dialog>) ----- */
+.dialog {
+  width: min(28rem, calc(100vw - 2rem));
+  border: 1px solid #333a47;
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--fg);
+  padding: 0;
+}
+.dialog::backdrop { background: rgba(6, 8, 12, 0.6); }
+.dialog-body { padding: 1rem; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.dlg-title { font-size: 1rem; margin: 0; word-break: break-all; }
+.btn.dlg-x { padding: 0.1rem 0.5rem; line-height: 1.2; }
+
+.dlg-props {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem 0.75rem;
+  margin: 0.9rem 0;
+}
+.dlg-props > div { display: flex; justify-content: space-between; gap: 0.5rem; min-width: 0; }
+.dlg-props dt { color: var(--muted); font-size: 0.8rem; margin: 0; }
+.dlg-props dd { margin: 0; font-size: 0.85rem; font-variant-numeric: tabular-nums; text-align: right; }
+
+.dlg-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.55rem 0.75rem;
+  margin: 0.6rem 0 1rem;
+}
+.dlg-lbl { color: var(--muted); font-size: 0.85rem; }
+.dlg-badge {
+  display: inline-block;
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #2a2f3a;
+  color: var(--muted);
+}
+.dlg-badge.hw { background: var(--ready); color: #06210f; }
+.dlg-badge.hwcpu { background: var(--detecting); color: #2a2300; }
+.dlg-badge.cpu { background: #3a4250; color: var(--fg); }
+/* plain-language explanation under the path badge (hidden when empty) */
+.dlg-path-note { display: block; margin-top: 0.3rem; font-size: 0.78rem; line-height: 1.35; }
+.dlg-path-note:empty { display: none; }
+
+.dialog-actions { display: flex; align-items: center; gap: 0.6rem; }
+.dlg-spacer { flex: 1 1 auto; }
+
+/* ----- busy state (a copy or transcode holds the volumes) ----- */
+.busy-hint {
+  background: #3a3320;
+  color: var(--detecting);
+  border: 1px solid #574a20;
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+/* Gray out and disable the whole browse body; the hint sits outside it and the
+   running job's Cancel button lives in a different card, so both stay live. */
+body.busy .files-body { opacity: 0.5; pointer-events: none; }
+.filelist .file .dirname { color: var(--muted); }
+.dl.disabled { color: var(--muted); cursor: default; pointer-events: none; opacity: 0.5; }
+
+/* ----- folder (batch) dialog ----- */
+.fdlg-summary { font-size: 0.85rem; margin: 0.2rem 0 0.7rem; }
+.fdlg-summary .muted { display: block; margin-top: 0.2rem; }
+.fdlg-files { max-height: 15rem; }
+.fdlg-files .dlg-badge { font-size: 0.7rem; }
+.btn.primary { background: var(--accent); color: #042036; border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { border-color: #5a2f2a; color: var(--error); }
+.btn.danger:hover { border-color: var(--error); background: #3a1512; }
+/* second-click confirm state: mirrors the job Cancel button (red "Delete?") */
+.btn.danger.armed { background: var(--error); color: #2a0a05; border-color: var(--error); font-weight: 600; }
+.btn.danger.armed:hover { background: var(--error); color: #2a0a05; filter: brightness(1.08); }

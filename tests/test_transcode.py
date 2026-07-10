@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import copystation.transcode as tc
-from copystation.mounts import NotFound, UnknownVolume
+from copystation.mounts import NotFound, PathEscapesVolume, UnknownVolume
 from copystation.status import State, StatusIndicator
 from copystation.transcode import (
     TranscodeBusy,
@@ -17,12 +17,18 @@ from copystation.transcode import (
     TranscodeUnavailable,
     UnknownPreset,
     estimate_output_bytes,
+    estimate_seconds,
+    gst_progress_percent,
+    gst_progress_position,
     mem_available_bytes,
     output_name,
     parse_bitrate,
+    perf_key,
+    probe_video_info,
     progress_seconds,
     ram_budget,
     sanitize_component,
+    unique_output_path,
 )
 
 pytest.importorskip("fastapi")
@@ -43,6 +49,15 @@ def test_output_name_and_sanitize():
     assert sanitize_component("weird name*?.mov") == "weird_name_.mov"
 
 
+def test_unique_output_path(tmp_path):
+    p = tmp_path / "clip_720p-h264.mp4"
+    assert unique_output_path(p) == p          # free name -> unchanged
+    p.write_bytes(b"one")
+    assert unique_output_path(p) == tmp_path / "clip_720p-h264_2.mp4"
+    (tmp_path / "clip_720p-h264_2.mp4").write_bytes(b"two")
+    assert unique_output_path(p) == tmp_path / "clip_720p-h264_3.mp4"
+
+
 @pytest.mark.parametrize(
     "line,expected",
     [
@@ -56,6 +71,69 @@ def test_output_name_and_sanitize():
 )
 def test_progress_seconds(line, expected):
     assert progress_seconds(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("progressreport0 (00:00:12): 7 / 56 seconds (12.5 %)", 12.5),
+        ("progressreport0 (00:00:02): 1 / 56 seconds ( 1.8 %)", 1.8),
+        ("progressreport0 (00:00:56): 56 / 56 seconds (100.0 %)", 100.0),
+        ("Setting pipeline to PLAYING ...", None),
+        ("some ( bogus ) line", None),
+    ],
+)
+def test_gst_progress_percent(line, expected):
+    assert gst_progress_percent(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("progressreport0 (00:00:12): 7 / 56 seconds (12.5 %)", 7),
+        ("progressreport0 (00:00:40): 23 / 23 seconds (100.0 %)", 23),
+        ("Setting pipeline to PLAYING ...", None),
+    ],
+)
+def test_gst_progress_position(line, expected):
+    assert gst_progress_position(line) == expected
+
+
+def test_probe_video_info_skips_attached_pic_and_finds_audio(monkeypatch):
+    import json as _json
+    payload = {
+        "streams": [
+            # embedded thumbnail first -> must be skipped, not chosen as the video
+            {"codec_type": "video", "codec_name": "mjpeg", "width": 1280, "height": 720,
+             "disposition": {"attached_pic": 1}},
+            {"codec_type": "video", "codec_name": "h264", "width": 3840, "height": 2160,
+             "avg_frame_rate": "60000/1001", "r_frame_rate": "60000/1001",
+             "disposition": {"attached_pic": 0}},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ],
+        "format": {"duration": "56.89"},
+    }
+
+    class _R:
+        stdout = _json.dumps(payload)
+
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: _R())
+    info = probe_video_info("clip.MP4")
+    assert info["vcodec"] == "h264"
+    assert (info["width"], info["height"]) == (3840, 2160)
+    assert round(info["fps"], 2) == 59.94
+    assert info["duration"] == 56.89
+    assert info["has_audio"] is True and info["acodec"] == "aac"
+    assert info["container"] == "mp4"
+
+
+def test_probe_video_info_defaults_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("no ffprobe")
+
+    monkeypatch.setattr(tc.subprocess, "run", boom)
+    info = probe_video_info("clip.mkv")
+    assert info["vcodec"] is None and info["container"] == "mkv"
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +168,24 @@ class _FakeBrowse:
         if not p.is_file():
             raise NotFound(path)
         return p
+
+    def list_dir(self, device, rel):
+        root = self.roots.get(device)
+        if root is None:
+            raise UnknownVolume(device)
+        target = (root / rel) if rel else root
+        if not target.is_dir():
+            raise NotFound(rel)
+        entries = []
+        for child in sorted(target.iterdir()):
+            is_dir = child.is_dir()
+            entries.append({
+                "name": child.name,
+                "is_dir": is_dir,
+                "size": None if is_dir else child.stat().st_size,
+                "mtime": child.stat().st_mtime,
+            })
+        return {"device": device, "path": rel or "", "entries": entries}
 
     def mount_ro(self, device):
         self.ops.append(f"mount_ro:{device}")
@@ -227,6 +323,45 @@ def test_process_runs_ffmpeg_and_writes_output(tmp_path, monkeypatch):
     assert browse.ops.index("release:sdb1") < browse.ops.index("mount_rw:sdb1")
     # Same device -> no separate read-only input mount (read from the rw mount).
     assert "mount_ro:sdb1" not in browse.ops
+
+
+def test_process_does_not_overwrite_existing_output(tmp_path, monkeypatch):
+    # A pre-existing output of the same name (e.g. from another source in a batch)
+    # must survive: the new job is written to <stem>_2 instead of clobbering it.
+    card = _card(tmp_path)
+    existing = card / "Transcoded" / "clip_720p-h264.mp4"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"KEEP-ME")
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    class _FakeProc:
+        def __init__(self, cmd, **kw):
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["out_time=00:00:05.000000\n", "progress=end\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert existing.read_bytes() == b"KEEP-ME"  # original untouched
+    assert result["output_path"] == "Transcoded/clip_720p-h264_2.mp4"
+    assert result["filename"] == "clip_720p-h264_2.mp4"
+    assert (card / "Transcoded" / "clip_720p-h264_2.mp4").read_bytes() == b"encoded"
 
 
 def test_process_takes_over_phase_and_restores_it(tmp_path, monkeypatch):
@@ -383,6 +518,395 @@ def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
     assert "h264_v4l2m2m" in calls[0]
     assert "libx264" in calls[1]
     assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
+
+
+def _cubie_mgr(tmp_path, monkeypatch, src_wh=(3840, 2160)):
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "h264", "width": src_wh[0], "height": src_wh[1], "fps": 59.94,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+    return mgr, card
+
+
+def test_process_cubie_uses_gstreamer_hardware(tmp_path, monkeypatch):
+    # 4K -> 1080p is an exact 1/2 step: a single hardware GStreamer pass.
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1].split("location=", 1)[-1])
+            self.returncode = None
+            self.stdout = iter(["progressreport0 (00:00:05): 5 / 10 seconds (50.0 %)\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"hw-encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert result["encoder"] == "omxh264videoenc" and result["hw"] is True
+    # A single GStreamer attempt: decoder 1/2 scale, no encoder scaler, no fallback.
+    assert len(calls) == 1
+    assert calls[0][0] == "gst-launch-1.0" and "omxh264videoenc" in calls[0]
+    assert "scale=1" in calls[0]
+    assert not any(str(t).startswith("output-height") for t in calls[0])
+    assert (card / "Transcoded" / "clip_1080p-h264.mp4").read_bytes() == b"hw-encoded"
+
+
+def test_process_cubie_two_stage_for_non_half_target(tmp_path, monkeypatch):
+    # 4K -> 720p is not a 1/2 step: HW decodes to 1080p, then a CPU ffmpeg pass
+    # finishes to 720p (the artifact-prone encoder scaler is never used).
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._is_gst = cmd[0] == "gst-launch-1.0"
+            self._dst = Path(cmd[-1].split("location=", 1)[-1]) if self._is_gst else Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["progressreport0 (00:00:05): 5 / 10 seconds (50.0 %)\n"]
+                               if self._is_gst else [])
+
+        def wait(self):
+            self._dst.write_bytes(b"hw-1080" if self._is_gst else b"cpu-720")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    # Two stages: hardware GStreamer (1/2 scale to 1080), then a CPU ffmpeg finish.
+    assert len(calls) == 2
+    assert calls[0][0] == "gst-launch-1.0" and "scale=1" in calls[0]
+    assert calls[1][0] == "ffmpeg" and "libx264" in calls[1]
+    assert result["encoder"] == "omxh264videoenc+cpu" and result["hw"] is True
+    # The finished file is the CPU stage's output (no magenta bottom line).
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-720"
+    assert not (card / "Transcoded" / "clip_720p-h264.stage1.mp4").exists()  # cleaned up
+
+
+def _cubie_mgr_with_perf(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)   # 4K h264 -> 1080p = single-stage HW
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "h264", "width": 3840, "height": 2160, "fps": 59.94, "duration": 56.9,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+    return mgr, card
+
+
+def _run_cancel(mgr, monkeypatch, progress_line):
+    """Submit a 1080p job whose (faked) encode emits ``progress_line`` then is
+    canceled mid-run; run it to completion and return the finished job snapshot."""
+    # Advance the monotonic clock on every read so the live estimate sees non-zero
+    # elapsed wall time (the whole fake job otherwise runs within one clock tick).
+    ticks = [1000.0]
+
+    def _mono():
+        ticks[0] += 1.0
+        return ticks[0]
+
+    monkeypatch.setattr(tc.time, "monotonic", _mono)
+    holder = {}
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            self.returncode = None
+            self.stdout = iter([progress_line])
+
+        def wait(self):
+            mgr._jobs[holder["id"]]["status"] = "canceled"  # cancel arrives mid-encode
+            self.returncode = -15
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    holder["id"] = job["id"]
+    mgr._process(job["id"])
+    return mgr.snapshot()["jobs"][0]
+
+
+def test_cancel_keeps_a_stable_perf_sample(tmp_path, monkeypatch):
+    mgr, _ = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    # 12 s of output produced (>= the 10 s stability threshold) before the cancel.
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:20): 12 / 56 seconds (21.4 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf.get("h264:3840x2160:1080p-h264", {}).get("spf", 0) > 0  # learned
+    # internal tracking fields never leak into the API
+    assert "perf_spf" not in result and "perf_stable" not in result
+
+
+def test_cancel_too_short_learns_nothing(tmp_path, monkeypatch):
+    mgr, _ = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    # only 2 s of output -> not stable -> the model is left untouched
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:03): 2 / 56 seconds (3.6 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf == {}
+
+
+def test_cancel_still_learns_after_output_volume_unmounts(tmp_path, monkeypatch):
+    # Regression: the cancel handler runs AFTER the `finally` unmounts the output
+    # volume, so the source path is gone and a re-probe there fails. On the real
+    # device this silently dropped every canceled sample. Model it: dropping the
+    # rw mount makes the input file vanish, and a probe of a missing file returns
+    # empty info (as ffprobe would). The fix captures the source info while still
+    # mounted, so a long-enough canceled job still trains the estimate model.
+    mgr, card = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    good = tc.probe_video_info  # the good-info stub installed by _cubie_mgr_with_perf
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: good(src)
+                        if Path(src).is_file()
+                        else {"vcodec": None, "width": 0, "height": 0, "fps": 0.0,
+                              "duration": None, "has_audio": False, "acodec": None,
+                              "container": "mp4"})
+    orig_umount = mgr._browse.umount_rw
+
+    def _umount(dev):
+        (card / "clip.mp4").unlink(missing_ok=True)  # the unmount hides the source
+        return orig_umount(dev)
+
+    monkeypatch.setattr(mgr._browse, "umount_rw", _umount)
+
+    result = _run_cancel(mgr, monkeypatch,
+                         "progressreport0 (00:00:20): 12 / 56 seconds (21.4 %)\n")
+    assert result["status"] == "canceled"
+    assert mgr._perf.get("h264:3840x2160:1080p-h264", {}).get("spf", 0) > 0
+
+
+# --------------------------------------------------------------------------- #
+# Planning + the performance/estimate model
+# --------------------------------------------------------------------------- #
+
+def test_perf_key_and_estimate_seconds():
+    info = {"vcodec": "h264", "width": 3840, "height": 2160}
+    assert perf_key(info, "1080p-h264") == "h264:3840x2160:1080p-h264"
+    assert estimate_seconds(0.001, 60.0, 30.0) == pytest.approx(0.001 * 60 * 30)
+    assert estimate_seconds(None, 60.0, 30.0) is None
+    assert estimate_seconds(0.001, 0.0, 30.0) is None
+
+
+def test_perf_model_learns_persists_and_scales_with_fps(tmp_path):
+    mgr = _mgr(_FakeBrowse())
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}
+    # A resolution that is NOT one of the built-in seeds, so it starts empty.
+    info = {"vcodec": "h264", "width": 2704, "height": 1520, "duration": 60.0, "fps": 30.0}
+    assert mgr._estimate(info, "1080p-h264") is None            # no data yet
+    mgr._update_perf(info, "1080p-h264", 90.0)                  # first sample
+    assert (tmp_path / "perf.json").exists()
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(90.0)
+    # double the framerate -> ~double the estimated time (frame-count based)
+    assert mgr._estimate(dict(info, fps=60.0), "1080p-h264") == pytest.approx(180.0)
+    # a small deviation is kept, a large one overwrites (spec: overwrite on notable)
+    mgr._update_perf(info, "1080p-h264", 96.0)                  # +6.7% -> keep
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(90.0)
+    mgr._update_perf(info, "1080p-h264", 150.0)                 # +66% -> overwrite
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(150.0)
+    # a fresh manager reloads the persisted model
+    mgr2 = _mgr(_FakeBrowse())
+    mgr2._perf_file = str(tmp_path / "perf.json")
+    mgr2._perf = mgr2._load_perf()
+    assert mgr2._estimate(info, "1080p-h264") == pytest.approx(150.0)
+
+
+def test_estimate_falls_back_to_seed_defaults(tmp_path):
+    from copystation.transcode import DEFAULT_PERF
+
+    mgr = _mgr(_FakeBrowse())
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}  # fresh install: nothing learned yet
+    mgr._board = "cubie"
+    info = {"vcodec": "h264", "width": 3840, "height": 2160, "duration": 56.89, "fps": 59.94}
+    # the built-in Cubie seed reproduces the measured ~85.5s for 4K60 -> 1080p
+    seed = DEFAULT_PERF["cubie"]["h264:3840x2160:1080p-h264"]["spf"]
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(seed * 56.89 * 59.94)
+    assert 80 < mgr._estimate(info, "1080p-h264") < 92
+    # the seeds are hardware-specific: a Pi must NOT use the Cubie's numbers
+    mgr._board = "pi4"
+    assert mgr._estimate(info, "1080p-h264") is None
+    # a learned value always overrides the seed (any board)
+    mgr._board = "cubie"
+    mgr._perf["h264:3840x2160:1080p-h264"] = {"spf": 0.01}
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(0.01 * 56.89 * 59.94)
+    # an un-seeded (codec, resolution, preset) -> no estimate yet
+    assert mgr._estimate(dict(info, width=1920, height=1080), "1080p-h264") is None
+
+
+def test_plan_for_predicts_hw_hwcpu_and_cpu(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)   # 4K h264 source on a Cubie
+    hw = mgr.plan_for("sdb1", "clip.mp4", "1080p-h264")
+    assert hw["path"] == "hw" and hw["out_height"] == 1080
+    assert hw["info"]["width"] == 3840 and hw["info"]["size"] is not None
+    two = mgr.plan_for("sdb1", "clip.mp4", "720p-h264")
+    assert two["path"] == "hw+cpu" and two["out_height"] == 1080 and two["target_height"] == 720
+    # a codec the hardware can't take -> the CPU path
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "vp9", "width": 1920, "height": 1080, "fps": 30.0,
+        "has_audio": False, "acodec": None, "container": "webm", "duration": 10.0})
+    mgr._probe_cache.clear()
+    cpu = mgr.plan_for("sdb1", "clip.mp4", "1080p-h264")
+    assert cpu["path"] == "cpu"
+
+
+# --------------------------------------------------------------------------- #
+# Folder (batch) planning + submission
+# --------------------------------------------------------------------------- #
+
+def _folder_probe(src):
+    """Vary the probed info by filename so a folder plan mixes HW and CPU paths."""
+    name = Path(src).name.lower()
+    if name.endswith((".mp4", ".mov")):  # 4K H.264 -> hardware-decodable
+        return {"vcodec": "h264", "width": 3840, "height": 2160, "fps": 59.94,
+                "duration": 10.0, "has_audio": False, "acodec": None,
+                "container": name.rsplit(".", 1)[-1]}
+    # a VP9 source the OMX pipeline can't decode -> CPU path
+    return {"vcodec": "vp9", "width": 1920, "height": 1080, "fps": 30.0,
+            "duration": 10.0, "has_audio": False, "acodec": None, "container": "mkv"}
+
+
+def _folder_card(tmp_path):
+    card = tmp_path / "card"
+    dcim = card / "DCIM"
+    dcim.mkdir(parents=True)
+    for n in ("a.mp4", "b.mov", "d.mkv"):
+        (dcim / n).write_bytes(b"\x00" * 32)
+    (dcim / "c.txt").write_text("not a video")  # skipped
+    return card
+
+
+def _cubie_folder_mgr(tmp_path, monkeypatch):
+    mgr = _mgr(_FakeBrowse({"sdb1": _folder_card(tmp_path)}))
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_video_info", _folder_probe)
+    return mgr
+
+
+def test_is_video_file():
+    assert tc.is_video_file("DJI_0001.MP4") and tc.is_video_file("clip.mkv")
+    assert not tc.is_video_file("notes.txt") and not tc.is_video_file("cover.jpg")
+    # .lrv proxies are intentionally excluded (low-res previews that collide with
+    # the real clip's output name).
+    assert not tc.is_video_file("DJI_0001.LRV")
+
+
+def test_plan_folder_lists_videos_with_per_file_paths(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    plan = mgr.plan_folder("sdb1", "DCIM", "1080p-h264")
+    # non-video (c.txt) is skipped; the rest are listed sorted.
+    assert [f["name"] for f in plan["files"]] == ["a.mp4", "b.mov", "d.mkv"]
+    assert plan["count"] == 3
+    by = {f["name"]: f["plan"] for f in plan["files"]}
+    assert by == {"a.mp4": "hw", "b.mov": "hw", "d.mkv": "cpu"}
+    assert plan["counts"] == {"hw": 2, "hw+cpu": 0, "cpu": 1}
+    # 720p splits the two 4K sources into a HW+CPU finish; VP9 stays on the CPU.
+    plan720 = mgr.plan_folder("sdb1", "DCIM", "720p-h264")
+    assert plan720["counts"] == {"hw": 0, "hw+cpu": 2, "cpu": 1}
+
+
+def test_submit_folder_queues_one_job_per_video(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    result = mgr.submit_folder("sdb1", "DCIM", "720p-h264")
+    assert result["count"] == 3
+    assert sorted(j["input_path"] for j in result["jobs"]) == [
+        "DCIM/a.mp4", "DCIM/b.mov", "DCIM/d.mkv"
+    ]
+    assert all(j["status"] == "queued" and j["preset"] == "720p-h264"
+               for j in result["jobs"])
+    # The batch owns the queue: a further single submit is refused as busy.
+    assert mgr._has_active_job() is True
+    with pytest.raises(TranscodeBusy):
+        mgr.submit("sdb1", "DCIM/a.mp4", "720p-h264")
+
+
+def test_submit_folder_no_videos_errors(tmp_path, monkeypatch):
+    card = tmp_path / "card"
+    (card / "empty").mkdir(parents=True)
+    (card / "empty" / "notes.txt").write_text("x")
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    with pytest.raises(tc.TranscodeError):
+        mgr.submit_folder("sdb1", "empty", "720p-h264")
+
+
+def test_submit_folder_blocked_when_active(tmp_path, monkeypatch):
+    mgr = _cubie_folder_mgr(tmp_path, monkeypatch)
+    mgr.submit("sdb1", "DCIM/a.mp4", "720p-h264")  # one job already active
+    with pytest.raises(TranscodeBusy):
+        mgr.submit_folder("sdb1", "DCIM", "720p-h264")
+
+
+def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    mgr._board = "cubie"
+    mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    # A container/codec the OMX pipeline can't take (VP9) -> must skip to the CPU.
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "vp9", "width": 3840, "height": 2160,
+        "has_audio": False, "acodec": None, "container": "webm"})
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"cpu-encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    # The GStreamer candidate was skipped up front (no wasted encode); CPU ran once.
+    assert result["encoder"] == "cpu" and result["hw"] is False
+    assert len(calls) == 1 and calls[0][0] == "ffmpeg"
 
 
 def test_cancel_during_encode_does_not_fall_back(tmp_path, monkeypatch):
@@ -560,6 +1084,33 @@ class _FakeManager:
     def cancel(self, job_id):
         return job_id == 7
 
+    def plan_folder(self, device, path, preset):
+        if not self._available:
+            raise TranscodeUnavailable("no ffmpeg")
+        if preset == "bad":
+            raise UnknownPreset("bad")
+        if device == "sdX":
+            raise UnknownVolume("sdX")
+        return {
+            "preset": preset, "folder": path, "count": 2,
+            "counts": {"hw": 1, "hw+cpu": 0, "cpu": 1},
+            "files": [{"name": "a.mp4", "plan": "hw"}, {"name": "b.mkv", "plan": "cpu"}],
+            "estimate_seconds": 20.0,
+        }
+
+    def submit_folder(self, device, path, preset, output_device=None):
+        if not self._available:
+            raise TranscodeUnavailable("no ffmpeg")
+        if preset == "busy":
+            raise TranscodeBusy("a copy is in progress")
+        if preset == "empty":
+            raise tc.TranscodeError("no video files in this folder")
+        if device == "sdX":
+            raise UnknownVolume("sdX")
+        self.jobs = [{"id": 7, "status": "queued", "input_path": f"{path}/a.mp4"},
+                     {"id": 8, "status": "queued", "input_path": f"{path}/b.mkv"}]
+        return {"jobs": self.jobs, "count": 2}
+
 
 def _client(transcode):
     return TestClient(create_app(StationState(), Config(), browse=None, transcode=transcode))
@@ -601,7 +1152,80 @@ def test_api_transcode_cancel():
     assert client.delete("/api/transcode/8").status_code == 404
 
 
+def test_api_folder_plan_and_submit():
+    client = _client(_FakeManager())
+    p = client.get("/api/transcode/folder-plan",
+                   params={"device": "sdb1", "path": "DCIM", "preset": "720p-h264"})
+    assert p.status_code == 200
+    body = p.json()
+    assert body["count"] == 2 and body["counts"]["hw"] == 1
+    assert [f["plan"] for f in body["files"]] == ["hw", "cpu"]
+
+    r = client.post("/api/transcode/folder",
+                    json={"device": "sdb1", "path": "DCIM", "preset": "720p-h264"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 2 and len(r.json()["jobs"]) == 2
+
+
+def test_api_folder_errors():
+    client = _client(_FakeManager())
+    assert client.get("/api/transcode/folder-plan",
+                      params={"device": "sdX", "path": "D", "preset": "720p-h264"}).status_code == 404
+    assert client.get("/api/transcode/folder-plan",
+                      params={"device": "sdb1", "path": "D", "preset": "bad"}).status_code == 400
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "busy"}).status_code == 409
+    # a folder with no video files -> 400 (TranscodeError)
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "empty"}).status_code == 400
+
+
+def test_api_folder_unavailable_is_501():
+    client = _client(_FakeManager(available=False))
+    assert client.post("/api/transcode/folder",
+                       json={"device": "sdb1", "path": "D", "preset": "720p-h264"}).status_code == 501
+
+
 def test_transcode_routes_absent_without_manager():
     client = TestClient(create_app(StationState(), Config(), transcode=None))
     assert client.get("/api/transcode").status_code == 404
     assert client.get("/api/settings").json()["features"]["transcode"] is False
+
+
+class _FakeDeleteBrowse:
+    """Minimal browse manager for the delete endpoint tests."""
+
+    def __init__(self, allow_delete=True):
+        self.allow_delete = allow_delete
+        self.deleted = []
+
+    def list_volumes(self):
+        return []
+
+    def delete_file(self, device, path):
+        if not self.allow_delete:
+            raise PathEscapesVolume("deletes are disabled")
+        if path == "missing":
+            raise NotFound("nope")
+        self.deleted.append((device, path))
+
+
+def test_api_delete_file_reports_feature_and_serialises():
+    browse = _FakeDeleteBrowse()
+    state = StationState()
+    client = TestClient(create_app(state, Config(), browse=browse, transcode=None))
+    assert client.get("/api/settings").json()["features"]["delete"] is True
+
+    res = client.delete("/api/files?device=sdb1&path=DCIM/x.mp4")
+    assert res.status_code == 200 and browse.deleted == [("sdb1", "DCIM/x.mp4")]
+    # a missing file -> 404 from the mapped BrowseError
+    assert client.delete("/api/files?device=sdb1&path=missing").status_code == 404
+    # refused while a copy is in progress
+    state.set_phase(State.COPYING)
+    assert client.delete("/api/files?device=sdb1&path=DCIM/x.mp4").status_code == 409
+
+
+def test_api_delete_disabled_feature_flag():
+    client = TestClient(create_app(StationState(), Config(),
+                                   browse=_FakeDeleteBrowse(allow_delete=False)))
+    assert client.get("/api/settings").json()["features"]["delete"] is False

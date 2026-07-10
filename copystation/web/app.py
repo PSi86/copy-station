@@ -38,6 +38,7 @@ from ..mounts import (
     PathEscapesVolume,
     UnknownVolume,
 )
+from ..status import State
 from ..transcode import TranscodeBusy, TranscodeError, TranscodeUnavailable, UnknownPreset
 
 
@@ -143,6 +144,7 @@ def create_app(
                 "features": {
                     "files": files_enabled,
                     "transcode": transcode_enabled,
+                    "delete": files_enabled and bool(getattr(browse, "allow_delete", False)),
                 },
             }
         )
@@ -181,11 +183,84 @@ def create_app(
             media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             return FileResponse(str(target), filename=target.name, media_type=media_type)
 
+        @app.delete("/api/files")
+        def delete_file(
+            device: str = Query(...),
+            path: str = Query(...),
+        ) -> JSONResponse:
+            # Serialise with the copy daemon and transcodes: refuse if busy, else
+            # hold the operation lock for the (quick) delete so nothing else
+            # mounts/writes the same device at the same time.
+            if state.phase is State.COPYING:
+                raise HTTPException(status_code=409, detail="a copy is in progress")
+            if not state.operation_lock.acquire(blocking=False):
+                raise HTTPException(status_code=409, detail="busy -- try again in a moment")
+            try:
+                browse.delete_file(device, path)
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            finally:
+                state.operation_lock.release()
+            return JSONResponse({"deleted": path})
+
     if transcode is not None:
 
         @app.get("/api/transcode")
         def get_transcode() -> JSONResponse:
             return JSONResponse(transcode.snapshot())
+
+        @app.get("/api/transcode/plan")
+        def get_transcode_plan(
+            device: str = Query(...),
+            path: str = Query(...),
+            preset: str = Query(...),
+        ) -> JSONResponse:
+            # File properties + which path (hw / hw+cpu / cpu) this preset will take
+            # + a duration estimate from past jobs, for the file dialog.
+            try:
+                return JSONResponse(transcode.plan_for(device, path, preset))
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+
+        @app.get("/api/transcode/folder-plan")
+        def get_transcode_folder_plan(
+            device: str = Query(...),
+            path: str = Query(...),
+            preset: str = Query(...),
+        ) -> JSONResponse:
+            # Per-file plan for every video in a folder, so the batch dialog can
+            # show whether the files are handled uniformly (hw / hw+cpu / cpu).
+            try:
+                return JSONResponse(transcode.plan_folder(device, path, preset))
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+
+        @app.post("/api/transcode/folder")
+        def post_transcode_folder(req: TranscodeRequest) -> JSONResponse:
+            # Queue one job per video file in the folder (a single preset for all).
+            try:
+                result = transcode.submit_folder(
+                    req.device, req.path, req.preset, req.output_device
+                )
+            except TranscodeUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from exc
+            except TranscodeBusy as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except BrowseError as exc:
+                raise _browse_http_error(exc) from exc
+            except TranscodeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(result)
 
         @app.post("/api/transcode")
         def post_transcode(req: TranscodeRequest) -> JSONResponse:
