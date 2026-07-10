@@ -559,7 +559,8 @@ def test_perf_model_learns_persists_and_scales_with_fps(tmp_path):
     mgr = _mgr(_FakeBrowse())
     mgr._perf_file = str(tmp_path / "perf.json")
     mgr._perf = {}
-    info = {"vcodec": "h264", "width": 3840, "height": 2160, "duration": 60.0, "fps": 30.0}
+    # A resolution that is NOT one of the built-in seeds, so it starts empty.
+    info = {"vcodec": "h264", "width": 2704, "height": 1520, "duration": 60.0, "fps": 30.0}
     assert mgr._estimate(info, "1080p-h264") is None            # no data yet
     mgr._update_perf(info, "1080p-h264", 90.0)                  # first sample
     assert (tmp_path / "perf.json").exists()
@@ -576,6 +577,24 @@ def test_perf_model_learns_persists_and_scales_with_fps(tmp_path):
     mgr2._perf_file = str(tmp_path / "perf.json")
     mgr2._perf = mgr2._load_perf()
     assert mgr2._estimate(info, "1080p-h264") == pytest.approx(150.0)
+
+
+def test_estimate_falls_back_to_seed_defaults(tmp_path):
+    from copystation.transcode import DEFAULT_PERF
+
+    mgr = _mgr(_FakeBrowse())
+    mgr._perf_file = str(tmp_path / "perf.json")
+    mgr._perf = {}  # fresh install: nothing learned yet
+    info = {"vcodec": "h264", "width": 3840, "height": 2160, "duration": 56.89, "fps": 59.94}
+    # the built-in Cubie seed reproduces the measured ~85.5s for 4K60 -> 1080p
+    seed = DEFAULT_PERF["h264:3840x2160:1080p-h264"]["spf"]
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(seed * 56.89 * 59.94)
+    assert 80 < mgr._estimate(info, "1080p-h264") < 92
+    # a learned value always overrides the seed
+    mgr._perf["h264:3840x2160:1080p-h264"] = {"spf": 0.01}
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(0.01 * 56.89 * 59.94)
+    # an un-seeded (codec, resolution, preset) -> no estimate yet
+    assert mgr._estimate(dict(info, width=1920, height=1080), "1080p-h264") is None
 
 
 def test_plan_for_predicts_hw_hwcpu_and_cpu(tmp_path, monkeypatch):

@@ -297,6 +297,19 @@ def estimate_seconds(spf: Optional[float], duration: Optional[float],
     return spf * duration * fps
 
 
+# Seed performance model (wall-seconds per source frame), measured on the Radxa
+# Cubie A7S (Allwinner A733) with a 4K60 H.264 source, so a fresh install can
+# estimate a job's duration before it has run one. Keyed like the learned model
+# (see ``perf_key``); a real job overwrites the seed for its key on its first run,
+# and per-install learned values always take precedence over these.
+DEFAULT_PERF: dict = {
+    "h264:3840x2160:1080p-h264": {"spf": 0.0251},  # single hardware pass
+    "h264:3840x2160:540p-h264": {"spf": 0.0243},   # single hardware pass
+    "h264:3840x2160:720p-h264": {"spf": 0.0500},   # hardware 1080p + CPU finish
+    "h264:3840x2160:720p-h265": {"spf": 0.2297},   # CPU-only H.265 output
+}
+
+
 class TranscodeManager:
     """Single-worker transcode job queue backed by ffmpeg."""
 
@@ -450,8 +463,11 @@ class TranscodeManager:
             _LOG.warning("Could not persist transcode perf model: %s", exc)
 
     def _estimate(self, info: dict, preset_id: str) -> Optional[float]:
+        key = perf_key(info, preset_id)
         with self._perf_lock:
-            entry = self._perf.get(perf_key(info, preset_id))
+            entry = self._perf.get(key)
+        if not isinstance(entry, dict):
+            entry = DEFAULT_PERF.get(key)  # fall back to the built-in seed
         spf = entry.get("spf") if isinstance(entry, dict) else None
         return estimate_seconds(spf, info.get("duration"), info.get("fps"))
 
