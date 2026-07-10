@@ -9,10 +9,12 @@ from copystation.encoders import (
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
     cpu_encoder,
+    decoder_scale_factor,
     default_bitrate,
     detect_board,
     family_of,
     gst_can_handle,
+    gstreamer_output_height,
     select_encoders,
 )
 
@@ -267,16 +269,35 @@ def test_gst_can_handle_rejects_unknown_codec_container_or_dims():
     assert gst_can_handle(dict(INFO_4K_H264, width=0)) is False
 
 
-def test_build_gstreamer_cmd_video_only():
+@pytest.mark.parametrize(
+    "src,target,expected",
+    [
+        (2160, 1080, 1),   # 4K -> 1080p: exactly 1/2
+        (2160, 720, 1),    # 4K -> 720p: 1/2 (1080) stays >= 720; 1/4 (540) would be below
+        (2160, 540, 2),    # 4K -> 540p: exactly 1/4
+        (1080, 720, 0),    # no clean 1/2-step >= 720 below 1080
+        (2160, 1440, 0),   # 1/2 (1080) is below 1440 -> no decoder downscale
+        (2160, 0, 0),      # keep source
+        (0, 1080, 0),      # unknown source
+        (1080, 1080, 0),   # target == source
+    ],
+)
+def test_decoder_scale_factor(src, target, expected):
+    assert decoder_scale_factor(src, target) == expected
+    assert gstreamer_output_height(src, target) == (src >> expected if src else target)
+
+
+def test_build_gstreamer_cmd_4k_to_1080p_uses_decoder_half_scale():
     preset = {"id": "1080p-h264", "height": 1080, "vcodec": "libx264"}
     cmd = build_gstreamer_cmd(_omx_encoder(), preset, "/in/a.mp4", "/out/b.mp4", INFO_4K_H264)
     assert cmd[0] == "gst-launch-1.0"
     assert "location=/in/a.mp4" in cmd
     assert "qtdemux" in cmd and "omxh264dec" in cmd and "omxh264videoenc" in cmd
+    # Downscale happens in the DECODER (1/2), never the encoder (no output-* props).
+    assert "scale=1" in cmd
+    assert not any(x.startswith("output-width") or x.startswith("output-height") for x in cmd)
     assert "control-rate=variable" in cmd
     assert "target-bitrate=12000000" in cmd           # 1080p default 12M -> bits/s
-    # Aspect-preserving hardware downscale 3840x2160 -> 1920x1080.
-    assert "output-width=1920" in cmd and "output-height=1080" in cmd
     assert cmd[-1] == "location=/out/b.mp4"
     assert "aacparse" not in cmd and "name=d" not in cmd   # no audio -> linear pipeline
 
@@ -286,9 +307,11 @@ def test_build_gstreamer_cmd_scales_bitrate_for_60fps():
     info = dict(INFO_4K_H264, fps=59.94)
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 1080, "vcodec": "libx264"}, "a", "b", info)
     assert f"target-bitrate={int(12_000_000 * 1.8)}" in cmd
+    assert "scale=1" in cmd
 
 
-def test_build_gstreamer_cmd_explicit_bitrate_wins_over_fps_scaling():
+def test_build_gstreamer_cmd_explicit_bitrate_wins_when_no_residual():
+    # 4K -> 1080p is exact (out == target), so the explicit bitrate is honoured.
     info = dict(INFO_4K_H264, fps=59.94)
     preset = {"height": 1080, "vcodec": "libx264", "bitrate": "20M"}
     cmd = build_gstreamer_cmd(_omx_encoder(), preset, "a", "b", info)
@@ -296,22 +319,25 @@ def test_build_gstreamer_cmd_explicit_bitrate_wins_over_fps_scaling():
 
 
 def test_build_gstreamer_cmd_hevc_source_uses_hevc_decoder():
+    # 4K HEVC -> 720p: decoder does 1/2 (to 1080), encoder stays H.264 and does NOT
+    # scale (the 1080->720 finish is the transcoder's ffmpeg pass, not here).
     info = dict(INFO_4K_H264, vcodec="hevc")
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 720, "vcodec": "libx264"}, "a", "b", info)
-    assert "h265parse" in cmd and "omxhevcvideodec" in cmd
+    assert "h265parse" in cmd and "omxhevcvideodec" in cmd and "scale=1" in cmd
     assert "omxh264videoenc" in cmd                   # output is still H.264
-    assert "output-height=720" in cmd
+    assert not any(x.startswith("output-height") for x in cmd)
+    assert "target-bitrate=12000000" in cmd           # sized to the 1080p HW stage
 
 
 def test_build_gstreamer_cmd_carries_aac_audio_through_named_mux():
     info = dict(INFO_4K_H264, has_audio=True, acodec="aac")
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 1080, "vcodec": "libx264"}, "a", "b", info)
     assert "name=d" in cmd and cmd.count("mux.") == 2  # video + audio into one muxer
-    assert "aacparse" in cmd
+    assert "aacparse" in cmd and "scale=1" in cmd
 
 
 def test_build_gstreamer_cmd_keeps_resolution_when_height_zero():
     cmd = build_gstreamer_cmd(_omx_encoder(), {"height": 0, "vcodec": "libx264"}, "a", "b", INFO_4K_H264)
-    assert not any(x.startswith("output-width") for x in cmd)
-    assert not any(x.startswith("output-height") for x in cmd)
-    assert "target-bitrate=24000000" in cmd           # default_bitrate(0) = 24M
+    assert not any(x.startswith("scale=") for x in cmd)   # no decoder downscale
+    assert not any(x.startswith("output-width") or x.startswith("output-height") for x in cmd)
+    assert "target-bitrate=24000000" in cmd           # default_bitrate(2160) = 24M

@@ -449,25 +449,28 @@ def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
     assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
 
 
-def test_process_cubie_uses_gstreamer_hardware(tmp_path, monkeypatch):
+def _cubie_mgr(tmp_path, monkeypatch, src_wh=(3840, 2160)):
     card = _card(tmp_path)
     browse = _FakeBrowse({"sdb1": card})
     mgr = _mgr(browse)
-    # A Cubie whose GStreamer has the OMX H.264 encoder/decoder.
     mgr._board = "cubie"
     mgr._encoders_avail = {"omxh264videoenc", "omxh264dec", "libx264"}
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
     monkeypatch.setattr(tc, "probe_video_info", lambda src: {
-        "vcodec": "h264", "width": 3840, "height": 2160,
+        "vcodec": "h264", "width": src_wh[0], "height": src_wh[1], "fps": 59.94,
         "has_audio": False, "acodec": None, "container": "mp4"})
+    return mgr, card
 
+
+def test_process_cubie_uses_gstreamer_hardware(tmp_path, monkeypatch):
+    # 4K -> 1080p is an exact 1/2 step: a single hardware GStreamer pass.
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)
     calls = []
 
     class _Proc:
         def __init__(self, cmd, **kw):
             calls.append(cmd)
-            # The GStreamer sink is `filesink location=<dst>` (last token).
             self._dst = Path(cmd[-1].split("location=", 1)[-1])
             self.returncode = None
             self.stdout = iter(["progressreport0 (00:00:05): 5 / 10 seconds (50.0 %)\n"])
@@ -482,16 +485,58 @@ def test_process_cubie_uses_gstreamer_hardware(tmp_path, monkeypatch):
     monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
     monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
 
-    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
     mgr._process(job["id"])
 
     result = mgr.snapshot()["jobs"][0]
     assert result["status"] == "done"
     assert result["encoder"] == "omxh264videoenc" and result["hw"] is True
-    # A single GStreamer attempt (no fallback), driving the OMX encoder.
+    # A single GStreamer attempt: decoder 1/2 scale, no encoder scaler, no fallback.
     assert len(calls) == 1
     assert calls[0][0] == "gst-launch-1.0" and "omxh264videoenc" in calls[0]
-    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"hw-encoded"
+    assert "scale=1" in calls[0]
+    assert not any(str(t).startswith("output-height") for t in calls[0])
+    assert (card / "Transcoded" / "clip_1080p-h264.mp4").read_bytes() == b"hw-encoded"
+
+
+def test_process_cubie_two_stage_for_non_half_target(tmp_path, monkeypatch):
+    # 4K -> 720p is not a 1/2 step: HW decodes to 1080p, then a CPU ffmpeg pass
+    # finishes to 720p (the artifact-prone encoder scaler is never used).
+    mgr, card = _cubie_mgr(tmp_path, monkeypatch)
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._is_gst = cmd[0] == "gst-launch-1.0"
+            self._dst = Path(cmd[-1].split("location=", 1)[-1]) if self._is_gst else Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["progressreport0 (00:00:05): 5 / 10 seconds (50.0 %)\n"]
+                               if self._is_gst else [])
+
+        def wait(self):
+            self._dst.write_bytes(b"hw-1080" if self._is_gst else b"cpu-720")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    # Two stages: hardware GStreamer (1/2 scale to 1080), then a CPU ffmpeg finish.
+    assert len(calls) == 2
+    assert calls[0][0] == "gst-launch-1.0" and "scale=1" in calls[0]
+    assert calls[1][0] == "ffmpeg" and "libx264" in calls[1]
+    assert result["encoder"] == "omxh264videoenc+cpu" and result["hw"] is True
+    # The finished file is the CPU stage's output (no magenta bottom line).
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-720"
+    assert not (card / "Transcoded" / "clip_720p-h264.stage1.mp4").exists()  # cleaned up
 
 
 def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):

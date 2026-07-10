@@ -134,16 +134,20 @@ boards differ a lot in what they can encode in hardware:
 > through ffmpeg** -- only through GStreamer's Allwinner OpenMAX element
 > `omxh264videoenc` (driving `/dev/cedar_dev`). The station therefore runs a
 > **GStreamer pipeline** on the Cubie: it hardware-**decodes** the source
-> (`omxh264dec` / `omxhevcvideodec`, so even a 4K clip never hits the CPU),
-> downscales **inside** the encoder (`output-width`/`output-height`, no CPU
-> scaler) and hardware-encodes H.264 -- a 4K60 clip transcodes with the CPU
-> essentially idle. There is **no H.265 hardware *encoder*** exposed in userspace,
-> so H.265 *output* stays on the CPU (H.265 *input* is still hardware-decoded).
-> The OMX plugin is present on Radxa images; check with
-> `gst-inspect-1.0 | grep omx`. The daemon runs as root, so it can open the VPU's
-> root-only device nodes (`/dev/cedar_dev`, `/dev/dma_heap`). A source with
-> non-AAC audio or an unusual container is handled by the CPU path instead (audio
-> is stream-copied on the hardware path, so it must already be AAC).
+> (`omxh264dec` / `omxhevcvideodec`, so even a 4K clip never hits the CPU) and
+> downscales **in the decoder** via its `scale` property (1/2 or 1/4), then
+> hardware-encodes H.264. So a **4K→1080p** clip (an exact 1/2) is a single
+> hardware pass with the CPU essentially idle (~0.7× real-time for 4K60). The
+> encoder's *own* scaler is deliberately not used -- it leaves a thin magenta line
+> on the bottom row -- so a target that is **not** a clean 1/2-step (e.g. 720p from
+> 4K) is decoded/downscaled to the nearest larger clean size in hardware and then
+> **finished to the exact height by a short ffmpeg (CPU) pass**. There is **no
+> H.265 hardware *encoder*** exposed, so H.265 *output* stays on the CPU (H.265
+> *input* is still hardware-decoded). The OMX plugin is present on Radxa images;
+> check with `gst-inspect-1.0 | grep omx`. The daemon runs as root, so it can open
+> the VPU's root-only device nodes (`/dev/cedar_dev`, `/dev/dma_heap`). A source
+> with non-AAC audio or an unusual container is handled by the CPU path instead
+> (audio is stream-copied on the hardware path, so it must already be AAC).
 
 * `acceleration: auto` (default) uses the board's hardware encoder **when the
   installed ffmpeg actually has it**, otherwise software.

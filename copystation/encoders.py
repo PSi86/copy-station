@@ -350,53 +350,82 @@ def gst_can_handle(info: dict) -> bool:
     return True
 
 
+def decoder_scale_factor(src_h: int, target_h: int) -> int:
+    """OMX decoder ``scale`` value (0=full, 1=1/2, 2=1/4) for a target height.
+
+    Returns the largest power-of-two downscale whose result stays **>=**
+    ``target_h`` (0 when no downscale applies). The Allwinner *decoder* scaler is
+    artifact-free; the *encoder* scaler leaves a magenta line on the bottom row,
+    so we always downscale in the decoder and never set the encoder's output size.
+    Only 1/2 and 1/4 exist, so a target that is not a power-of-two fraction of the
+    source is only reached to within one step here and finished on the CPU (see the
+    transcoder's residual ffmpeg pass).
+    """
+    src_h, target_h = int(src_h or 0), int(target_h or 0)
+    if src_h <= 0 or target_h <= 0 or target_h >= src_h:
+        return 0
+    k = 0
+    while k < 2 and (src_h >> (k + 1)) >= target_h:
+        k += 1
+    return k
+
+
+def gstreamer_output_height(src_h: int, target_h: int) -> int:
+    """The height ``build_gstreamer_cmd`` actually produces (decoder-scaled)."""
+    src_h = int(src_h or 0)
+    if src_h <= 0:
+        return int(target_h or 0)
+    return src_h >> decoder_scale_factor(src_h, target_h)
+
+
 def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) -> List[str]:
     """``gst-launch-1.0`` argv for one hardware encode with an OMX ``encoder`` (pure).
 
-    Builds a **HW-decode -> HW-scale -> HW-encode** pipeline: the source is
-    demuxed, hardware-decoded (``omx*dec``), downscaled *inside* the encoder via
-    its ``output-width``/``output-height`` (no CPU scaler -- the 4K frame never
-    touches the CPU), and hardware-encoded to H.264 at the preset's target
-    bitrate. Present AAC audio is stream-copied through an ``mp4mux``. Progress is
-    emitted by a ``progressreport`` element. Assumes ``gst_can_handle(info)``.
+    Builds a **HW-decode(+scale) -> HW-encode** pipeline: the source is demuxed and
+    hardware-decoded, and the **decoder** downscales by 1/2 or 1/4 via its ``scale``
+    property (artifact-free, unlike the encoder scaler, which leaves a magenta line
+    on the bottom row). The encoder never scales. So the produced height is the
+    source divided by 1, 2 or 4 -- whichever lands closest to, but not below,
+    ``preset.height`` -- and the transcoder adds a light ffmpeg pass when that is
+    still above the requested height. Present AAC audio is stream-copied through an
+    ``mp4mux``; progress is emitted by ``progressreport``. Assumes ``gst_can_handle``.
     """
     src, dst = str(src), str(dst)
-    height = int(preset.get("height", 0) or 0)
-    # An explicit preset bitrate is honoured exactly; otherwise the height-based
-    # default is scaled up for high-framerate sources (60fps needs ~2x of 30fps),
-    # since the encoder is bitrate-controlled and CRF has no effect here.
-    if preset.get("bitrate"):
+    src_h = int(info.get("height") or 0)
+    target_h = int(preset.get("height", 0) or 0)
+    scale = decoder_scale_factor(src_h, target_h)
+    out_h = (src_h >> scale) if src_h > 0 else target_h
+
+    # Bitrate is sized to the height THIS stage encodes (out_h), framerate-aware.
+    # An explicit preset bitrate is honoured only when this stage already produces
+    # the final height (no CPU finishing pass re-encodes it afterwards).
+    if preset.get("bitrate") and out_h == target_h:
         bps = _bitrate_bps(preset.get("bitrate"))
     else:
-        bps = _bitrate_bps(default_bitrate(height))
+        bps = _bitrate_bps(default_bitrate(out_h))
         fps = float(info.get("fps") or 0)
         if fps > 33:
             bps = int(bps * min(1.8, fps / 30.0))
+
     container = str(info.get("container") or "mp4").lower()
     demux = _GST_DEMUX.get(container, "qtdemux")
     vcodec = str(info.get("vcodec") or "h264").lower()
     parse, decoder = _GST_DECODERS.get(vcodec, ("h264parse", "omxh264dec"))
-
+    dec: List[str] = [decoder] + ([] if scale == 0 else [f"scale={scale}"])
     enc: List[str] = [encoder.codec, "control-rate=variable", f"target-bitrate={bps}"]
-    src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
-    if height > 0 and src_w > 0 and src_h > 0:
-        out_w = int(round(src_w * height / src_h))
-        out_w -= out_w % 2  # the encoder wants even dimensions
-        enc += [f"output-width={out_w}", f"output-height={height}"]
-
     has_audio = bool(info.get("has_audio")) and str(info.get("acodec") or "").lower() == "aac"
 
     cmd: List[str] = ["gst-launch-1.0", "-e", "filesrc", f"location={src}", "!"]
     if has_audio:
         # Named demux/mux so the audio can be carried alongside the re-encoded video.
         cmd += [demux, "name=d",
-                "d.", "!", "queue", "!", parse, "!", decoder, "!", "queue", "!",
+                "d.", "!", "queue", "!", parse, "!", *dec, "!", "queue", "!",
                 *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
                 "!", "queue", "!", "mux.",
                 "d.", "!", "queue", "!", "aacparse", "!", "queue", "!", "mux.",
                 "mp4mux", "name=mux", "!", "filesink", f"location={dst}"]
     else:
-        cmd += [demux, "!", parse, "!", decoder, "!", "queue", "!",
+        cmd += [demux, "!", parse, "!", *dec, "!", "queue", "!",
                 *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
                 "!", "mp4mux", "!", "filesink", f"location={dst}"]
     return cmd

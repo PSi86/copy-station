@@ -43,13 +43,19 @@ all off by default, so existing status-only deployments are unaffected.
   - **Raspberry Pi 4**: ffmpeg `h264_v4l2m2m` (H.264). The Pi 5 has no hardware
     encoder and uses the CPU.
   - **Radxa Cubie A7S (Allwinner A733)**: a **GStreamer OpenMAX** pipeline --
-    hardware-**decode** (`omxh264dec`/`omxhevcvideodec`), downscale **inside** the
-    encoder (`output-width`/`output-height`, no CPU scaler) and hardware-**encode**
-    H.264 (`omxh264videoenc`). A 4K60 clip transcodes to 1080p with the CPU
-    essentially idle. H.265 *output* has no hardware encoder and stays on the CPU;
-    a source with non-AAC audio or an unusual container also falls back to the CPU
-    (audio is stream-copied on the hardware path). A stall watchdog kills a wedged
-    OMX pipeline so a stuck hardware job never hangs the station.
+    hardware-**decode** (`omxh264dec`/`omxhevcvideodec`), downscale **in the
+    decoder** (its `scale` property, 1/2 or 1/4) and hardware-**encode** H.264
+    (`omxh264videoenc`). A 4K→1080p clip (an exact 1/2) is a single hardware pass
+    with the CPU essentially idle (~0.7× real-time for 4K60). The encoder's own
+    scaler is not used -- it leaves a thin magenta line on the bottom row -- so a
+    target that is not a clean 1/2-step (e.g. 720p from 4K) is hardware-downscaled
+    to the nearest larger clean size and **finished to the exact height by a short
+    ffmpeg CPU pass**. Bitrate is height- and framerate-aware (raise a preset's
+    `bitrate` to raise quality; `crf` has no effect on the hardware encoder). H.265
+    *output* has no hardware encoder and stays on the CPU; a source with non-AAC
+    audio or an unusual container also falls back to the CPU (audio is stream-copied
+    on the hardware path). A stall watchdog kills a wedged OMX pipeline so a stuck
+    hardware job never hangs the station.
     (This replaces the earlier assumption that the A733 encoders were unreachable
     from Linux -- ffmpeg cannot reach them, but GStreamer OMX can. Note the A733
     exposes only an H.264 OMX *encoder*, not the once-assumed `omxhevcvideoenc`.)

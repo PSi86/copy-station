@@ -31,9 +31,11 @@ from .encoders import (
     available_gst_elements,
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
+    cpu_encoder,
     default_bitrate,
     detect_board,
     gst_can_handle,
+    gstreamer_output_height,
     select_encoders,
 )
 from .mounts import BrowseError, NotFound, safe_resolve
@@ -630,17 +632,17 @@ class TranscodeManager:
                         info.get("acodec") if info.get("has_audio") else "none",
                     )
                     continue
-                cmd = build_gstreamer_cmd(enc, preset, src, dst, info)
-            else:
-                cmd = build_ffmpeg_cmd(enc, preset, src, dst)
             self._set(job_id, encoder=enc.name, hw=enc.is_hardware, percent=0)
             # Record the encoder on the shared state too (shown on the display).
             self._hub.set_transcode_progress(0.0, enc.name, enc.is_hardware)
             _LOG.info("Transcode #%d: encoding with %s (%s, %s)",
                       job_id, enc.name, enc.kind, enc.engine)
-            src_fps = info.get("fps") if (enc.is_gstreamer and info) else None
             try:
-                self._run_encode(job_id, cmd, duration, enc.engine, src_fps=src_fps)
+                if enc.is_gstreamer:
+                    self._run_gstreamer(job_id, src, dst, preset, info, enc, duration)
+                else:
+                    self._run_encode(job_id, build_ffmpeg_cmd(enc, preset, src, dst),
+                                     duration, "ffmpeg")
                 return
             except _Canceled:
                 _cleanup(dst)
@@ -660,6 +662,37 @@ class TranscodeManager:
                 raise
         # Unreachable (the loop always returns or raises), but be explicit.
         raise last_exc or TranscodeError("no encoder available")
+
+    def _run_gstreamer(self, job_id: int, src: Path, dst: Path, preset: dict,
+                       info: dict, enc: Encoder, duration: Optional[float]) -> None:
+        """Hardware GStreamer encode, with an optional CPU finishing pass.
+
+        The decoder downscales by 1/2 or 1/4 (artifact-free); when the requested
+        height is not exactly a 1/2-step of the source, the hardware stage produces
+        the nearest larger clean size and a light ffmpeg pass scales it down to the
+        exact target on the CPU. The encoder scaler (which leaves a magenta bottom
+        line) is never used. Raising propagates to the caller's CPU fallback.
+        """
+        src_fps = info.get("fps")
+        target_h = int(preset.get("height", 0) or 0)
+        out_h = gstreamer_output_height(int(info.get("height") or 0), target_h)
+        if not (target_h > 0 and out_h > 0 and out_h != target_h):
+            self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, dst, info),
+                             duration, "gstreamer", src_fps=src_fps)
+            return
+        # Two-stage: hardware decode-scale to out_h, then a CPU scale to target_h.
+        stage1 = dst.parent / f"{dst.stem}.stage1.mp4"
+        _LOG.info("Transcode #%d: HW %dp, then CPU finish -> %dp", job_id, out_h, target_h)
+        self._set(job_id, note=f"HW {out_h}p, CPU finish {target_h}p")
+        try:
+            self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, stage1, info),
+                             duration, "gstreamer", src_fps=src_fps)
+            self._set(job_id, encoder=f"{enc.name}+cpu", percent=0)
+            self._run_encode(job_id, build_ffmpeg_cmd(
+                cpu_encoder(str(preset.get("vcodec", "libx264"))), preset, stage1, dst),
+                duration, "ffmpeg")
+        finally:
+            _cleanup(stage1)
 
     def _run_encode(self, job_id: int, cmd: List[str], duration: Optional[float],
                     engine: str = "ffmpeg", src_fps: Optional[float] = None) -> None:
