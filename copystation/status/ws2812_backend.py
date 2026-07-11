@@ -113,6 +113,12 @@ _EMPTY_COLOR = (0, 0, 90)     # bright blue  -- one-shot "source empty" hold
 _AP_ON_COLOR = (0, 80, 80)    # cyan  -- one-shot "access point enabled"
 _AP_OFF_COLOR = (90, 45, 0)   # amber -- one-shot "access point disabled"
 
+# Auto-transcode toggle (three quick flashes, like the AP). Purple = the transcode
+# theme colour (a running transcode already fills the bar purple), so on is a bright
+# purple and off a dim purple -- distinct from the AP's cyan/amber.
+_AUTO_ON_COLOR = (60, 0, 90)   # purple  -- one-shot "auto-transcode enabled"
+_AUTO_OFF_COLOR = (18, 0, 27)  # dim purple -- one-shot "auto-transcode disabled"
+
 
 def leds_for(progress: float, led_count: int) -> int:
     """Map a progress fraction (0.0..1.0) to a number of lit LEDs (0..led_count)."""
@@ -327,6 +333,10 @@ class Ws2812Backend(StatusIndicator):
             return [_AP_ON_COLOR if lit else _OFF] * self._led_count
         if event is Event.AP_DISABLED:
             return [_AP_OFF_COLOR if lit else _OFF] * self._led_count
+        if event is Event.AUTO_TRANSCODE_ENABLED:
+            return [_AUTO_ON_COLOR if lit else _OFF] * self._led_count
+        if event is Event.AUTO_TRANSCODE_DISABLED:
+            return [_AUTO_OFF_COLOR if lit else _OFF] * self._led_count
         return [_OFF] * self._led_count
 
     def _all_off(self) -> list[tuple[int, int, int]]:

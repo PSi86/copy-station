@@ -54,10 +54,18 @@
     <section id="transcode-card" class="card" hidden>
       <h2>Transcode</h2>
       <div class="row files-toolbar">
-        <select id="tc-preset" class="select"></select>
+        <label class="tc-lbl muted">Default preset&nbsp;<select id="tc-preset" class="select"></select></label>
         <label class="tc-out muted">→&nbsp;<select id="tc-output" class="select"></select></label>
       </div>
-      <div class="muted tc-hint">Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The preset chosen here is preselected there.</div>
+      <label class="tc-switch"><input type="checkbox" id="tc-auto"><span class="switch"></span><span>Auto-transcode after copy</span></label>
+      <div class="muted tc-hint">Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The default preset is preselected there, and is what auto-transcode uses on the just-copied files.</div>
+      <div id="tc-queue" class="tc-queue" hidden>
+        <div class="row">
+          <span id="tc-queue-text"></span>
+          <span id="tc-queue-eta" class="muted"></span>
+        </div>
+        <div class="progress-track"><div id="tc-queue-bar" class="progress-fill"></div></div>
+      </div>
       <div id="tc-info" class="muted"></div>
       <ul id="tc-jobs" class="filelist"></ul>
     </section>

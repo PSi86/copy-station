@@ -423,6 +423,43 @@ async function cancelJob(id) {
   loadJobs();
 }
 
+function renderQueue(queue) {
+  const box = document.getElementById("tc-queue");
+  if (!box) return;
+  if (!queue || !queue.pending) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const parts = [`job ${queue.index}/${queue.count}`, `${queue.pending} pending`];
+  document.getElementById("tc-queue-text").textContent = parts.join(" · ");
+  document.getElementById("tc-queue-eta").textContent =
+    queue.eta_seconds != null ? `~${fmtDuration(queue.eta_seconds)} total` : "";
+  document.getElementById("tc-queue-bar").style.width = `${queue.percent || 0}%`;
+}
+
+// Reflect the persisted auto-transcode toggle without fighting a mid-click.
+function syncAutoToggle(value) {
+  const cb = document.getElementById("tc-auto");
+  if (cb && document.activeElement !== cb) cb.checked = !!value;
+}
+
+async function postTranscodeSettings(body) {
+  try {
+    const res = await fetch("/api/transcode/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(`Could not save setting: ${b.detail || res.status}`);
+    }
+  } catch (e) {
+    /* transient */
+  }
+}
+
 async function loadJobs() {
   try {
     const res = await fetch("/api/transcode", { cache: "no-store" });
@@ -431,6 +468,8 @@ async function loadJobs() {
       updatePresetLabels(data.presets);
       lastJobs = data.jobs || [];
       renderJobs(lastJobs);
+      renderQueue(data.queue);
+      syncAutoToggle(data.auto_transcode);
     }
   } catch (e) {
     /* transient */
@@ -447,6 +486,8 @@ async function loadPresets() {
     sel.innerHTML = (data.presets || [])
       .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label || p.id)}</option>`)
       .join("");
+    if (data.default_preset) sel.value = data.default_preset;  // the persisted default
+    syncAutoToggle(data.auto_transcode);
     const info = document.getElementById("tc-info");
     if (info) {
       if (data.available === false) {
@@ -940,6 +981,14 @@ async function initFeatures() {
 
   if (transcodeAvailable) {
     document.getElementById("transcode-card").hidden = false;
+    // The main preset select IS the persisted default (preselected in the ⚙
+    // dialogs); changing it saves it. The switch toggles auto-transcode.
+    document.getElementById("tc-preset").addEventListener("change", (e) => {
+      postTranscodeSettings({ default_preset: e.target.value });
+    });
+    document.getElementById("tc-auto").addEventListener("change", (e) => {
+      postTranscodeSettings({ auto_transcode: e.target.checked });
+    });
     document.getElementById("tc-jobs").addEventListener("click", (e) => {
       const btn = e.target.closest("button.tc-cancel[data-job]");
       if (!btn) return;

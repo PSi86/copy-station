@@ -245,7 +245,7 @@ def command_action(command: str) -> Action:
     return _run
 
 
-def wifi_ap_toggle_action(config=None, hub=None) -> Action:
+def wifi_ap_toggle_action(config=None, hub=None, ap_settings=None) -> Action:
     """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`).
 
     The indication is updated *first*, before the (slow, several-second) nmcli
@@ -253,7 +253,15 @@ def wifi_ap_toggle_action(config=None, hub=None) -> Action:
     (in-memory, no nmcli), so the display badge and the WS2812 blink code react
     the instant the press is recognised. The AP is then actually brought up/down,
     and the state is reconciled if a requested bring-up did not succeed.
+
+    ``ap_settings`` is the :class:`~copystation.settings_store.SettingsStore` that
+    persists the AP on/off state, so a toggle survives a restart independent of
+    ``wifi_ap.enabled`` in the config.
     """
+
+    def _persist(active: bool) -> None:
+        if ap_settings is not None:
+            ap_settings.update(enabled=active)
 
     def _run() -> None:
         from . import wifi_ap
@@ -261,40 +269,82 @@ def wifi_ap_toggle_action(config=None, hub=None) -> Action:
 
         ap_cfg = (config.get("wifi_ap") if config is not None else None) or {}
         if hub is None:
-            wifi_ap.toggle(ap_cfg)
+            _persist(wifi_ap.toggle(ap_cfg))
             return
         desired = not bool(hub.state.ap_active)
-        # Instant feedback (display + LED) before the slow network operation.
+        # Instant feedback (display + LED) + persist before the slow network op.
         hub.set_ap_active(desired)
         hub.signal(Event.AP_ENABLED if desired else Event.AP_DISABLED)
+        _persist(desired)
         actual = wifi_ap.set_active(ap_cfg, desired)
         if actual != desired:
-            # The bring-up failed (e.g. no valid password): correct the display.
+            # The bring-up failed (e.g. no valid password): correct the display
+            # and the persisted state.
             hub.set_ap_active(actual)
+            _persist(actual)
 
     return _run
 
 
-def _resolve_action(button: str, key: str, raw, config=None, hub=None) -> Optional[Action]:
+def auto_transcode_toggle_action(transcode=None, hub=None) -> Action:
+    """Action that toggles auto-transcode (the TranscodeManager setting).
+
+    Flips and persists the setting (so it survives a restart) and updates the
+    shared state, so the e-paper *Auto* badge and the web header react at once; on
+    a WS2812 strip it plays a distinct purple blink code. A no-op with a warning
+    when transcoding is not enabled.
+    """
+
+    def _run() -> None:
+        from .status import Event
+
+        if transcode is None:
+            _LOG.warning("Button: auto_transcode action, but transcoding is not enabled")
+            return
+        try:
+            desired = not bool(transcode.auto_transcode)
+            transcode.set_settings(auto_transcode=desired)  # persists + updates state
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.error("Button: could not toggle auto-transcode: %s", exc)
+            return
+        if hub is not None:
+            hub.log_event(
+                f"Auto-transcode {'enabled' if desired else 'disabled'} (button)"
+            )
+            hub.signal(Event.AUTO_TRANSCODE_ENABLED if desired
+                       else Event.AUTO_TRANSCODE_DISABLED)
+
+    return _run
+
+
+def _resolve_action(button: str, key: str, raw, config=None, hub=None,
+                    transcode=None, ap_settings=None) -> Optional[Action]:
     if raw is None or raw == "none":
         return None
     if raw in ("poweroff", "reboot"):
         return systemctl_action(raw)
     if raw == "wifi_ap":
-        return wifi_ap_toggle_action(config, hub)
+        return wifi_ap_toggle_action(config, hub, ap_settings)
+    if raw == "auto_transcode":
+        return auto_transcode_toggle_action(transcode, hub)
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return command_action(raw["command"])
     _LOG.warning("Button %s: unknown action %r for %s -- ignored", button, raw, key)
     return None
 
 
-def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None, hub=None) -> list:
+def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None,
+                  hub=None, transcode=None, ap_settings=None) -> list:
     """Build all configured user buttons; disabled/misconfigured ones are skipped.
 
     ``action_overrides`` is an injection point for tests: a ready-made
     event->Action mapping used instead of resolving ``actions`` from config.
     ``hub`` is the :class:`~copystation.state.StatusHub`; passed so the ``wifi_ap``
-    action can update the display status and fire the AP blink code.
+    and ``auto_transcode`` actions can update the display status and fire their
+    blink codes. ``transcode`` is the :class:`~copystation.transcode.TranscodeManager`
+    (or ``None``), needed by the ``auto_transcode`` action. ``ap_settings`` is the
+    :class:`~copystation.settings_store.SettingsStore` the ``wifi_ap`` action
+    persists the AP on/off state to.
     """
     if (config.get("power") or {}).get("shutdown_button"):
         _LOG.warning(
@@ -319,7 +369,8 @@ def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None, 
             raw = cfg.get("actions") or {}
             actions = {}
             for event, key in EVENT_CONFIG_KEYS.items():
-                action = _resolve_action(name, key, raw.get(key), config, hub)
+                action = _resolve_action(name, key, raw.get(key), config, hub,
+                                         transcode, ap_settings)
                 if action is not None:
                     actions[event] = action
         if not actions:

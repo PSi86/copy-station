@@ -19,6 +19,11 @@ all off by default, so existing status-only deployments are unaffected.
 - Toggle the AP from a **user button** (`wifi_ap` action; recommended
   `triple_click`) with instant feedback: an **e-paper `WiFi` badge**, a matching
   web header badge, and dedicated **WS2812 blink codes** (cyan = on, amber = off).
+- The AP on/off state is now **persisted** (in the shared `user_settings_file`)
+  and **survives a restart independent of `wifi_ap.enabled`** -- the overlay wins
+  over the config, so a runtime toggle sticks; `enabled` is only the initial
+  value. On start the daemon reconciles a stale-up AP back down when it should be
+  off.
 - Optional **captive portal** (`wifi_ap.captive_portal`): a NetworkManager
   dnsmasq drop-in points all DNS at the AP and a small port-80 redirect server
   sends clients to the web UI, so a joining device auto-opens the interface and
@@ -51,6 +56,37 @@ all off by default, so existing status-only deployments are unaffected.
   writing to a `Transcoded/` folder on the target volume (also downloadable).
   Single-worker queue, configurable presets, two-click cancel from the UI (a
   first click arms the button so a long encode is never aborted by a stray click).
+- **Auto-transcode after a copy** (`transcode.auto_transcode`, or the web UI's
+  *Auto-transcode after copy* switch): a successful copy automatically queues a
+  transcode of every just-copied video file (onto the target, using the default
+  preset). The **source card is unmounted before the batch starts**, so it can be
+  removed while the transcodes run on the target alone.
+  - The switch and default preset are **read only when a copy finishes**, so both
+    can be changed at any time (including mid-copy) to decide per copy.
+  - Toggle auto-transcode from a **user button** (the new `auto_transcode`
+    action) as well as the web UI; the **e-paper panel shows an `Auto` badge**
+    while it is enabled (beside the `WiFi` badge) and a WS2812 strip plays a
+    purple blink on each toggle (`AUTO_TRANSCODE_ENABLED`/`DISABLED` signals).
+  - A **persisted default preset** (`transcode.default_preset`): chosen in the
+    *Transcode* card, preselected in the per-file/folder ⚙ dialogs, and used by
+    auto-transcode; the first configured preset until one is chosen. The default
+    preset and the auto-transcode toggle are saved via
+    `POST /api/transcode/settings` to the **single runtime-settings overlay**
+    (`user_settings_file`, default `/var/lib/copystation/user-settings.json`), so a
+    web-UI change survives a restart without rewriting the commented config.
+  - All runtime-mutable settings (auto-transcode, default preset, WiFi AP state)
+    now live in **one** overlay file, each under its own section, via a shared
+    **self-healing store** that drops sections/keys a software update
+    renamed/removed on load (only the overlay is cleaned; `config.yaml` is never
+    touched).
+  - **Queue visibility**: `GET /api/transcode` now reports a `queue` aggregate
+    (pending count, position `i/n`, overall percent, total remaining time). The
+    web UI shows a queue summary + an **overall progress bar**, and the **e-paper
+    panel** shows `Transcode i/n`, the whole-queue bar and the total ETA (with the
+    current file's own progress as text).
+  - A **batch runs as one queue under a single `Transcoding` phase** (holding the
+    operation lock for the whole run), so the display no longer flashes between
+    files and the copy daemon can never slip a copy between two transcode files.
 - **Folder (batch) transcoding**: the ⚙ on a folder queues one independent job
   per video file inside it under a single preset -- not one "folder job", so each
   file picks its own hardware/CPU path and appears and cancels individually. The

@@ -31,6 +31,15 @@ def _role_label(role: str) -> str:
         return ""
     return _ROLE_LABELS.get(role, role.capitalize())
 
+
+def _progress_label(view) -> str:
+    """Header for the progress bar: 'Transfer' for a copy, 'Transcode' for a
+    single job, or 'Transcode i/n' for a multi-file batch (the bar then tracks
+    the whole queue)."""
+    if not view.transcode_active:
+        return "Transfer"
+    return ("Transcode " + view.transcode_queue_text).strip()
+
 _WHITE = 1
 _BLACK = 0
 
@@ -103,14 +112,13 @@ def _bar(draw, x: int, y: int, w: int, h: int, fraction: float) -> None:
         draw.rectangle([x + 1, y + 1, x + fill_w, y + h - 2], fill=_BLACK)
 
 
-def _wifi_badge(draw, x_right: int, y: int, font) -> int:
-    """Draw a small inverted "WiFi" badge right-aligned at ``(x_right, y)``.
+def _text_badge(draw, x_right: int, y: int, label: str, font) -> int:
+    """Draw a small inverted text badge right-aligned at ``(x_right, y)``.
 
     A solid black chip with white text -- it reads at a glance on the 1-bit panel
     and drawing darker pixels onto white is a clean partial refresh. Returns the
-    badge's left x so the caller can place other header text to its left.
+    badge's left x so the caller can place another badge / text to its left.
     """
-    label = "WiFi"
     pad = 3
     tw = _text_width(draw, label, font)
     bh = _line_height(font) + 2
@@ -118,6 +126,26 @@ def _wifi_badge(draw, x_right: int, y: int, font) -> int:
     draw.rectangle([x0, y, x_right, y + bh - 1], fill=_BLACK)
     draw.text((x0 + pad, y + 1), label, font=font, fill=_WHITE)
     return x0
+
+
+def _wifi_badge(draw, x_right: int, y: int, font) -> int:
+    """The "WiFi" access-point badge (shown while the AP is up)."""
+    return _text_badge(draw, x_right, y, "WiFi", font)
+
+
+# Label of the auto-transcode badge (shown while auto-transcode is enabled).
+_AUTO_BADGE = "Auto"
+
+
+def _header_badges(draw, view, x_right: int, y: int, font) -> int:
+    """Draw the header status badges right-to-left (WiFi, then Auto). Returns the
+    left x of the leftmost badge drawn, so a caller can place text (the version)
+    further left without overlapping."""
+    if view.ap_active:
+        x_right = _wifi_badge(draw, x_right, y, font) - 4
+    if view.auto_transcode_active:
+        x_right = _text_badge(draw, x_right, y, _AUTO_BADGE, font) - 4
+    return x_right
 
 
 def render(view: ViewModel, width: int, height: int):
@@ -146,10 +174,8 @@ def _render_portrait(view: ViewModel, width: int, height: int):
     small_f = _font(max(10, height // 20))
 
     _text(draw, m, m, "Copy_Station", title_f)
-    version_right = right
-    if view.ap_active:
-        # WiFi status badge top-right; version tucks in to its left.
-        version_right = _wifi_badge(draw, right, m, small_f) - 4
+    # Status badges top-right (WiFi, Auto); the version tucks in to their left.
+    version_right = _header_badges(draw, view, right, m, small_f)
     if view.version:
         _text(draw, 0, m, f"v{view.version}", small_f, anchor_right=version_right)
     line_y = m + _line_height(title_f) + 2
@@ -163,18 +189,20 @@ def _render_portrait(view: ViewModel, width: int, height: int):
         y = _draw_wrapped(draw, m, y, right, view.error_text, label_f)
 
     if view.show_progress:
-        _text(draw, m, y, "Transcode" if view.transcode_active else "Transfer", label_f)
+        _text(draw, m, y, _progress_label(view), label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=right)
         y += _line_height(label_f) + 2
         _bar(draw, m, y, width - 2 * m, max(10, height // 18), view.progress_fraction)
         y += max(10, height // 18) + 8
 
     if view.transcode_active:
-        # A transcode shows the file, encoder + size, and elapsed/fps + ETA in the
-        # footer -- not the source/target storage gauges.
+        # A transcode shows the file, encoder + size (+ the current file's own % for
+        # a batch, since the bar above then tracks the whole queue), and elapsed/fps
+        # + ETA in the footer -- not the source/target storage gauges.
         _text(draw, m, y, _fit_label(draw, view.transcode_name, label_f, right - m), label_f)
         y += _line_height(label_f) + 3
-        info = " · ".join(t for t in (view.transcode_encoder, view.transcode_size_text) if t)
+        info = " · ".join(t for t in (view.transcode_encoder, view.transcode_size_text,
+                                      view.transcode_file_text) if t)
         if info:
             _text(draw, m, y, info, small_f)
         foot_y = height - m - _line_height(small_f)
@@ -212,8 +240,7 @@ def _render_landscape(view: ViewModel, width: int, height: int):
     small_f = _font(max(10, height // 13))
 
     _text(draw, m, m, "Copy_Station", title_f)
-    if view.ap_active:
-        _wifi_badge(draw, width - m, m, small_f)  # WiFi status badge, top-right
+    _header_badges(draw, view, width - m, m, small_f)  # WiFi / Auto badges, top-right
     ly = m + _line_height(title_f) + 1
     draw.line([m, ly, col - m, ly], fill=_BLACK)
 
@@ -241,15 +268,15 @@ def _render_landscape(view: ViewModel, width: int, height: int):
     rx = col + m
     x1 = width - m
     y = m
-    if view.ap_active:
-        # Drop the right column below the top-right WiFi badge so a right-aligned
-        # value (e.g. the copy "67%") never lands under it.
+    if view.ap_active or view.auto_transcode_active:
+        # Drop the right column below the top-right badge(s) so a right-aligned
+        # value (e.g. the copy "67%") never lands under them.
         y = m + _line_height(small_f) + 4
 
     if view.transcode_active:
-        # The right column shows the progress bar (like a copy) plus the file and
-        # encoder, instead of the storage gauges.
-        _text(draw, rx, y, "Transcode", label_f)
+        # The right column shows the progress bar (the whole queue for a batch,
+        # else the single file) plus the file and encoder, instead of the gauges.
+        _text(draw, rx, y, _progress_label(view), label_f)
         _text(draw, 0, y, f"{view.percent}%", label_f, anchor_right=x1)
         y += _line_height(label_f) + 2
         _bar(draw, rx, y, x1 - rx, max(9, height // 11), view.progress_fraction)
@@ -257,7 +284,8 @@ def _render_landscape(view: ViewModel, width: int, height: int):
         _text(draw, rx, y, _fit_label(draw, view.transcode_name, small_f, x1 - rx), small_f)
         y += _line_height(small_f) + 2
         info = " · ".join(
-            t for t in (view.transcode_encoder, view.transcode_size_text, view.transcode_fps_text) if t
+            t for t in (view.transcode_encoder, view.transcode_size_text,
+                        view.transcode_fps_text, view.transcode_file_text) if t
         )
         if info:
             _text(draw, rx, y, _fit_label(draw, info, small_f, x1 - rx), small_f)

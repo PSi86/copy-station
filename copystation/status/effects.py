@@ -84,7 +84,10 @@ def effect_phase(event: Event, elapsed: float) -> Tuple[bool, bool]:
         # Always "lit" while it runs; the backend draws the growing wipe itself
         # from ``elapsed`` (see :func:`startup_sweep_count`).
         return True, elapsed >= STARTUP_SWEEP_SECONDS
-    if event in (Event.AP_ENABLED, Event.AP_DISABLED):
+    if event in (Event.AP_ENABLED, Event.AP_DISABLED,
+                 Event.AUTO_TRANSCODE_ENABLED, Event.AUTO_TRANSCODE_DISABLED):
+        # Same three-flash rhythm as the AP toggle; the backend gives each its own
+        # colour so on/off (and AP vs auto-transcode) are unmistakable.
         period = DETECT_ON + DETECT_OFF
         if elapsed >= period * AP_FLASHES:
             return False, True

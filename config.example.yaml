@@ -11,6 +11,14 @@ mount_base: /run/copystation/mnt
 # Name of the media subfolder on the source.
 media_dirname: DCIM
 
+# Single overlay file for ALL runtime-mutable settings that must survive a restart
+# WITHOUT rewriting this (commented) config: auto-transcode on/off, the default
+# transcode preset, and the WiFi AP on/off state. They are toggled from the web UI
+# / a user button; the overlay wins over the config defaults when present. Delete
+# the file to fall back to the config values. The daemon runs as root and can
+# write under /var/lib.
+user_settings_file: /var/lib/copystation/user-settings.json
+
 identify:
   # Optional hardening: only accept these USB VIDs/PIDs as the source.
   # Leave empty = the source is detected by its DCIM folder alone.
@@ -149,7 +157,7 @@ web:
 # OS Bookworm and current Radxa images). It can also be toggled from a user
 # button via the `wifi_ap` action below.
 wifi_ap:
-  enabled: false
+  enabled: false         # factory default; a runtime toggle (below) overrides it
   con_name: copystation-ap
   ssid: Copy_Station
   password: ""            # >= 8 chars for WPA2; empty -> AP stays down
@@ -158,6 +166,10 @@ wifi_ap:
   ipv4_address: 10.42.0.1/24
   autoconnect: true
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
+  # The AP on/off state is persisted in `user_settings_file` (top of this file)
+  # when toggled at runtime (button/web), so it survives a restart INDEPENDENT of
+  # `enabled` above -- the overlay wins when present. `enabled` is only the initial
+  # state until the first toggle.
   # Captive portal: point all DNS at the AP and redirect port 80 to the web UI,
   # so a joining device auto-opens the interface ("Sign in to network") and stays
   # on the AP instead of falling back to mobile data. Needs web.enabled and port
@@ -176,6 +188,18 @@ transcode:
   enabled: false
   output_dirname: Transcoded
   max_jobs: 1
+  # Auto-transcode: after a successful copy, automatically queue a transcode of
+  # every just-copied VIDEO file (written onto the target, into <output_dirname>/)
+  # using `default_preset`. The source card is cleanly unmounted BEFORE the batch
+  # starts, so it can be removed while the transcodes run. This is only the
+  # factory default -- the live value is toggled from the web UI's Transcode card
+  # and persisted in `user_settings_file` (top of this file), which then wins.
+  auto_transcode: false
+  # Default preset id: preselected in the web UI's ⚙ dialogs and used by
+  # auto-transcode. `null` (or an unknown id) falls back to the first preset
+  # below. Changed from the web UI's Transcode card and persisted in
+  # `user_settings_file` (top of this file).
+  default_preset: null
   # Hardware acceleration. `auto` uses the board's hardware encoder when it is
   # present and falls back to the CPU otherwise:
   #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware, via ffmpeg)
@@ -266,13 +290,16 @@ buttons:
       max_gap_seconds: 1.0     # a longer release ends the click sequence
       hold_seconds: 3.0        # hold after the activation click -> hold action
     actions:
-      # poweroff | reboot | wifi_ap | none | {command: "..."}
+      # poweroff | reboot | wifi_ap | auto_transcode | none | {command: "..."}
       #   wifi_ap toggles the WLAN access point (see wifi_ap: above); on a WS2812
       #   strip it plays a distinct blink code (cyan = on, amber = off) and the
       #   e-paper shows a "WiFi" badge while the AP is up.
+      #   auto_transcode toggles auto-transcode after a copy (see transcode: above);
+      #   it is persisted, shows an "Auto" e-paper badge while enabled and plays a
+      #   purple WS2812 blink on each toggle.
       #   (reboot may hang on the A733 -- prefer poweroff.)
       hold: poweroff
-      single_click: none
+      single_click: auto_transcode  # 1 click (after activation) toggles auto-transcode
       double_click: none
       triple_click: wifi_ap    # 3 clicks (after the activation click) toggle the AP
 

@@ -31,6 +31,12 @@ DEFAULTS: dict[str, Any] = {
     "mount_base": DEFAULT_MOUNT_BASE,
     # Name of the media subfolder on the source.
     "media_dirname": DCIM_DIRNAME,
+    # Single overlay file for ALL runtime-mutable settings that must survive a
+    # restart WITHOUT rewriting this (commented) config: auto-transcode on/off,
+    # the default transcode preset, and the WiFi AP on/off state. Toggled from the
+    # web UI / a user button; the overlay wins over the config defaults when
+    # present. The daemon runs as root, so it can write under /var/lib.
+    "user_settings_file": "/var/lib/copystation/user-settings.json",
     # Source identification.
     "identify": {
         # The source is primarily detected by its DCIM folder. Optional
@@ -163,6 +169,9 @@ DEFAULTS: dict[str, Any] = {
         # Optional captive portal: point all DNS at the AP and redirect port 80 to
         # the web UI, so a joining device auto-opens the interface and stays on the
         # AP (phones otherwise route to mobile data). Needs web.enabled + port 80.
+        # The AP on/off state persists in ``user_settings_file`` (see top of this
+        # file): a runtime toggle (web/button) wins over ``enabled`` above and
+        # survives a restart. ``enabled`` is only the initial state.
         "captive_portal": False,
         "captive_portal_port": 80,
     },
@@ -174,6 +183,18 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "output_dirname": "Transcoded",
         "max_jobs": 1,
+        # Auto-transcode: after a successful copy, automatically queue a transcode
+        # of every just-copied video file (onto the target, into output_dirname),
+        # using ``default_preset``. This is the factory default; the live value is
+        # toggled from the web UI and persisted in ``user_settings_file`` (which
+        # then wins over this). The source card is released (unmounted) before the
+        # batch starts, so it can be removed while the transcodes run.
+        "auto_transcode": False,
+        # Default preset id: preselected in the web UI's transcode dialogs and
+        # used by auto-transcode. ``null`` (or an unknown id) falls back to the
+        # first preset below. Changed from the web UI and persisted in
+        # ``user_settings_file``.
+        "default_preset": None,
         # Video encoder selection:
         #   auto     -> use the board's hardware encoder when it is present
         #               (Pi 4: ffmpeg h264_v4l2m2m; Cubie A7S: GStreamer

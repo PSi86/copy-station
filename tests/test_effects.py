@@ -40,9 +40,10 @@ def test_source_empty_holds_lit_then_finishes():
     assert effect_phase(Event.SOURCE_EMPTY, EMPTY_HOLD_SECONDS) == (False, True)
 
 
-def test_ap_toggle_blinks_three_times():
+def test_ap_and_auto_transcode_toggles_blink_three_times():
     assert AP_FLASHES == 3
-    for event in (Event.AP_ENABLED, Event.AP_DISABLED):
+    for event in (Event.AP_ENABLED, Event.AP_DISABLED,
+                  Event.AUTO_TRANSCODE_ENABLED, Event.AUTO_TRANSCODE_DISABLED):
         # Lit in the middle of each of the three flashes.
         for k in range(AP_FLASHES):
             lit, done = effect_phase(event, k * PERIOD + DETECT_ON / 2)

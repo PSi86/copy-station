@@ -186,28 +186,95 @@ def test_wifi_ap_bound_to_button_detection():
     assert _wifi_ap_bound_to_button({}) is False
 
 
-def test_wifi_ap_currently_active_reflects_real_state(monkeypatch):
-    from copystation.daemon import _wifi_ap_currently_active
+def _ap_section(tmp_path):
+    from copystation.settings_store import SettingsStore
 
-    # Feature usable via wifi_ap.enabled -> queries the real nmcli state.
+    return SettingsStore(str(tmp_path / "user-settings.json")).section("wifi_ap")
+
+
+def test_effective_ap_enabled_overlay_wins_over_config(tmp_path):
+    from copystation.config import Config
+    from copystation.daemon import _effective_ap_enabled
+
+    store = _ap_section(tmp_path)
+
+    # No overlay yet -> the config value applies.
+    cfg_on = Config({"wifi_ap": {"enabled": True}})
+    cfg_off = Config({"wifi_ap": {"enabled": False}})
+    assert _effective_ap_enabled(cfg_on, store) is True
+    assert _effective_ap_enabled(cfg_off, store) is False
+
+    # A persisted overlay wins over the config either way (a runtime toggle
+    # survives a restart independent of wifi_ap.enabled).
+    store.update(enabled=False)
+    assert _effective_ap_enabled(cfg_on, store) is False
+    store.update(enabled=True)
+    assert _effective_ap_enabled(cfg_off, store) is True
+
+
+class _ApHub:
+    """Minimal hub for the wifi_ap button action tests."""
+
+    class _State:
+        ap_active = False
+
+    def __init__(self):
+        self.state = self._State()
+        self.events = []
+
+    def set_ap_active(self, value):
+        self.state.ap_active = bool(value)
+
+    def signal(self, event):
+        self.events.append(event)
+
+
+def test_wifi_ap_button_persists_state(monkeypatch, tmp_path):
+    from copystation.buttons import wifi_ap_toggle_action
+
+    hub = _ApHub()
+    store = _ap_section(tmp_path)
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: desired)  # bring-up ok
+
+    action = wifi_ap_toggle_action({"wifi_ap": {}}, hub, store)
+    action()  # off -> on: persisted so it survives a restart
+    assert hub.state.ap_active is True and store.get("enabled") is True
+    action()  # on -> off
+    assert hub.state.ap_active is False and store.get("enabled") is False
+
+
+def test_wifi_ap_button_persists_corrected_state_on_failed_bringup(monkeypatch, tmp_path):
+    from copystation.buttons import wifi_ap_toggle_action
+
+    hub = _ApHub()
+    store = _ap_section(tmp_path)
+    # The bring-up fails (e.g. no valid PSK): set_active reports the AP still down.
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: False)
+
+    wifi_ap_toggle_action({"wifi_ap": {}}, hub, store)()  # tries on, fails
+    # Both the display and the persisted state are corrected to the real (off) state.
+    assert hub.state.ap_active is False and store.get("enabled") is False
+
+
+def test_apply_wifi_ap_state_starts_or_reconciles(monkeypatch):
+    from copystation.daemon import _apply_wifi_ap_state
+
+    # want_up=True -> start_ap; return its result.
+    monkeypatch.setattr(ap, "start_ap", lambda cfg: True)
+    assert _apply_wifi_ap_state({"wifi_ap": {}}, True) is True
+
+    # want_up=False while the AP is active (stale autoconnect) -> bring it down.
+    calls = []
     monkeypatch.setattr(ap, "is_active", lambda cfg: True)
-    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": True}}) is True
+    monkeypatch.setattr(ap, "down", lambda cfg: calls.append("down") or True)
+    assert _apply_wifi_ap_state({"wifi_ap": {}}, False) is False
+    assert calls == ["down"]
+
+    # want_up=False and already down -> nothing to do, no nmcli 'down'.
+    calls.clear()
     monkeypatch.setattr(ap, "is_active", lambda cfg: False)
-    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": True}}) is False
-
-    # Usable via a button binding even though enabled is false (the reported bug:
-    # AP raised by a button before a restart must still be detected).
-    checked = {}
-    monkeypatch.setattr(ap, "is_active", lambda cfg: checked.setdefault("hit", True))
-    cfg = {"wifi_ap": {"enabled": False},
-           "buttons": {"u1": {"enabled": True, "actions": {"triple_click": "wifi_ap"}}}}
-    assert _wifi_ap_currently_active(cfg) is True
-    assert checked == {"hit": True}
-
-    # Not usable at all -> never touches nmcli.
-    checked.clear()
-    assert _wifi_ap_currently_active({"wifi_ap": {"enabled": False}}) is False
-    assert checked == {}
+    assert _apply_wifi_ap_state({"wifi_ap": {}}, False) is False
+    assert calls == []
 
 
 def test_check_ap_web_reachability_warns_when_web_disabled(caplog):

@@ -87,3 +87,55 @@ def test_fmt_helpers():
     assert fmt_duration(None) == "--"
     assert fmt_duration(42) == "0:42"
     assert fmt_duration(3661) == "1:01:01"
+
+
+# --------------------------------------------------------------------------- #
+# Transcode queue (multi-file batch)
+# --------------------------------------------------------------------------- #
+
+def _transcoding(queue, percent=40.0, eta=30.0):
+    return {
+        "phase": "transcoding",
+        "transcode": {
+            "active": True, "name": "clip.mp4", "percent": percent,
+            "encoder": "cpu", "hw": False, "input_size": 0, "fps": None,
+            "elapsed_seconds": 12.0, "eta_seconds": eta, "queue": queue,
+        },
+    }
+
+
+def test_build_view_batch_shows_queue_and_uses_overall_bar():
+    v = build_view(_transcoding(
+        {"pending": 3, "index": 2, "count": 5, "eta_seconds": 300.0, "percent": 55.0}))
+    assert v.transcode_active is True
+    assert v.transcode_queue_text == "2/5"       # position within the batch
+    assert v.transcode_file_text == "file 40%"   # the current file's own progress
+    assert v.percent == 55                        # main bar = whole queue
+    assert v.eta_text == fmt_duration(300.0)      # footer ETA = total remaining
+
+
+def test_build_view_single_file_transcode_unchanged():
+    v = build_view(_transcoding(
+        {"pending": 1, "index": 1, "count": 1, "eta_seconds": 30.0, "percent": 40.0}))
+    assert v.transcode_queue_text == ""    # not a batch -> no "i/n"
+    assert v.transcode_file_text == ""
+    assert v.percent == 40                 # per-file bar, as before
+    assert v.eta_text == fmt_duration(30.0)
+
+
+def test_build_view_transcode_without_queue_block():
+    # An active transcode snapshot that predates the queue field must still render.
+    v = build_view({"phase": "transcoding",
+                    "transcode": {"active": True, "name": "clip.mp4", "percent": 20.0}})
+    assert v.transcode_active is True
+    assert v.transcode_queue_text == "" and v.percent == 20
+
+
+# --------------------------------------------------------------------------- #
+# Auto-transcode badge
+# --------------------------------------------------------------------------- #
+
+def test_build_view_auto_transcode_badge_flag():
+    assert build_view({"phase": "ready", "auto_transcode": True}).auto_transcode_active is True
+    assert build_view({"phase": "ready", "auto_transcode": False}).auto_transcode_active is False
+    assert build_view({"phase": "ready"}).auto_transcode_active is False  # absent -> off

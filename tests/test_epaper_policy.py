@@ -114,3 +114,25 @@ def test_ap_enabled_is_partial():
 def test_ap_disabled_is_full():
     # The badge must go white again -> only a full refresh erases it cleanly.
     assert decide(_vm(ap=True), _vm(ap=False), **_KW) is Decision.FULL
+
+
+def test_queue_advance_triggers_redraw():
+    import dataclasses
+
+    base = _vm(phase="transcoding", percent=50)
+    prev = dataclasses.replace(base, transcode_active=True, transcode_queue_text="2/5")
+    new = dataclasses.replace(base, transcode_active=True, transcode_queue_text="3/5")
+    # Advancing to the next file changes the signature -> not skipped.
+    assert decide(prev, new, **_KW) is not Decision.SKIP
+
+
+def test_auto_transcode_badge_enable_partial_disable_full():
+    import dataclasses
+
+    base = _vm(phase="ready", percent=0)
+    off = dataclasses.replace(base, auto_transcode_active=False)
+    on = dataclasses.replace(base, auto_transcode_active=True)
+    # Enabling only adds darker pixels -> a clean partial refresh.
+    assert decide(off, on, **_KW) is Decision.PARTIAL
+    # Disabling must erase the badge (black -> white) -> a full refresh.
+    assert decide(on, off, **_KW) is Decision.FULL
