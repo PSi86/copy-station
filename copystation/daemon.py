@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .config import Config, load_config
 from .naming import next_transfer_dir
+from .settings_store import SettingsStore
 from .state import StationState, StatusHub, StorageInfo
 from .status import Event, State, build_indicator
 from .transfer import (
@@ -179,15 +180,21 @@ def perform_transfer(
     return dest
 
 
-def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
-    """Start the web interface if enabled. Returns True if it was started."""
+def _maybe_start_web(hub: StatusHub, config: Config, features=None) -> bool:
+    """Start the web interface if enabled. Returns True if it was started.
+
+    ``features`` is an optional prebuilt ``(browse, transcode, preview)`` tuple so
+    the daemon can share the transcode manager with the device watcher (for
+    auto-transcode); when omitted the features are built here (simulation path).
+    """
     web_cfg = config.get("web", {})
     if not web_cfg.get("enabled"):
         return False
     try:
         from .web import start_web_server
 
-        browse, transcode, preview = _build_web_features(hub, config)
+        browse, transcode, preview = features if features is not None \
+            else _build_web_features(hub, config)
         start_web_server(
             hub.state,
             web_cfg.get("host", "0.0.0.0"),
@@ -203,12 +210,21 @@ def _maybe_start_web(hub: StatusHub, config: Config) -> bool:
         return False
 
 
-def _build_web_features(hub: StatusHub, config: Config):
+def _user_settings_file(config: Config) -> str:
+    """Path of the single overlay holding all runtime-mutable user settings."""
+    return str(config.get("user_settings_file", "/var/lib/copystation/user-settings.json"))
+
+
+def _build_web_features(hub: StatusHub, config: Config, user_settings=None):
     """Construct the optional file-browser and transcode managers.
 
     Each is best-effort: a missing dependency (pyudev, ffmpeg) or a disabled
     feature yields ``None``, and the web app simply hides that panel. Never lets
     an optional feature stop the (status) web interface from coming up.
+
+    ``user_settings`` is the shared :class:`SettingsStore`; the transcode manager
+    is given its ``transcode`` section so it shares the single overlay file with
+    the WiFi AP. When omitted (the simulation path) a private store is opened.
 
     Returns ``(browse, transcode, preview)`` where ``browse`` is passed to the web
     app only to expose the file endpoints -- it is ``None`` unless the file browser
@@ -217,6 +233,9 @@ def _build_web_features(hub: StatusHub, config: Config):
     """
     files_enabled = (config.get("web", {}) or {}).get("files", {}).get("enabled", True)
     transcode_enabled = bool((config.get("transcode", {}) or {}).get("enabled"))
+
+    if user_settings is None:
+        user_settings = SettingsStore(_user_settings_file(config))
 
     browse = None
     if files_enabled or transcode_enabled:
@@ -232,7 +251,8 @@ def _build_web_features(hub: StatusHub, config: Config):
         try:
             from .transcode import TranscodeManager
 
-            transcode = TranscodeManager(config, hub, browse)
+            transcode = TranscodeManager(config, hub, browse,
+                                         settings=user_settings.section("transcode"))
         except Exception as exc:  # pragma: no cover - defensive
             _LOG.warning("Transcoding unavailable: %s", exc)
 
@@ -294,18 +314,42 @@ def run_simulation(args: argparse.Namespace, config: Config) -> int:
     return rc
 
 
-def _maybe_start_wifi_ap(config: Config) -> bool:
-    """Bring up the optional WLAN access point (NetworkManager). Best-effort."""
-    ap_cfg = config.get("wifi_ap", {}) or {}
-    if not ap_cfg.get("enabled"):
-        return False
-    try:
-        from .wifi_ap import start_ap
+def _effective_ap_enabled(config: Config, ap_settings) -> bool:
+    """Whether the AP should be up: the persisted overlay wins over the config.
 
-        return start_ap(ap_cfg)
+    A runtime toggle (web/button) writes ``enabled`` to the ``wifi_ap`` section of
+    the shared user-settings overlay, so it survives a restart independent of
+    ``wifi_ap.enabled`` in config.yaml; until a toggle happens the config applies.
+    """
+    if ap_settings.has("enabled"):
+        return bool(ap_settings.get("enabled"))
+    return bool((config.get("wifi_ap", {}) or {}).get("enabled"))
+
+
+def _apply_wifi_ap_state(config: Config, want_up: bool) -> bool:
+    """Bring the AP to ``want_up`` at startup; return whether it is up afterwards.
+
+    When it should be OFF, a stale autoconnect profile that raised the AP is
+    brought down, so a persisted 'off' really means off. Best-effort.
+    """
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    if want_up:
+        try:
+            from .wifi_ap import start_ap
+
+            return bool(start_ap(ap_cfg))
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.warning("WiFi AP could not be started: %s", exc)
+            return False
+    try:
+        from .wifi_ap import down, is_active
+
+        if is_active(ap_cfg):
+            _LOG.info("WiFi AP is active but persisted off -- bringing it down")
+            down(ap_cfg)
     except Exception as exc:  # pragma: no cover - defensive
-        _LOG.warning("WiFi AP could not be started: %s", exc)
-        return False
+        _LOG.warning("WiFi AP reconcile failed: %s", exc)
+    return False
 
 
 def _maybe_start_captive_portal(config: Config):
@@ -356,24 +400,8 @@ def _wifi_ap_bound_to_button(config: Config) -> bool:
     return False
 
 
-def _wifi_ap_currently_active(config: Config) -> bool:
-    """True if the AP connection is already active (e.g. raised by a button before
-    this restart). Only checked when the AP feature is usable at all, and
-    best-effort: no NetworkManager (or any error) reads as not active.
-    """
-    ap_cfg = config.get("wifi_ap", {}) or {}
-    if not (ap_cfg.get("enabled") or _wifi_ap_bound_to_button(config)):
-        return False
-    try:
-        from .wifi_ap import is_active
-
-        return bool(is_active(ap_cfg))
-    except Exception as exc:  # pragma: no cover - defensive
-        _LOG.warning("WiFi AP state check failed: %s", exc)
-        return False
-
-
-def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
+def _check_ap_web_reachability(config: Config, web_up: bool,
+                               ap_enabled: bool = False) -> None:
     """Warn about the classic 'AP up but web UI refused' misconfiguration.
 
     The AP only serves the web interface if the web interface is actually
@@ -382,7 +410,9 @@ def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
     the AP (or binding it to a button) while leaving ``web.enabled`` off. Also log
     the exact URL when both are up, so it is easy to find in the journal.
     """
-    ap_usable = bool((config.get("wifi_ap", {}) or {}).get("enabled")) or _wifi_ap_bound_to_button(config)
+    ap_usable = (ap_enabled
+                 or bool((config.get("wifi_ap", {}) or {}).get("enabled"))
+                 or _wifi_ap_bound_to_button(config))
     web_cfg = config.get("web", {}) or {}
     if ap_usable and not web_cfg.get("enabled"):
         _LOG.warning(
@@ -396,16 +426,20 @@ def _check_ap_web_reachability(config: Config, web_up: bool) -> None:
         _LOG.info("Web interface over the AP: http://%s:%s/", ip, web_cfg.get("port", 8080))
 
 
-def _maybe_start_buttons(config: Config, hub: StatusHub) -> list:
+def _maybe_start_buttons(config: Config, hub: StatusHub, transcode=None,
+                         ap_settings=None) -> list:
     """Start the optional GPIO user buttons. Returns them (possibly empty).
 
-    ``hub`` is passed through so a ``wifi_ap`` button action can update the
-    display status and fire the WS2812 AP blink code.
+    ``hub`` is passed through so a ``wifi_ap`` / ``auto_transcode`` button action
+    can update the display status and fire its WS2812 blink code; ``transcode`` is
+    the manager the ``auto_transcode`` action toggles; ``ap_settings`` is the store
+    the ``wifi_ap`` action persists the AP on/off state to.
     """
     try:
         from .buttons import build_buttons
 
-        buttons = build_buttons(config, hub=hub)
+        buttons = build_buttons(config, hub=hub, transcode=transcode,
+                                ap_settings=ap_settings)
         for button in buttons:
             button.start()
             _LOG.info("User button %s active", button.name)
@@ -430,23 +464,33 @@ def run_daemon(config: Config) -> int:
     hub = StatusHub(state, build_indicator(config, state=state))
     hub.set_phase(State.READY)
     hub.signal(Event.SERVICE_STARTED)  # a brief boot wipe so a (re)start is visible
+    # One overlay file holds ALL runtime-mutable settings (auto-transcode, default
+    # preset, WiFi AP state); features get their own section, so there is a single
+    # file and no cross-writer races.
+    user_settings = SettingsStore(_user_settings_file(config))
+    # Build the optional file-browser / transcode / preview managers once, so the
+    # SAME transcode manager backs both the web UI and the device watcher's
+    # auto-transcode (which needs it even when the web UI is off).
+    browse, transcode, preview = _build_web_features(hub, config, user_settings)
     # Start the web server first so it is already listening (on 0.0.0.0, all
     # interfaces) before the slower AP bring-up. The captive-portal DNS drop-in is
     # written before the AP is raised, so NetworkManager's dnsmasq reads it. Then
     # raise the AP.
-    web_up = _maybe_start_web(hub, config)
+    web_up = _maybe_start_web(hub, config, (browse, transcode, preview))
     portal = _maybe_start_captive_portal(config)
-    # Auto-start the AP if configured, then reflect its REAL current state: it may
-    # already be up from a button toggle before this (re)start (with wifi_ap.enabled
-    # still false), so the WiFi badge must appear whenever the AP is actually
-    # active -- not only when we auto-started it here.
-    ap_started = _maybe_start_wifi_ap(config)
-    if ap_started or _wifi_ap_currently_active(config):
-        hub.set_ap_active(True)
-    _check_ap_web_reachability(config, web_up)
-    buttons = _maybe_start_buttons(config, hub)
+    # WiFi AP: the persisted overlay state (from a web/button toggle) wins over
+    # wifi_ap.enabled in config.yaml, so a runtime toggle survives a restart. Apply
+    # it (bringing a stale-up AP down when it should be off) and reflect the badge.
+    ap_settings = user_settings.section("wifi_ap")
+    ap_enabled = _effective_ap_enabled(config, ap_settings)
+    ap_up = _apply_wifi_ap_state(config, ap_enabled)
+    hub.set_ap_active(ap_up)
+    _check_ap_web_reachability(config, web_up, ap_enabled)
+    buttons = _maybe_start_buttons(config, hub, transcode, ap_settings)
 
-    watcher = DeviceWatcher(config=config, hub=hub, transfer=perform_transfer)
+    watcher = DeviceWatcher(
+        config=config, hub=hub, transfer=perform_transfer, transcode=transcode
+    )
     try:
         watcher.run()
     except KeyboardInterrupt:  # pragma: no cover

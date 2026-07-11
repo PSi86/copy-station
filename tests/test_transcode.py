@@ -867,6 +867,193 @@ def test_submit_folder_blocked_when_active(tmp_path, monkeypatch):
         mgr.submit_folder("sdb1", "DCIM", "720p-h264")
 
 
+# --------------------------------------------------------------------------- #
+# Runtime settings (default preset + auto-transcode) + overlay persistence
+# --------------------------------------------------------------------------- #
+
+def _mgr_with_settings(tmp_path, overlay=None, cfg_overrides=None):
+    """A manager whose user-settings overlay lives in ``tmp_path``.
+
+    ``overlay`` is the *transcode-section* dict (wrapped into the on-disk
+    ``{"transcode": {...}}`` layout) so callers only think about their keys.
+    """
+    import copy as _copy
+    import json as _json
+
+    from copystation.config import DEFAULTS
+
+    data = _copy.deepcopy(DEFAULTS)
+    data["user_settings_file"] = str(tmp_path / "user-settings.json")
+    if cfg_overrides:
+        data["transcode"].update(cfg_overrides)
+    if overlay is not None:
+        (tmp_path / "user-settings.json").write_text(_json.dumps({"transcode": overlay}))
+    return TranscodeManager(Config(data), _hub(), _FakeBrowse())
+
+
+def test_default_preset_falls_back_to_first_when_unset(tmp_path):
+    mgr = _mgr_with_settings(tmp_path)
+    assert mgr.default_preset == "1080p-h264"   # first configured preset
+    assert mgr.auto_transcode is False
+
+
+def test_invalid_default_preset_falls_back_to_first(tmp_path):
+    mgr = _mgr_with_settings(tmp_path, cfg_overrides={"default_preset": "bogus"})
+    assert mgr.default_preset == "1080p-h264"
+
+
+def test_config_defaults_used_without_overlay(tmp_path):
+    mgr = _mgr_with_settings(
+        tmp_path, cfg_overrides={"default_preset": "720p-h264", "auto_transcode": True})
+    assert mgr.default_preset == "720p-h264" and mgr.auto_transcode is True
+
+
+def test_overlay_wins_over_config(tmp_path):
+    mgr = _mgr_with_settings(
+        tmp_path,
+        overlay={"default_preset": "540p-h264", "auto_transcode": True},
+        cfg_overrides={"default_preset": "720p-h264", "auto_transcode": False})
+    assert mgr.default_preset == "540p-h264" and mgr.auto_transcode is True
+
+
+def test_set_settings_persists_and_validates(tmp_path):
+    import json as _json
+
+    mgr = _mgr_with_settings(tmp_path)
+    out = mgr.set_settings(default_preset="720p-h264", auto_transcode=True)
+    assert out == {"default_preset": "720p-h264", "auto_transcode": True}
+    assert _json.loads((tmp_path / "user-settings.json").read_text()) == {
+        "transcode": {"auto_transcode": True, "default_preset": "720p-h264"}}
+    # a fresh manager over the same overlay reloads the persisted values
+    mgr2 = TranscodeManager(mgr._config, _hub(), _FakeBrowse())
+    assert mgr2.default_preset == "720p-h264" and mgr2.auto_transcode is True
+    # only the provided field changes
+    mgr.set_settings(auto_transcode=False)
+    assert mgr.default_preset == "720p-h264" and mgr.auto_transcode is False
+    # an unknown preset is rejected
+    with pytest.raises(UnknownPreset):
+        mgr.set_settings(default_preset="nope")
+
+
+def test_snapshot_exposes_settings_and_queue(tmp_path):
+    mgr = _mgr_with_settings(tmp_path)
+    snap = mgr.snapshot()
+    assert snap["default_preset"] == "1080p-h264"
+    assert snap["auto_transcode"] is False
+    assert snap["queue"] == {"pending": 0, "index": 0, "count": 0,
+                             "percent": 0.0, "eta_seconds": None}
+
+
+def test_transcode_overlay_prunes_stale_keys(tmp_path):
+    # A settings file left by another version with a since-removed key must load
+    # robustly: the unknown key is dropped from the overlay (never config.yaml).
+    import json as _json
+
+    (tmp_path / "user-settings.json").write_text(_json.dumps(
+        {"transcode": {"auto_transcode": True, "default_preset": "540p-h264",
+                       "legacy_key": "x"}}))
+    mgr = _mgr_with_settings(tmp_path)
+    assert mgr.auto_transcode is True and mgr.default_preset == "540p-h264"
+    assert _json.loads((tmp_path / "user-settings.json").read_text()) == {
+        "transcode": {"auto_transcode": True, "default_preset": "540p-h264"}}
+
+
+def test_auto_transcode_mirrored_onto_shared_state(tmp_path):
+    # The manager mirrors the auto-transcode flag onto StationState (for the
+    # e-paper badge / web header) at construction and whenever it changes.
+    hub = _hub()
+    import copy as _copy
+
+    from copystation.config import DEFAULTS
+    data = _copy.deepcopy(DEFAULTS)
+    data["user_settings_file"] = str(tmp_path / "user-settings.json")
+    data["transcode"]["auto_transcode"] = True
+    mgr = TranscodeManager(Config(data), hub, _FakeBrowse())
+    assert hub.state.snapshot()["auto_transcode"] is True   # set at init
+    mgr.set_settings(auto_transcode=False)
+    assert hub.state.snapshot()["auto_transcode"] is False  # updated on change
+
+
+# --------------------------------------------------------------------------- #
+# Auto-transcode submission + queue aggregate + the batch worker
+# --------------------------------------------------------------------------- #
+
+def test_submit_auto_queues_jobs_with_estimates(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr_with_perf(tmp_path, monkeypatch)  # seeds a 1080p estimate
+    (card / "b.mp4").write_bytes(b"\x00" * 32)
+    res = mgr.submit_auto("sdb1", ["clip.mp4", "b.mp4"], mount_root=card,
+                          preset_id="1080p-h264")
+    assert res == {"count": 2, "preset": "1080p-h264",
+                   "jobs": res["jobs"]} and len(res["jobs"]) == 2
+    jobs = {j["input_path"]: j for j in mgr.snapshot()["jobs"]}
+    assert set(jobs) == {"clip.mp4", "b.mp4"}
+    assert all(j["output_device"] == "sdb1" and j["preset"] == "1080p-h264"
+               for j in jobs.values())
+    # the perf seed produced a positive per-job estimate
+    assert all(j["estimate_seconds"] and j["estimate_seconds"] > 0
+               for j in jobs.values())
+
+
+def test_submit_auto_uses_default_preset_when_unset(tmp_path, monkeypatch):
+    from copystation.settings_store import SettingsStore
+
+    mgr, card = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    mgr._settings = SettingsStore(str(tmp_path / "user-settings.json")).section("transcode")
+    mgr.set_settings(default_preset="1080p-h264")
+    res = mgr.submit_auto("sdb1", ["clip.mp4"], mount_root=card)  # no preset_id
+    assert res["preset"] == "1080p-h264"
+
+
+def test_queue_aggregate_counts_pending_and_sums_estimates(tmp_path, monkeypatch):
+    mgr, card = _cubie_mgr_with_perf(tmp_path, monkeypatch)
+    (card / "b.mp4").write_bytes(b"\x00" * 32)
+    mgr.submit_auto("sdb1", ["clip.mp4", "b.mp4"], mount_root=card,
+                    preset_id="1080p-h264")
+    q = mgr.snapshot()["queue"]
+    assert q["pending"] == 2 and q["count"] == 2 and q["index"] == 1
+    assert q["percent"] == 0.0
+    assert q["eta_seconds"] and q["eta_seconds"] > 0   # sum of both estimates
+
+
+def test_run_batch_processes_all_jobs_and_restores_phase_once(tmp_path, monkeypatch):
+    card = _card(tmp_path)
+    (card / "b.mp4").write_bytes(b"\x00" * 32)
+    hub = _hub()
+    hub.state.set_phase(State.DETECTING)   # a card was detected before the batch
+    mgr = _mgr(_FakeBrowse({"sdb1": card}), hub=hub)
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter(["out_time=00:00:05.000000\n", "progress=end\n"])
+
+        def wait(self):
+            self._dst.write_bytes(b"x")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    mgr.submit_auto("sdb1", ["clip.mp4", "b.mp4"], mount_root=card,
+                    preset_id="720p-h264")
+    first = mgr._queue.get_nowait()   # the worker pulls the first job, then _run_batch
+    mgr._run_batch(first)
+
+    statuses = {j["input_path"]: j["status"] for j in mgr.snapshot()["jobs"]}
+    assert statuses == {"clip.mp4": "done", "b.mp4": "done"}
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").exists()
+    assert (card / "Transcoded" / "b_720p-h264.mp4").exists()
+    # The phase is restored ONCE, after the whole batch (not flashed per file).
+    assert hub.state.phase is State.DETECTING
+    assert hub.state.snapshot()["transcode"]["active"] is False
+
+
 def test_process_cubie_falls_back_to_cpu_for_unsupported_source(tmp_path, monkeypatch):
     card = _card(tmp_path)
     browse = _FakeBrowse({"sdb1": card})
@@ -1063,9 +1250,19 @@ class _FakeManager:
         return {
             "available": self._available,
             "output_dirname": "Transcoded",
+            "default_preset": "720p-h264",
+            "auto_transcode": False,
             "presets": [{"id": "720p-h264", "label": "720p H.264"}],
+            "queue": {"pending": 0, "index": 0, "count": 0,
+                      "percent": 0.0, "eta_seconds": None},
             "jobs": self.jobs,
         }
+
+    def set_settings(self, default_preset=None, auto_transcode=None):
+        if default_preset == "bad":
+            raise UnknownPreset("bad")
+        return {"default_preset": default_preset or "720p-h264",
+                "auto_transcode": bool(auto_transcode)}
 
     def submit(self, device, path, preset, output_device=None):
         if not self._available:
@@ -1184,6 +1381,38 @@ def test_api_folder_unavailable_is_501():
     client = _client(_FakeManager(available=False))
     assert client.post("/api/transcode/folder",
                        json={"device": "sdb1", "path": "D", "preset": "720p-h264"}).status_code == 501
+
+
+def test_api_transcode_snapshot_exposes_settings_and_queue():
+    client = _client(_FakeManager())
+    body = client.get("/api/transcode").json()
+    assert body["default_preset"] == "720p-h264"
+    assert body["auto_transcode"] is False
+    assert body["queue"]["pending"] == 0
+
+
+def test_api_transcode_settings_persists():
+    client = _client(_FakeManager())
+    r = client.post("/api/transcode/settings",
+                    json={"default_preset": "720p-h264", "auto_transcode": True})
+    assert r.status_code == 200
+    assert r.json() == {"default_preset": "720p-h264", "auto_transcode": True}
+
+
+def test_api_transcode_settings_bad_preset_is_400():
+    client = _client(_FakeManager())
+    r = client.post("/api/transcode/settings", json={"default_preset": "bad"})
+    assert r.status_code == 400
+
+
+def test_api_transcode_settings_allowed_during_copy():
+    # The switch/preset must be changeable mid-copy (evaluated only when the copy
+    # finishes), so the settings endpoint is NOT gated on the COPYING phase.
+    state = StationState()
+    state.set_phase(State.COPYING)
+    client = TestClient(create_app(state, Config(), transcode=_FakeManager()))
+    r = client.post("/api/transcode/settings", json={"auto_transcode": True})
+    assert r.status_code == 200
 
 
 def test_transcode_routes_absent_without_manager():

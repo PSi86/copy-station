@@ -70,6 +70,10 @@ class StationState:
         # Whether the WLAN access point is currently up. Independent of the copy
         # cycle (survives reset_to_ready), so the display keeps showing it.
         self._ap_active = False
+        # Whether auto-transcode is currently enabled (a setting, not a phase).
+        # Mirrored from the TranscodeManager so the e-paper can show a badge and a
+        # button toggle reflects instantly. Survives reset_to_ready.
+        self._auto_transcode = False
         # Current video transcode (overrides the copy status while active).
         self._transcode: dict[str, Any] = {"active": False}
 
@@ -126,6 +130,11 @@ class StationState:
         with self._lock:
             self._ap_active = bool(active)
 
+    def set_auto_transcode(self, active: bool) -> None:
+        """Record whether auto-transcode is enabled (e-paper badge + web)."""
+        with self._lock:
+            self._auto_transcode = bool(active)
+
     def begin_transcode(self, name: str) -> None:
         """Mark a transcode as running (phase TRANSCODING overrides everything)."""
         with self._lock:
@@ -157,6 +166,19 @@ class StationState:
                     self._transcode["input_size"] = int(input_size)
                 if fps is not None:
                     self._transcode["fps"] = float(fps)
+
+    def set_transcode_queue(self, pending: int, index: int, count: int,
+                            eta_seconds: Optional[float], percent: float) -> None:
+        """Record the transcode queue aggregate (pending count, position, total
+        remaining time, overall %) so the e-paper panel can show the whole batch,
+        not just the current file. No-op unless a transcode is active."""
+        with self._lock:
+            if self._transcode.get("active"):
+                self._transcode["queue_pending"] = int(pending)
+                self._transcode["queue_index"] = int(index)
+                self._transcode["queue_count"] = int(count)
+                self._transcode["queue_eta_seconds"] = eta_seconds
+                self._transcode["queue_percent"] = float(percent)
 
     def finish_transcode(self) -> None:
         with self._lock:
@@ -241,6 +263,7 @@ class StationState:
                 "target": self._target.as_dict(),
                 "devices": list(self._devices),
                 "wifi_ap": self._ap_active,
+                "auto_transcode": self._auto_transcode,
                 "transcode": self._transcode_snapshot_locked(),
                 "events": list(reversed(self._events)),  # newest first
             }
@@ -266,6 +289,13 @@ class StationState:
             "fps": tr.get("fps"),
             "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
             "eta_seconds": round(eta, 1) if eta is not None else None,
+            "queue": {
+                "pending": int(tr.get("queue_pending", 0) or 0),
+                "index": int(tr.get("queue_index", 0) or 0),
+                "count": int(tr.get("queue_count", 0) or 0),
+                "eta_seconds": tr.get("queue_eta_seconds"),
+                "percent": round(float(tr.get("queue_percent", 0.0) or 0.0), 1),
+            },
         }
 
 

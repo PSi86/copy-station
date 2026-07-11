@@ -111,12 +111,18 @@ class ViewModel:
     error_text: str
     version: str
     ap_active: bool = False
+    auto_transcode_active: bool = False
     transcode_active: bool = False
     transcode_name: str = ""
     transcode_encoder: str = ""
     transcode_size_text: str = ""
     transcode_fps_text: str = ""
     elapsed_text: str = ""
+    # Queue aggregate (only meaningful for a multi-file batch): "i/n" position and
+    # the current file's own percent (shown as text, since for a batch the main bar
+    # tracks the WHOLE queue instead of the single file).
+    transcode_queue_text: str = ""
+    transcode_file_text: str = ""
 
     def storage_line(self, storage: StorageView) -> str:
         """``used / capacity`` for a storage row (``--`` when absent)."""
@@ -149,8 +155,18 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
     transcode = snapshot.get("transcode") or {}
     tr_active = bool(transcode.get("active")) and phase == "transcoding"
 
+    queue = (transcode.get("queue") or {}) if tr_active else {}
+    q_count = int(queue.get("count", 0) or 0)
+    q_index = int(queue.get("index", 0) or 0)
+    # A real batch (>1 file): show the WHOLE queue on the main bar (it only grows,
+    # so it partial-refreshes cleanly between files) and the current file's own
+    # progress as text. A single file keeps the per-file bar as before.
+    batch = tr_active and q_count > 1
+    file_percent = int(round(float(transcode.get("percent", 0.0) or 0.0)))
+
     if tr_active:
-        percent = int(round(float(transcode.get("percent", 0.0) or 0.0)))
+        percent = int(round(float(queue.get("percent", 0.0) or 0.0))) if batch \
+            else file_percent
     else:
         percent = int(round(float(snapshot.get("percent", 0.0) or 0.0)))
     show_progress = tr_active or phase in ("copying", "success")
@@ -167,15 +183,21 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         devices=devices,
         device_count=len(devices),
         speed_text=f"{fmt_bytes(speed)}/s" if speed else "",
-        eta_text=fmt_duration(transcode.get("eta_seconds")) if tr_active
-        else fmt_duration(snapshot.get("eta_seconds")),
+        # For a batch the footer ETA is the whole queue's remaining time (Σ),
+        # otherwise the single running job's / copy's ETA.
+        eta_text=fmt_duration(queue.get("eta_seconds")) if batch
+        else (fmt_duration(transcode.get("eta_seconds")) if tr_active
+              else fmt_duration(snapshot.get("eta_seconds"))),
         error_text=str(snapshot.get("error", "") or ""),
         version=version,
         ap_active=bool(snapshot.get("wifi_ap", False)),
+        auto_transcode_active=bool(snapshot.get("auto_transcode", False)),
         transcode_active=tr_active,
         transcode_name=str(transcode.get("name", "") or ""),
         transcode_encoder=str(transcode.get("encoder", "") or ""),
         transcode_size_text=fmt_bytes(transcode.get("input_size")) if (tr_active and transcode.get("input_size")) else "",
         transcode_fps_text=(f"{round(transcode['fps'])} fps" if (tr_active and transcode.get("fps")) else ""),
         elapsed_text=fmt_duration(transcode.get("elapsed_seconds")) if tr_active else "",
+        transcode_queue_text=(f"{q_index}/{q_count}" if batch else ""),
+        transcode_file_text=(f"file {file_percent}%" if batch else ""),
     )

@@ -290,3 +290,57 @@ def test_action_factories_build_without_running():
     assert callable(systemctl_action("poweroff"))
     assert callable(systemctl_action("reboot"))
     assert callable(command_action("echo hi"))
+
+
+# ----- auto_transcode action --------------------------------------------------
+
+class _FakeTc:
+    def __init__(self, auto=False):
+        self.auto_transcode = auto
+        self.calls = []
+
+    def set_settings(self, default_preset=None, auto_transcode=None):
+        if auto_transcode is not None:
+            self.auto_transcode = bool(auto_transcode)
+        self.calls.append({"default_preset": default_preset,
+                           "auto_transcode": auto_transcode})
+        return {"default_preset": default_preset, "auto_transcode": self.auto_transcode}
+
+
+class _FakeHub:
+    def __init__(self):
+        self.events = []
+        self.logs = []
+
+    def signal(self, event):
+        self.events.append(event)
+
+    def log_event(self, msg, level="info"):
+        self.logs.append(msg)
+
+
+def test_auto_transcode_action_resolves_and_toggles():
+    from copystation.buttons import auto_transcode_toggle_action
+    from copystation.status import Event
+
+    tc = _FakeTc(auto=False)
+    hub = _FakeHub()
+    action = _resolve_action("b", "single_click", "auto_transcode", hub=hub, transcode=tc)
+    assert callable(action)
+
+    action()  # off -> on
+    assert tc.auto_transcode is True
+    assert hub.events[-1] is Event.AUTO_TRANSCODE_ENABLED
+    action()  # on -> off
+    assert tc.auto_transcode is False
+    assert hub.events[-1] is Event.AUTO_TRANSCODE_DISABLED
+
+    # The factory is also directly usable.
+    assert callable(auto_transcode_toggle_action(tc, hub))
+
+
+def test_auto_transcode_action_noop_without_manager(caplog):
+    action = _resolve_action("b", "single_click", "auto_transcode", transcode=None)
+    with caplog.at_level(logging.WARNING, logger="copystation.buttons"):
+        action()  # must not raise
+    assert "transcoding is not enabled" in caplog.text

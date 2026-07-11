@@ -103,6 +103,33 @@ runs in the background with a live progress bar; the result is written to a
 `Transcoded/` folder (`transcode.output_dirname`) on the **target volume**
 (read-write) and is downloadable through the file browser.
 
+**Auto-transcode after a copy.** With `transcode.auto_transcode: true` (or the
+**Auto-transcode after copy** switch in the web UI's *Transcode* card), a
+successful copy automatically queues a transcode of **every just-copied video
+file** -- onto the same target's `Transcoded/` folder, using the **default
+preset**. Crucially the **source card is released (unmounted) before the batch
+starts**, so you can pull it and walk away while the transcodes run on the
+target alone. The switch and the default preset can be changed **at any time,
+including during a copy** -- they are only read at the **moment the copy
+finishes**, so you decide per copy whether to auto-transcode. Auto-transcode can
+also be toggled from a **user button** (the `auto_transcode` action), and while
+it is on the **e-paper panel shows an `Auto` badge** (next to the `WiFi` one) and
+a WS2812 strip plays a purple blink on each toggle. The default preset is the one
+selected in the *Transcode* card (also preselected in the per-file/folder ⚙
+dialogs); changing it, or the toggle, is saved to the **single runtime-settings
+overlay** `user_settings_file` (`/var/lib/copystation/user-settings.json`) so it
+survives a restart without rewriting your commented `config.yaml`. Until a default
+is ever chosen it is the first preset in the config. That one overlay holds every
+runtime-mutable setting (auto-transcode, the default preset, and the
+[WiFi AP](#wifi-access-point-optional) state, each under its own section) and is
+**self-healing across updates**: on load, any key a newer version renamed or
+removed is dropped from the overlay automatically (the `config.yaml` is never
+touched). A whole batch runs as one job queue under a
+single `Transcoding` phase (the panel does not flash between files), and both the
+**web UI** and the **e-paper panel** show how many transcodes are **pending**,
+the **expected total time** for the queue and an **overall queue progress bar**
+alongside the current file's own progress.
+
 Presets are configurable (`transcode.presets`): each sets a target `height`
 (downscale keeping the aspect ratio; `0` keeps the source resolution), a video
 codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
@@ -252,7 +279,13 @@ hand to use the AP. Verify with `nmcli connection show --active`.
 button gesture to toggle the access point on demand -- the recommended binding is
 **`triple_click`** (see [User button](#user-button-optional)). Each press flips
 the AP based on its current state (on if it was off, off if it was on), with
-clear feedback:
+clear feedback. The chosen state is **persisted** (in the shared
+`user_settings_file`, `/var/lib/copystation/user-settings.json`) and **survives a
+restart independent of `wifi_ap.enabled`** -- the persisted state wins over the
+config, so `enabled` is only the initial value until the first toggle (delete the
+file to fall back to it). On start the daemon reconciles: if you left it off but a
+stale autoconnect profile raised it, it is brought back down. The feedback on each
+toggle:
 
 * the **e-paper display** shows a **`WiFi`** badge in the top-right corner while
   the AP is up (also reflected as a badge in the web header), and
@@ -475,8 +508,10 @@ simply times out.
 
 Each action is `poweroff`, `reboot`, `wifi_ap` (toggle the WLAN access point --
 with a display badge and a WS2812 blink code, see
-[WiFi access point](#wifi-access-point-optional)), `none`, or an arbitrary shell
-command:
+[WiFi access point](#wifi-access-point-optional)), `auto_transcode` (toggle
+auto-transcode on/off -- persisted, with an `Auto` e-paper badge and a purple
+WS2812 blink, see [Video transcoding](#video-transcoding-optional)), `none`, or
+an arbitrary shell command:
 
 ```yaml
 buttons:
@@ -486,7 +521,7 @@ buttons:
     line: 3
     actions:
       hold: poweroff                          # C _ H   -> clean shutdown
-      single_click: { command: "rfkill toggle wlan" }   # C _ C
+      single_click: auto_transcode            # C _ C   -> toggle auto-transcode
       double_click: none                      # C _ C _ C
       triple_click: wifi_ap                   # C _ C _ C _ C -> toggle the WiFi AP
 ```

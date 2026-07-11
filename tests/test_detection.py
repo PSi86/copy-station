@@ -693,3 +693,93 @@ def test_detecting_after_success_clears_stale_role_storage(monkeypatch):
     assert snap["source"]["capacity"] == 0        # stale roles are gone
     assert snap["target"]["capacity"] == 0
     assert [d["name"] for d in snap["devices"]] == ["sd"]
+
+
+# --------------------------------------------------------------------------- #
+# Auto-transcode trigger after a successful copy
+# --------------------------------------------------------------------------- #
+
+class _FakeTranscode:
+    """Records submit_auto calls; models the manager's auto-transcode surface."""
+
+    def __init__(self, auto_transcode=True, default_preset="720p-h264"):
+        self.auto_transcode = auto_transcode
+        self.default_preset = default_preset
+        self.calls = []
+
+    def submit_auto(self, device, rels, mount_root=None, output_device=None,
+                    preset_id=None):
+        self.calls.append({
+            "device": device, "rels": list(rels), "mount_root": mount_root,
+            "output_device": output_device, "preset_id": preset_id,
+        })
+        return {"count": len(rels), "preset": preset_id, "jobs": []}
+
+
+def _auto_watcher(transcode):
+    from copystation.state import StationState, StatusHub
+    from copystation.status import StatusIndicator
+
+    w = DeviceWatcher.__new__(DeviceWatcher)   # bypass pyudev-importing __init__
+    w._transcode = transcode
+    w._hub = StatusHub(StationState(), StatusIndicator())
+    return w
+
+
+def _target_probe(mountpoint):
+    return Probe(
+        sys_name="sdb1", device_node="/dev/sdb1", mountpoint=Path(mountpoint),
+        has_dcim=False, matched_source=False, capacity=256 * GB, free=100 * GB,
+        name="sd",
+    )
+
+
+def _copied_target(tmp_path):
+    """A target root with a transfer folder holding mixed copied files."""
+    dest = tmp_path / "transfer_0001_CAM"
+    (dest / "DCIM" / "100MEDIA").mkdir(parents=True)
+    (dest / "DCIM" / "100MEDIA" / "a.mp4").write_bytes(b"x")
+    (dest / "DCIM" / "100MEDIA" / "b.MOV").write_bytes(b"x")
+    (dest / "DCIM" / "100MEDIA" / "notes.txt").write_text("x")
+    (dest / "DCIM" / "100MEDIA" / "cover.jpg").write_bytes(b"x")
+    return dest
+
+
+def test_auto_transcode_queues_only_video_files(tmp_path):
+    dest = _copied_target(tmp_path)
+    target = _target_probe(tmp_path)
+    tc = _FakeTranscode()
+    _auto_watcher(tc)._maybe_queue_auto_transcode(target, dest)
+
+    assert len(tc.calls) == 1
+    call = tc.calls[0]
+    assert call["device"] == "sdb1" and call["output_device"] == "sdb1"
+    assert call["preset_id"] == "720p-h264"
+    assert call["mount_root"] == tmp_path
+    assert sorted(call["rels"]) == [
+        "transfer_0001_CAM/DCIM/100MEDIA/a.mp4",
+        "transfer_0001_CAM/DCIM/100MEDIA/b.MOV",
+    ]
+
+
+def test_auto_transcode_noop_when_disabled(tmp_path):
+    dest = _copied_target(tmp_path)
+    tc = _FakeTranscode(auto_transcode=False)
+    _auto_watcher(tc)._maybe_queue_auto_transcode(_target_probe(tmp_path), dest)
+    assert tc.calls == []
+
+
+def test_auto_transcode_noop_without_manager(tmp_path):
+    dest = _copied_target(tmp_path)
+    # No transcode manager configured -> must not raise.
+    _auto_watcher(None)._maybe_queue_auto_transcode(_target_probe(tmp_path), dest)
+
+
+def test_auto_transcode_noop_when_no_videos(tmp_path):
+    dest = tmp_path / "transfer_0002_CAM" / "DCIM"
+    dest.mkdir(parents=True)
+    (dest / "readme.txt").write_text("x")
+    tc = _FakeTranscode()
+    _auto_watcher(tc)._maybe_queue_auto_transcode(
+        _target_probe(tmp_path), tmp_path / "transfer_0002_CAM")
+    assert tc.calls == []

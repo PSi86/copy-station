@@ -51,6 +51,13 @@ class TranscodeRequest(BaseModel):
     preset: str
     output_device: Optional[str] = None
 
+
+class TranscodeSettingsRequest(BaseModel):
+    """POST /api/transcode/settings body (both fields optional)."""
+
+    default_preset: Optional[str] = None
+    auto_transcode: Optional[bool] = None
+
 if TYPE_CHECKING:
     from ..config import Config
     from ..state import StationState
@@ -253,6 +260,19 @@ def create_app(
         @app.get("/api/transcode")
         def get_transcode() -> JSONResponse:
             return JSONResponse(transcode.snapshot())
+
+        @app.post("/api/transcode/settings")
+        def post_transcode_settings(req: TranscodeSettingsRequest) -> JSONResponse:
+            # Persist the default preset and/or the auto-transcode toggle. Both
+            # fields are optional; an unknown preset is a 400.
+            try:
+                settings = transcode.set_settings(
+                    default_preset=req.default_preset,
+                    auto_transcode=req.auto_transcode,
+                )
+            except UnknownPreset as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(settings)
 
         @app.get("/api/transcode/plan")
         def get_transcode_plan(

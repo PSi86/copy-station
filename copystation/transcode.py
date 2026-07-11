@@ -39,6 +39,7 @@ from .encoders import (
     select_encoders,
 )
 from .mounts import BrowseError, NotFound, safe_resolve
+from .settings_store import DEFAULT_USER_SETTINGS_FILE, SettingsStore
 from .status import State
 
 _LOG = logging.getLogger("copystation.transcode")
@@ -364,7 +365,7 @@ DEFAULT_PERF: dict = {
 class TranscodeManager:
     """Single-worker transcode job queue backed by ffmpeg."""
 
-    def __init__(self, config: Any, hub: Any, browse: Any) -> None:
+    def __init__(self, config: Any, hub: Any, browse: Any, settings: Any = None) -> None:
         if browse is None:
             raise TranscodeError("transcoding requires the file browser (mounts)")
         self._config = config
@@ -382,6 +383,30 @@ class TranscodeManager:
         # Learned wall-time-per-frame per (source codec+resolution, preset), used
         # to estimate a new job's duration. Persisted so it survives restarts.
         self._perf_file = str(tc.get("perf_file", "/var/lib/copystation/transcode-perf.json"))
+        # Runtime-mutable settings (default preset + auto-transcode), persisted to
+        # an overlay file so a web-UI change survives a restart without rewriting
+        # the (commented) config. The overlay, when present, wins over the config.
+        # The "transcode" section of the shared user-settings overlay. The daemon
+        # passes the shared store's section (so transcode + wifi_ap share ONE file
+        # with no cross-writer races); when constructed standalone (tests, the web
+        # in simulation) we open our own store at the configured path.
+        self._settings = settings if settings is not None else SettingsStore(
+            config.get("user_settings_file", DEFAULT_USER_SETTINGS_FILE)
+        ).section("transcode")
+        self._settings_lock = threading.Lock()
+        self._auto_transcode = (
+            bool(self._settings.get("auto_transcode"))
+            if self._settings.has("auto_transcode")
+            else bool(tc.get("auto_transcode", False))
+        )
+        self._default_preset = self._resolve_default_preset(
+            self._settings.get("default_preset")
+            if self._settings.has("default_preset")
+            else tc.get("default_preset")
+        )
+        # Mirror the auto-transcode setting onto the shared state so the e-paper
+        # badge and the web header reflect it (and a button toggle updates it live).
+        self._state.set_auto_transcode(self._auto_transcode)
         self._available = ffmpeg_available()
         # Detect the board and probe which encoders ffmpeg actually has, once at
         # startup, so hardware acceleration can be picked per job without re-probing.
@@ -399,6 +424,8 @@ class TranscodeManager:
         self._jobs: dict[int, dict] = {}
         self._order: list[int] = []
         self._seq = 0
+        # Jobs finished in the current batch/run, for the queue's overall progress.
+        self._run_done = 0
         self._current_proc: Optional[subprocess.Popen] = None
         self._current_id: Optional[int] = None
         self._worker: Optional[threading.Thread] = None
@@ -436,6 +463,64 @@ class TranscodeManager:
     def _has_active_job(self) -> bool:
         with self._lock:
             return any(j["status"] in ("queued", "running") for j in self._jobs.values())
+
+    # ----- runtime-mutable settings (default preset + auto-transcode) ------------
+
+    def _first_preset_id(self) -> Optional[str]:
+        for preset in self._presets:
+            pid = preset.get("id")
+            if pid is not None:
+                return str(pid)
+        return None
+
+    def _is_valid_preset(self, preset_id: Any) -> bool:
+        return any(str(p.get("id")) == str(preset_id) for p in self._presets)
+
+    def _resolve_default_preset(self, requested: Any) -> Optional[str]:
+        """A valid preset id: the requested one if configured, else the first."""
+        if requested is not None and self._is_valid_preset(requested):
+            return str(requested)
+        return self._first_preset_id()
+
+    @property
+    def default_preset(self) -> Optional[str]:
+        """The preset preselected in the web UI dialogs / used by auto-transcode."""
+        with self._settings_lock:
+            return self._default_preset
+
+    @property
+    def auto_transcode(self) -> bool:
+        """Whether a successful copy auto-queues a transcode of its files."""
+        with self._settings_lock:
+            return self._auto_transcode
+
+    def set_settings(self, default_preset: Any = None,
+                     auto_transcode: Any = None) -> dict:
+        """Update and persist the runtime settings; return the current values.
+
+        Only the provided fields change. An unknown ``default_preset`` raises
+        :class:`UnknownPreset`.
+        """
+        with self._settings_lock:
+            changed: dict[str, Any] = {}
+            if default_preset is not None:
+                if not self._is_valid_preset(default_preset):
+                    raise UnknownPreset(f"unknown preset {default_preset!r}")
+                self._default_preset = str(default_preset)
+                changed["default_preset"] = self._default_preset
+            if auto_transcode is not None:
+                self._auto_transcode = bool(auto_transcode)
+                changed["auto_transcode"] = self._auto_transcode
+            if changed:
+                self._settings.update(**changed)  # persist only the changed key(s)
+            _LOG.info("Transcode settings updated (default_preset=%s, auto_transcode=%s)",
+                      self._default_preset, self._auto_transcode)
+            result = {"default_preset": self._default_preset,
+                      "auto_transcode": self._auto_transcode}
+        # Reflect the (possibly changed) auto-transcode flag on the shared state
+        # for the e-paper badge / web header. Done outside the settings lock.
+        self._state.set_auto_transcode(result["auto_transcode"])
+        return result
 
     # ----- probing / planning / performance model -------------------------------
 
@@ -611,19 +696,105 @@ class TranscodeManager:
             self._perf[key] = entry
         self._save_perf()
 
+    # ----- per-job duration estimates + queue aggregate -------------------------
+
+    def _estimate_via_browse(self, device: str, rel: str, preset_id: str) -> Optional[float]:
+        """Best-effort duration estimate of ``device:rel`` (read-only mount)."""
+        try:
+            src = self._browse.resolve_input(device, rel)
+            return self._estimate(self._probe(src), preset_id)
+        except Exception:  # pragma: no cover - estimate is best-effort
+            return None
+
+    def _estimate_for_path(self, mount_root: Any, rel: str,
+                           preset_id: str) -> Optional[float]:
+        """Best-effort estimate from an already-mounted path (no browse mount).
+
+        Used by auto-transcode, which is called by the daemon while the target is
+        still mounted at ``mount_root`` -- probing that path directly avoids a
+        second (read-only) mount of a device the daemon holds read-write.
+        """
+        try:
+            return self._estimate(self._probe(Path(mount_root) / rel), preset_id)
+        except Exception:  # pragma: no cover - estimate is best-effort
+            return None
+
+    def _queue_aggregate_locked(self, now: float) -> dict:
+        """Queue-wide progress (assumes ``self._lock`` is held).
+
+        ``pending`` counts queued+running jobs; ``count``/``index`` frame it as
+        "job index of count" within the current run; ``percent`` is a count-based
+        overall fraction (robust without estimates); ``eta_seconds`` sums the
+        remaining time (the running job's live ETA + the queued jobs' estimates),
+        ``None`` when nothing could be estimated.
+        """
+        run_done = self._run_done
+        running: Optional[dict] = None
+        queued: list[dict] = []
+        for i in self._order:
+            j = self._jobs.get(i)
+            if j is None:
+                continue
+            if j["status"] == "running":
+                running = j
+            elif j["status"] == "queued":
+                queued.append(j)
+        pending = (1 if running is not None else 0) + len(queued)
+        if pending == 0:
+            return {"pending": 0, "index": 0, "count": run_done,
+                    "percent": 0.0, "eta_seconds": None}
+        count = run_done + pending
+        run_frac = 0.0
+        if running is not None:
+            run_frac = max(0.0, min(1.0, float(running.get("percent") or 0) / 100.0))
+        percent = round((run_done + run_frac) / count * 100.0, 1) if count else 0.0
+        eta = 0.0
+        known = False
+        if running is not None:
+            remaining = self._public_job(running, now).get("eta_seconds")
+            if remaining is None:
+                remaining = running.get("estimate_seconds")
+            if remaining is not None:
+                eta += remaining
+                known = True
+        for j in queued:
+            est = j.get("estimate_seconds")
+            if est is not None:
+                eta += est
+                known = True
+        return {"pending": pending, "index": run_done + 1, "count": count,
+                "percent": percent, "eta_seconds": round(eta, 1) if known else None}
+
+    def _push_queue_state(self) -> None:
+        """Mirror the queue aggregate into StationState (for the e-paper panel)."""
+        now = time.monotonic()
+        with self._lock:
+            q = self._queue_aggregate_locked(now)
+        self._state.set_transcode_queue(
+            pending=q["pending"], index=q["index"], count=q["count"],
+            eta_seconds=q["eta_seconds"], percent=q["percent"],
+        )
+
     def snapshot(self) -> dict:
         now = time.monotonic()
         with self._lock:
             jobs = [self._public_job(self._jobs[i], now) for i in reversed(self._order)]
+            queue = self._queue_aggregate_locked(now)
+        with self._settings_lock:
+            default_preset = self._default_preset
+            auto_transcode = self._auto_transcode
         return {
             "available": self._available,
             "output_dirname": self._output_dirname,
             "board": self._board,
             "acceleration": self._acceleration,
+            "default_preset": default_preset,
+            "auto_transcode": auto_transcode,
             "presets": [
                 {"id": p.get("id"), "label": p.get("label", p.get("id"))}
                 for p in self._presets
             ],
+            "queue": queue,
             "jobs": jobs,
         }
 
@@ -667,6 +838,7 @@ class TranscodeManager:
             "perf_stable": False,  # internal: True once that estimate stabilised
             "input_size": None,    # source file size in bytes
             "output_size": None,   # transcoded file size in bytes (once done)
+            "estimate_seconds": None,  # predicted wall time (from the perf model)
             "ram_buffered": False, # True if staged through a RAM tmpfs
             "fps": None,           # live encode rate (frames/second)
             "speed": None,         # ffmpeg speed relative to realtime (e.g. "2.5x")
@@ -736,13 +908,16 @@ class TranscodeManager:
         if not names:
             raise TranscodeError("no video files in this folder")
         out_dev = output_device or input_device
+        rels = [f"{folder}/{name}" if folder else name for name in names]
+        estimates = {rel: self._estimate_via_browse(input_device, rel, preset_id)
+                     for rel in rels}
         snaps: List[dict] = []
         with self._lock:
-            for name in names:
-                rel = f"{folder}/{name}" if folder else name
+            for rel in rels:
                 self._seq += 1
                 job_id = self._seq
                 job = self._new_job(job_id, input_device, rel, out_dev, preset_id)
+                job["estimate_seconds"] = estimates.get(rel)
                 self._jobs[job_id] = job
                 self._order.append(job_id)
                 snaps.append(dict(job))
@@ -753,6 +928,51 @@ class TranscodeManager:
         _LOG.info("Transcode batch queued (%d files): %s:%s -> %s [%s]",
                   len(snaps), input_device, folder or "/", out_dev, preset_id)
         return {"jobs": snaps, "count": len(snaps)}
+
+    def submit_auto(
+        self,
+        input_device: str,
+        rels: List[str],
+        mount_root: Any = None,
+        output_device: Optional[str] = None,
+        preset_id: Optional[str] = None,
+    ) -> dict:
+        """Queue one job per already-listed file, for auto-transcode after a copy.
+
+        Called by the copy daemon while it still holds ``operation_lock`` (phase
+        SUCCESS, no active job), so -- unlike :meth:`submit`/:meth:`submit_folder`
+        -- it does not refuse on busy state; it just enqueues. ``rels`` are volume-
+        relative paths the caller already filtered to videos. ``mount_root`` (the
+        daemon's target mountpoint) is used only to estimate each job's duration
+        without a second mount of the device. ``preset_id`` defaults to the
+        persisted :attr:`default_preset`.
+        """
+        if not self._available:
+            raise TranscodeUnavailable("ffmpeg is not installed on the station")
+        preset = preset_id or self.default_preset
+        if not preset:
+            raise TranscodeError("no transcode preset configured")
+        self._preset(preset)  # validate -> UnknownPreset
+        out_dev = output_device or input_device
+        estimates = ({rel: self._estimate_for_path(mount_root, rel, preset)
+                      for rel in rels} if mount_root is not None else {})
+        snaps: List[dict] = []
+        with self._lock:
+            for rel in rels:
+                self._seq += 1
+                job_id = self._seq
+                job = self._new_job(job_id, input_device, rel, out_dev, preset)
+                job["estimate_seconds"] = estimates.get(rel)
+                self._jobs[job_id] = job
+                self._order.append(job_id)
+                snaps.append(dict(job))
+            self._trim_history()
+        for snap in snaps:
+            self._queue.put(snap["id"])
+        self._ensure_worker()
+        _LOG.info("Auto-transcode batch queued (%d files): %s -> %s [%s]",
+                  len(snaps), input_device, out_dev, preset)
+        return {"jobs": snaps, "count": len(snaps), "preset": preset}
 
     def cancel(self, job_id: int) -> bool:
         with self._lock:
@@ -783,118 +1003,172 @@ class TranscodeManager:
                 job_id = self._queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-            self._process(job_id)
+            self._run_batch(job_id)
+
+    def _prev_phase_for_run(self) -> State:
+        """The phase to restore when the batch finishes (never TRANSCODING)."""
+        prev = self._state.phase
+        return State.READY if prev is State.TRANSCODING else prev
+
+    def _finish_run(self, prev_phase: State, last_error: Optional[str]) -> None:
+        """End a run: surface the last error (ERROR phase) or restore ``prev_phase``."""
+        with self._lock:
+            self._run_done = 0
+        if last_error is not None:
+            self._hub.fail_transcode(f"Transcode failed: {last_error}")
+        else:
+            self._hub.finish_transcode(prev_phase)
+
+    def _run_batch(self, first_job_id: int) -> None:
+        """Run a whole queue drain as ONE operation under a single lock + phase.
+
+        Holding ``operation_lock`` and the TRANSCODING phase across every queued
+        file (rather than per file) keeps the display stable for a multi-file
+        batch -- the phase does not flash between files -- and closes the gap where
+        the copy daemon could otherwise mount a card between two transcode files.
+        A per-file failure/cancel is recorded on its job and the batch continues;
+        the phase is restored (or ERROR shown) once the queue drains.
+        """
+        with self._state.operation_lock:
+            prev_phase = self._prev_phase_for_run()
+            with self._lock:
+                self._run_done = 0
+            last_error: Optional[str] = None
+            job_id = first_job_id
+            while True:
+                err = self._process_one(job_id)
+                if err is not None:
+                    last_error = err
+                with self._lock:
+                    self._run_done += 1
+                self._push_queue_state()  # reflect the advanced run position
+                try:
+                    job_id = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._finish_run(prev_phase, last_error)
+
+    def _process(self, job_id: int) -> None:
+        """Run a single job as a one-item batch (retained for tests)."""
+        with self._state.operation_lock:
+            prev_phase = self._prev_phase_for_run()
+            with self._lock:
+                self._run_done = 0
+            err = self._process_one(job_id)
+            with self._lock:
+                self._run_done += 1
+            self._finish_run(prev_phase, err)
+
+    def _process_one(self, job_id: int) -> Optional[str]:
+        """Encode one queued job. Returns an error message, or ``None`` on
+        success/cancel/skip. Does NOT take ``operation_lock`` or change the phase
+        (the batch owns both) -- only marks the job and updates the queue state.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job["status"] != "queued":
+                return None  # canceled before it started, or already handled
+            input_device = job["input_device"]
+            input_path = job["input_path"]
+            output_device = job["output_device"]
+            preset_id = job["preset"]
+
+        started = time.monotonic()
+        self._set(job_id, status="running", started=started)
+        out_name = output_name(Path(input_path).name, preset_id)
+        out_rel = f"{self._output_dirname}/{out_name}"
+        self._set(job_id, filename=out_name, output_path=out_rel)
+        same_device = input_device == output_device
+        # Update the current-file name on every backend (phase already TRANSCODING).
+        self._hub.begin_transcode(Path(input_path).name)
+        self._push_queue_state()
+        # Source media info, captured while the volume is still mounted so the perf
+        # model can be trained even from the cancel handler below (which runs after
+        # the ``finally`` has unmounted the volume -- a re-probe there would fail).
+        src_info: Optional[dict] = None
+        try:
+            # A block device can't be mounted read-only and read-write at once
+            # (shared superblock -> the read-only one wins), so drop any browse
+            # mount of the output device before mounting it read-write. Under the
+            # operation lock the daemon holds no mount of it either.
+            self._browse.release(output_device)
+            out_root = self._browse.mount_rw(output_device)
+            try:
+                # Read the input from the read-write mount when it is the same
+                # device; otherwise mount the (different) input device read-only.
+                in_root = out_root if same_device else self._browse.mount_ro(input_device)
+                src = safe_resolve(in_root, input_path)
+                if not src.is_file():
+                    raise NotFound(f"{input_path!r} is not a file")
+                try:
+                    input_size = src.stat().st_size
+                except OSError:
+                    input_size = 0
+                self._set(job_id, input_size=input_size)
+                self._state.set_transcode_meta(input_size=input_size)
+                # Probe now (still mounted); reused for the perf model on both
+                # completion and cancel, and warms the cache for the encode.
+                src_info = self._probe(src)
+                out_dir = out_root / self._output_dirname
+                out_dir.mkdir(parents=True, exist_ok=True)
+                # Never clobber an existing output (e.g. two sources in a batch
+                # that map to the same name): fall back to <stem>_2, _3, ...
+                dst = unique_output_path(out_dir / out_name)
+                if dst.name != out_name:
+                    out_name = dst.name
+                    out_rel = f"{self._output_dirname}/{out_name}"
+                    self._set(job_id, filename=out_name, output_path=out_rel)
+                self._encode(job_id, src, dst, self._preset(preset_id))
+                try:
+                    self._set(job_id, output_size=dst.stat().st_size)
+                except OSError:  # pragma: no cover - defensive
+                    pass
+                # Learn the wall-time-per-frame so future jobs can be estimated.
+                try:
+                    self._update_perf(src_info, preset_id, time.monotonic() - started)
+                except Exception:  # pragma: no cover - perf is best-effort
+                    pass
+                subprocess.run(["sync"], check=False)
+            finally:
+                self._browse.umount_rw(output_device)
+                if not same_device:
+                    self._browse.release(input_device)
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is not None and job["status"] == "running":
+                    job["status"] = "done"
+                    job["percent"] = 100
+            _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
+            return None
+        except _Canceled:
+            self._set(job_id, status="canceled")
+            # A single-stage job that ran long enough still trains the estimate
+            # model (its live seconds-per-frame had stabilised before the abort).
+            with self._lock:
+                j = self._jobs.get(job_id) or {}
+                spf = j.get("perf_spf") if j.get("perf_stable") else None
+            if spf and src_info:
+                try:
+                    self._record_perf(src_info, preset_id, spf)
+                    _LOG.info("Transcode #%d canceled -- kept a stable perf sample", job_id)
+                except Exception:  # pragma: no cover - perf is best-effort
+                    pass
+            _LOG.info("Transcode #%d canceled", job_id)
+            return None
+        except (BrowseError, TranscodeError) as exc:
+            self._fail(job_id, exc)
+            # A cancel that raced with a failure keeps the canceled status and is
+            # not surfaced as a batch error.
+            return None if self._is_canceled(job_id) else str(exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._fail(job_id, exc, crash=True)
+            return None if self._is_canceled(job_id) else str(exc)
 
     def _set(self, job_id: int, **fields: Any) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.update(fields)
-
-    def _process(self, job_id: int) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None or job["status"] == "canceled":
-                return
-            input_device = job["input_device"]
-            input_path = job["input_path"]
-            output_device = job["output_device"]
-            preset_id = job["preset"]
-
-        # Serialise with the copy daemon (no concurrent mount/write of a volume)
-        # AND take over every status indicator for the duration (phase TRANSCODING
-        # overrides ready/detecting/copying on the LEDs, e-paper and web). The
-        # previous phase is restored at the end so device detection resumes.
-        with self._state.operation_lock:
-            started = time.monotonic()
-            self._set(job_id, status="running", started=started)
-            out_name = output_name(Path(input_path).name, preset_id)
-            out_rel = f"{self._output_dirname}/{out_name}"
-            self._set(job_id, filename=out_name, output_path=out_rel)
-            same_device = input_device == output_device
-            prev_phase = self._state.phase
-            if prev_phase is State.TRANSCODING:  # defensive: never restore to ourselves
-                prev_phase = State.READY
-            self._hub.begin_transcode(Path(input_path).name)
-            # Source media info, captured while the volume is still mounted so the
-            # perf model can be trained even from the cancel handler below (which
-            # runs *after* the ``finally`` has unmounted the volume -- a re-probe
-            # there would fail and silently drop the sample).
-            src_info: Optional[dict] = None
-            try:
-                # A block device can't be mounted read-only and read-write at once
-                # (shared superblock -> the read-only one wins), so drop any browse
-                # mount of the output device before mounting it read-write. Under
-                # the operation lock the daemon holds no mount of it either.
-                self._browse.release(output_device)
-                out_root = self._browse.mount_rw(output_device)
-                try:
-                    # Read the input from the read-write mount when it is the same
-                    # device; otherwise mount the (different) input device read-only.
-                    in_root = out_root if same_device else self._browse.mount_ro(input_device)
-                    src = safe_resolve(in_root, input_path)
-                    if not src.is_file():
-                        raise NotFound(f"{input_path!r} is not a file")
-                    try:
-                        input_size = src.stat().st_size
-                    except OSError:
-                        input_size = 0
-                    self._set(job_id, input_size=input_size)
-                    self._state.set_transcode_meta(input_size=input_size)
-                    # Probe now (still mounted); reused for the perf model on both
-                    # completion and cancel, and warms the cache for the encode.
-                    src_info = self._probe(src)
-                    out_dir = out_root / self._output_dirname
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    # Never clobber an existing output (e.g. two sources in a batch
-                    # that map to the same name): fall back to <stem>_2, _3, ...
-                    dst = unique_output_path(out_dir / out_name)
-                    if dst.name != out_name:
-                        out_name = dst.name
-                        out_rel = f"{self._output_dirname}/{out_name}"
-                        self._set(job_id, filename=out_name, output_path=out_rel)
-                    self._encode(job_id, src, dst, self._preset(preset_id))
-                    try:
-                        self._set(job_id, output_size=dst.stat().st_size)
-                    except OSError:  # pragma: no cover - defensive
-                        pass
-                    # Learn the wall-time-per-frame so future jobs can be estimated.
-                    try:
-                        self._update_perf(src_info, preset_id,
-                                          time.monotonic() - started)
-                    except Exception:  # pragma: no cover - perf is best-effort
-                        pass
-                    subprocess.run(["sync"], check=False)
-                finally:
-                    self._browse.umount_rw(output_device)
-                    if not same_device:
-                        self._browse.release(input_device)
-                with self._lock:
-                    job = self._jobs.get(job_id)
-                    if job is not None and job["status"] == "running":
-                        job["status"] = "done"
-                        job["percent"] = 100
-                _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
-                self._hub.finish_transcode(prev_phase)
-            except _Canceled:
-                self._set(job_id, status="canceled")
-                # A single-stage job that ran long enough still trains the estimate
-                # model (its live seconds-per-frame had stabilised before the abort).
-                with self._lock:
-                    j = self._jobs.get(job_id) or {}
-                    spf = j.get("perf_spf") if j.get("perf_stable") else None
-                if spf and src_info:
-                    try:
-                        self._record_perf(src_info, preset_id, spf)
-                        _LOG.info("Transcode #%d canceled -- kept a stable perf sample", job_id)
-                    except Exception:  # pragma: no cover - perf is best-effort
-                        pass
-                _LOG.info("Transcode #%d canceled", job_id)
-                self._hub.finish_transcode(prev_phase)  # a cancel is not an error
-            except (BrowseError, TranscodeError) as exc:
-                self._end_failed(job_id, exc, prev_phase)
-            except Exception as exc:  # pragma: no cover - defensive
-                self._end_failed(job_id, exc, prev_phase, crash=True)
 
     def _ram_budget(self) -> int:
         """RAM the buffer may use this job (0 disables buffering)."""
@@ -1125,6 +1399,7 @@ class TranscodeManager:
             p = max(0, min(99, int(scaled)))
             self._set(job_id, percent=p)
             self._hub.set_transcode_progress(p / 100.0)  # LEDs + display
+            self._push_queue_state()  # keep the queue count/ETA live on the panel
 
         with self._lock:
             job_started = (self._jobs.get(job_id) or {}).get("started")
@@ -1209,18 +1484,6 @@ class TranscodeManager:
             _LOG.exception("Transcode #%d crashed: %s", job_id, exc)
         else:
             _LOG.warning("Transcode #%d failed: %s", job_id, exc)
-
-    def _end_failed(self, job_id: int, exc: Exception, prev_phase, crash: bool = False) -> None:
-        """Mark the job failed and surface the error on every backend (ERROR phase).
-
-        Unless it was actually canceled (a race), in which case the previous phase
-        is simply restored -- a cancel is not an error.
-        """
-        self._fail(job_id, exc, crash=crash)
-        if self._is_canceled(job_id):
-            self._hub.finish_transcode(prev_phase)
-        else:
-            self._hub.fail_transcode(f"Transcode failed: {exc}")
 
     def _trim_history(self) -> None:
         # Drop the oldest *finished* jobs beyond MAX_HISTORY (keep active ones).

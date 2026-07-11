@@ -54,9 +54,13 @@ def _signature(vm: ViewModel) -> tuple:
         vm.error_text,
         vm.show_progress,
         vm.ap_active,
+        vm.auto_transcode_active,
         vm.transcode_active,
         vm.transcode_name,
         vm.transcode_encoder,
+        # The queue position ("i/n"): advancing to the next file must redraw even
+        # if the overall percent did not cross an integer.
+        vm.transcode_queue_text,
     )
 
 
@@ -68,6 +72,8 @@ def _requires_clear(prev: ViewModel, new: ViewModel) -> bool:
         return True
     if prev.ap_active and not new.ap_active:
         return True  # the WiFi badge must go white again -> only a full erases it
+    if prev.auto_transcode_active and not new.auto_transcode_active:
+        return True  # the Auto badge must go white again -> only a full erases it
     for old, cur in ((prev.source, new.source), (prev.target, new.target)):
         if old.present and not cur.present:
             return True

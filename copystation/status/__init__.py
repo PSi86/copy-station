@@ -40,6 +40,8 @@ class Event(enum.Enum):
     SERVICE_STARTED = "service_started"  # the daemon just started -> a brief boot sweep
     AP_ENABLED = "ap_enabled"            # the WLAN access point was just switched on
     AP_DISABLED = "ap_disabled"          # the WLAN access point was just switched off
+    AUTO_TRANSCODE_ENABLED = "auto_transcode_enabled"    # auto-transcode toggled on
+    AUTO_TRANSCODE_DISABLED = "auto_transcode_disabled"  # auto-transcode toggled off
 
 
 class StatusIndicator:

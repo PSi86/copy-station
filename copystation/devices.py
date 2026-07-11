@@ -27,6 +27,7 @@ from .config import Config
 from .state import StatusHub, StorageInfo
 from .status import Event, State
 from .status.effects import FILL_GAUGE_SECONDS
+from .transcode import is_video_file
 from .transfer import TransferError, total_size, volume_alive
 
 _LOG = logging.getLogger("copystation.devices")
@@ -314,6 +315,7 @@ class DeviceWatcher:
         config: Config,
         hub: StatusHub,
         transfer: TransferFn,
+        transcode=None,
     ) -> None:
         import pyudev  # lazy: only present on the Cubie
 
@@ -321,6 +323,9 @@ class DeviceWatcher:
         self._config = config
         self._hub = hub
         self._transfer = transfer
+        # Optional TranscodeManager: when auto-transcode is enabled it queues a
+        # transcode of the just-copied files after a successful copy.
+        self._transcode = transcode
         self._context = pyudev.Context()
         self._root_dev = volumes.root_source_device()
         # ``_armed`` guards against re-running a transfer for a device set that
@@ -580,7 +585,7 @@ class DeviceWatcher:
                 refreshed = [self._restat(p) for p in probes]
                 self._hub.set_devices(device_views(refreshed, min_bytes, source, target))
 
-            self._transfer(
+            dest = self._transfer(
                 source_root=source.mountpoint,
                 target_root=target.mountpoint,
                 source_name=source.name,
@@ -593,6 +598,12 @@ class DeviceWatcher:
                 required=required,  # measured during the hold -> no re-scan delay
             )
             self._hub.log_event("Ready to remove devices")
+            # Auto-transcode: queue the just-copied video files (which now live on
+            # the TARGET) while the target is still mounted here. The finally below
+            # then unmounts BOTH cards and releases the operation lock, so the
+            # transcode worker only starts encoding once the source is released --
+            # it can be pulled while the batch runs.
+            self._maybe_queue_auto_transcode(target, dest)
         except TransferError as exc:
             self._armed = False
             self._errored = True
@@ -609,6 +620,47 @@ class DeviceWatcher:
             subprocess.run(["sync"], check=False)
             for probe in probes:
                 self._umount(probe.mountpoint)
+
+    def _maybe_queue_auto_transcode(self, target: Probe, dest: Path) -> None:
+        """Queue an auto-transcode of the just-copied video files, if enabled.
+
+        The copied files live under ``dest`` on the target volume; each video
+        file becomes one transcode job (output onto the same target's
+        ``Transcoded/`` folder), using the persisted default preset. Enqueuing
+        happens here (target still mounted) but the transcode worker only starts
+        once the caller's ``finally`` has unmounted the cards and released the
+        operation lock -- so the source is safely released first. Best-effort: any
+        failure is logged and never affects the completed copy.
+        """
+        tc = self._transcode
+        if tc is None or not getattr(tc, "auto_transcode", False):
+            return
+        preset = tc.default_preset
+        if not preset:
+            _LOG.warning("Auto-transcode enabled but no preset configured -- skipping.")
+            return
+        try:
+            rels = []
+            for path in sorted(Path(dest).rglob("*")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                if not is_video_file(path.name):
+                    continue
+                try:
+                    rels.append(path.relative_to(target.mountpoint).as_posix())
+                except ValueError:  # pragma: no cover - defensive
+                    continue
+            if not rels:
+                self._hub.log_event("Auto-transcode: no video files to convert")
+                return
+            tc.submit_auto(target.sys_name, rels, mount_root=target.mountpoint,
+                           output_device=target.sys_name, preset_id=preset)
+            self._hub.log_event(
+                f"Auto-transcode: queued {len(rels)} file(s) [{preset}]"
+            )
+        except Exception as exc:  # pragma: no cover - never break a good copy
+            _LOG.warning("Auto-transcode could not be queued: %s", exc)
+            self._hub.log_event(f"Auto-transcode skipped: {exc}", level="error")
 
     def _hold_before_copy(self, source: Probe, target: Probe, media_dir: Path):
         """Stay in DETECTING for the fill-gauge duration before copying.
