@@ -6,6 +6,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-12
+
+Documentation/estimate refinement only -- no behaviour change to an existing
+deployment beyond the per-job time estimate shown for a fresh install.
+
+### Changed
+- Completed the **"Source 4K H.265 (HEVC)"** throughput table in the README with
+  on-device measurements, and seeded the matching `DEFAULT_PERF` estimate keys so a
+  fresh install estimates these jobs up front instead of learning them on the first
+  run:
+  - **Radxa Cubie A7S** HEVC-source column (1080p H.264 59 fps, 720p H.264 25,
+    540p H.264 61, 720p H.265 7). The A733's HEVC hardware decoder is **faster than
+    its H.264 decoder**, so HEVC-source single-pass transcodes run faster than the
+    H.264-source ones.
+  - **Raspberry Pi 4** HEVC → 540p H.264 (17 fps), the last missing cell. The Pi 4's
+    HEVC → H.264 transcodes are **HEVC-decode-bound** (~22 fps 4K HEVC decode; the HW
+    H.264 encode adds almost nothing); with a 100 fps source, 540p stays on the HW
+    encoder while 720p/1080p exceed H.264 level 4.0's MB/s budget and fall back to
+    the CPU. Documented in a new footnote.
+
 ## [1.0.0] - 2026-07-12
 
 First tagged release. It rolls up the autonomous copy station together with the
@@ -196,5 +216,6 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/PSi86/copy-station/releases/tag/v1.0.1
 [1.0.0]: https://github.com/PSi86/copy-station/releases/tag/v1.0.0
