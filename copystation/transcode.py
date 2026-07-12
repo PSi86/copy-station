@@ -29,6 +29,7 @@ from .encoders import (
     Encoder,
     available_encoders,
     available_gst_elements,
+    available_hwaccels,
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
     cpu_encoder,
@@ -37,6 +38,7 @@ from .encoders import (
     gst_can_handle,
     gstreamer_output_height,
     select_encoders,
+    with_decode_offload,
 )
 from .mounts import BrowseError, NotFound, safe_resolve
 from .settings_store import DEFAULT_USER_SETTINGS_FILE, SettingsStore
@@ -348,17 +350,61 @@ def estimate_seconds(spf: Optional[float], duration: Optional[float],
 # use different encoders -- so they are keyed by the detected board. Within a board
 # the keys match the learned model (see ``perf_key``); a real job overwrites the
 # seed for its key on its first run, and per-install learned values take precedence.
-# The Cubie values were measured with a 4K60 H.264 source. Boards without an entry
-# here (Pi 4/5, generic) stay unseeded -> no estimate until a job trains the model;
-# they need their own benchmarks before they get defaults.
+# Values were measured on-device 2026-07-11/12 with a 4K60 H.264 source and, for the
+# ``hevc:`` keys, a 4K/1080p HEVC clip. ``spf`` = 1 / (frames-per-wall-second), so a
+# fresh install estimates a job before it has run one; a real job then overwrites the
+# seed for its key. Every board+source-codec+target we benchmarked is seeded here.
+# ``generic`` stays unseeded -> no estimate until a job trains the model.
 DEFAULT_PERF: dict = {
+    # Cubie A7S (Allwinner A733): H.264 sources use the GStreamer OMX hardware
+    # pipeline; BOTH H.264 and H.265 output are hardware-encoded (omxh264videoenc /
+    # omxhevcvideoenc). A clean 1/2-step output (1080p / 540p from 4K) is a single
+    # hardware pass ~0.66x with the CPU idle -- H.265 output is just as fast as H.264
+    # (1080p-h265 = 0.0255, measured 2026-07-12). 720p adds a CPU finishing pass;
+    # 720p-h265 finishes with CPU libx265 (the bottleneck). HEVC->H.264 (HEVC source)
+    # is the same single HW pass and left to learn on first run.
     "cubie": {
         "h264:3840x2160:1080p-h264": {"spf": 0.0251},  # single hardware pass
+        "h264:3840x2160:1080p-h265": {"spf": 0.0255},  # single HW pass (HW HEVC encode)
         "h264:3840x2160:540p-h264": {"spf": 0.0243},   # single hardware pass
         "h264:3840x2160:720p-h264": {"spf": 0.0500},   # hardware 1080p + CPU finish
-        "h264:3840x2160:720p-h265": {"spf": 0.2297},   # CPU-only H.265 output
+        "h264:3840x2160:720p-h265": {"spf": 0.1603},   # HW HEVC 1080p + CPU libx265 finish
     },
-    # "pi4": {...}, "pi5": {...} -- TODO: add once benchmarked on those boards.
+    # Raspberry Pi 5: NO hardware encoder, so every output is a libx264/libx265 CPU
+    # encode (preset veryfast). H.264 4K input decodes on the CPU too; HEVC input is
+    # hardware-decoded (-hwaccel drm), which is why the hevc keys are faster than the
+    # h264 ones at the same target. Measured on-device 2026-07-11 (the Pi 5 thermally
+    # soft-throttled at ~80 C under sustained load, so real jobs land here).
+    "pi5": {
+        "h264:3840x2160:1080p-h264": {"spf": 0.0476},  # CPU decode + libx264 1080p
+        "h264:3840x2160:720p-h264": {"spf": 0.0313},   # CPU decode + libx264 720p
+        "h264:3840x2160:540p-h264": {"spf": 0.0270},   # CPU decode + libx264 540p
+        "h264:3840x2160:720p-h265": {"spf": 0.0625},   # CPU decode + libx265 720p
+        "hevc:3840x2160:1080p-h264": {"spf": 0.0357},  # HW decode + libx264 1080p (28 fps)
+        "hevc:3840x2160:720p-h264": {"spf": 0.0208},   # HW decode + libx264 720p (48 fps)
+        "hevc:3840x2160:540p-h264": {"spf": 0.0161},   # HW decode + libx264 540p (62 fps)
+        "hevc:3840x2160:720p-h265": {"spf": 0.0526},   # HW decode + libx265 720p (19 fps)
+        "hevc:1920x1080:1080p-h264": {"spf": 0.0263},  # 1080p HEVC source (38 fps)
+    },
+    # Raspberry Pi 4: has a hardware H.264 *encoder* (h264_v4l2m2m) AND the same
+    # HEVC hardware *decoder* as the Pi 5 (-hwaccel drm). Measured on-device
+    # 2026-07-12 (Pi 4B rev 1.5, kernel 6.12, ffmpeg rpt). Two caveats baked into
+    # these: (1) a 4K H.264 source is CPU-DECODE-bound (~24 fps ceiling on the A72),
+    # so the target resolution barely moves the H.264-source rows; (2) the HW H.264
+    # encoder defaults to H.264 level 4.0 (~1080p30) and ffmpeg does not raise it, so
+    # a 1080p output above 30 fps (this source is 60 fps) exceeds the level and the
+    # driver rejects it (enforced since kernel 6.6.31) -- 1080p H.264 then runs on the
+    # slow CPU. A <=30 fps 1080p source, and 720p at 60 fps, stay on the HW encoder.
+    # HEVC input is HW-decoded, and HEVC->720p H.264 is a near-full-HW pass.
+    "pi4": {
+        "h264:3840x2160:1080p-h264": {"spf": 0.115},   # HW 1080p fails -> CPU x264
+        "h264:3840x2160:720p-h264": {"spf": 0.0588},   # HW encode (decode-bound)
+        "h264:3840x2160:540p-h264": {"spf": 0.0556},   # HW encode (decode-bound)
+        "h264:3840x2160:720p-h265": {"spf": 0.182},    # CPU x265
+        "hevc:3840x2160:720p-h264": {"spf": 0.0303},   # HW decode + HW encode
+        "hevc:3840x2160:1080p-h264": {"spf": 0.0833},  # HW decode + CPU x264 (HW 1080p fails)
+        "hevc:3840x2160:720p-h265": {"spf": 0.147},    # HW decode + CPU x265
+    },
 }
 
 
@@ -416,6 +462,8 @@ class TranscodeManager:
         self._encoders_avail = (
             available_encoders() | available_gst_elements() if self._available else set()
         )
+        # ffmpeg hardware-acceleration methods, for HEVC decode offload (Pi 5 "drm").
+        self._hwaccels = available_hwaccels() if self._available else set()
         self._queue: "queue.Queue[int]" = queue.Queue()
         self._lock = threading.Lock()
         self._perf_lock = threading.Lock()
@@ -1252,6 +1300,15 @@ class TranscodeManager:
             duration = probe_duration(src)
         encoders = self._encoders_for(preset)
         info = self._probe(src)          # source media info (codec/dims/fps/duration)
+        # Offload the source decode to hardware when the board supports it for this
+        # codec (Pi 5: HEVC via -hwaccel drm). This prepends a hardware-decode
+        # variant of the software encoder, keeping the plain-decode one right behind
+        # it as the automatic fallback. Skipped when the encoder is forced to the
+        # CPU (acceleration cpu/software/none), which means "no hardware at all".
+        accel = str(preset.get("accel") or self._acceleration).strip().lower()
+        if accel not in ("cpu", "software", "none"):
+            encoders = with_decode_offload(
+                encoders, self._board, info.get("vcodec"), self._hwaccels)
         src_fps = info.get("fps")        # for the live perf estimate (single-stage)
         last_exc: Optional[TranscodeError] = None
         for idx, enc in enumerate(encoders):
@@ -1265,11 +1322,16 @@ class TranscodeManager:
                         info.get("acodec") if info.get("has_audio") else "none",
                     )
                     continue
-            self._set(job_id, encoder=enc.name, hw=enc.is_hardware, percent=0)
+            # Surface a hardware-decode offload in the encoder label (e.g.
+            # "cpu (hevc hw-decode)") without changing the encoder's identity: it is
+            # still the CPU codec, so ``hw`` (hardware *encoder*) stays False.
+            disp = _encoder_label(enc)
+            self._set(job_id, encoder=disp, hw=enc.is_hardware, percent=0)
             # Record the encoder on the shared state too (shown on the display).
-            self._hub.set_transcode_progress(0.0, enc.name, enc.is_hardware)
-            _LOG.info("Transcode #%d: encoding with %s (%s, %s)",
-                      job_id, enc.name, enc.kind, enc.engine)
+            self._hub.set_transcode_progress(0.0, disp, enc.is_hardware)
+            _LOG.info("Transcode #%d: encoding with %s (%s, %s%s)",
+                      job_id, enc.name, enc.kind, enc.engine,
+                      f", hwaccel {enc.decode_hwaccel}" if enc.decode_hwaccel else "")
             try:
                 if enc.is_gstreamer:
                     self._run_gstreamer(job_id, src, dst, preset, info, enc, duration)
@@ -1286,12 +1348,12 @@ class TranscodeManager:
                 _cleanup(dst)
                 has_more = idx + 1 < len(encoders)
                 if has_more:
-                    nxt = encoders[idx + 1].name
+                    nxt = _encoder_label(encoders[idx + 1])
                     _LOG.warning(
                         "Transcode #%d: encoder %s failed (%s) -- falling back to %s",
-                        job_id, enc.name, exc, nxt,
+                        job_id, disp, exc, nxt,
                     )
-                    self._set(job_id, note=f"{enc.name} failed, retrying with {nxt}")
+                    self._set(job_id, note=f"{disp} failed, retrying with {nxt}")
                     continue
                 raise
         # Unreachable (the loop always returns or raises), but be explicit.
@@ -1508,6 +1570,16 @@ class TranscodeManager:
             proc = self._current_proc
         if proc is not None:
             proc.terminate()
+
+
+def _encoder_label(enc: Encoder) -> str:
+    """Human-facing encoder name, noting a hardware-decode offload if used.
+
+    The offload keeps the same CPU *encoder* (so ``enc.name`` is unchanged and it
+    is not a hardware encode), but the source is hardware-decoded -- worth showing
+    in the job row / logs, e.g. ``cpu (hevc hw-decode)``.
+    """
+    return f"{enc.name} (hevc hw-decode)" if enc.decode_hwaccel else enc.name
 
 
 def _cleanup(path: Path) -> None:

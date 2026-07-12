@@ -96,8 +96,30 @@ all off by default, so existing status-only deployments are unaffected.
 - **Board-aware hardware acceleration** with automatic **CPU fallback**
   (`transcode.acceleration`, `fallback_to_cpu`): uses the board's hardware
   encoder when it is present, otherwise software.
-  - **Raspberry Pi 4**: ffmpeg `h264_v4l2m2m` (H.264). The Pi 5 has no hardware
-    encoder and uses the CPU.
+  - **Raspberry Pi 4**: hardware **H.264 encode** (`h264_v4l2m2m`) **and** the same
+    HEVC hardware **decode** as the Pi 5 (`-hwaccel drm`), so an HEVC source is
+    decoded *and* encoded in hardware in one pass (`h264_v4l2m2m` with `-hwaccel
+    drm`; the hardware-decode offload was extended to decorate hardware encoders,
+    not just the CPU one). Measured on-device: 4K HEVC → 720p H.264 ~0.54×, a near-
+    full-hardware pass. Two limits: the H.264 encoder defaults to H.264 **level 4.0**
+    (~1080p30), so a **1080p output above 30 fps** (e.g. from a 4K60 source) exceeds
+    it and falls back to the CPU (a framerate limit, enforced since kernel 6.6.31 —
+    ≤30 fps 1080p and 720p60 stay in hardware); and there is no 4K H.264 hardware
+    decoder (4K H.264 decodes on the CPU). Per-board estimate seeds now include the
+    Pi 4. **Bug fix:** `available_encoders()`
+    dropped ffmpeg encoders listed with no capability flags (`V.....`), which is how
+    the Pi's `h264_v4l2m2m`/`hevc_v4l2m2m` wrappers appear — so the Pi 4 hardware
+    encoder was never actually selected before; it now is.
+  - **Raspberry Pi 5**: no hardware *encoder* exists, so every output is a
+    software `libx264`/`libx265` encode -- but HEVC (H.265) *input* is now
+    hardware-**decoded** via ffmpeg `-hwaccel drm` (the Pi 5's 4Kp60 HEVC block,
+    `/dev/video19`), offloading the decode so the CPU is free for the encode
+    (measured ~1.4× faster on a 4K HEVC → 1080p job on-device). Applied
+    automatically for HEVC sources and falls back to software decode if the
+    hardware path fails; the job row shows `cpu (hevc hw-decode)` when used. H.264
+    input has no hardware decoder on the Pi 5 and decodes on the CPU.
+    `acceleration: cpu` forces pure software (no hardware decode). The per-board
+    duration-estimate seeds now include the Pi 5 (measured 4K60 H.264 and HEVC).
   - **Radxa Cubie A7S (Allwinner A733)**: a **GStreamer OpenMAX** pipeline --
     hardware-**decode** (`omxh264dec`/`omxhevcvideodec`), downscale **in the
     decoder** (its `scale` property, 1/2 or 1/4) and hardware-**encode** H.264
@@ -107,14 +129,16 @@ all off by default, so existing status-only deployments are unaffected.
     target that is not a clean 1/2-step (e.g. 720p from 4K) is hardware-downscaled
     to the nearest larger clean size and **finished to the exact height by a short
     ffmpeg CPU pass**. Bitrate is height- and framerate-aware (raise a preset's
-    `bitrate` to raise quality; `crf` has no effect on the hardware encoder). H.265
-    *output* has no hardware encoder and stays on the CPU; a source with non-AAC
-    audio or an unusual container also falls back to the CPU (audio is stream-copied
-    on the hardware path). A stall watchdog kills a wedged OMX pipeline so a stuck
-    hardware job never hangs the station.
+    `bitrate` to raise quality; `crf` has no effect on the hardware encoder). **H.265
+    output is hardware-encoded too** (`omxhevcvideoenc`) -- a clean 1/2-step H.265
+    target (e.g. 1080p) is a single hardware pass ~10x faster than CPU `libx265`
+    (used when the installed GStreamer exposes the element -- older Radxa images
+    shipped it non-functional -- else it falls back to the CPU; it also needs a
+    current mesa/libgbm). A source with non-AAC audio or an unusual container falls
+    back to the CPU (audio is stream-copied on the hardware path). A stall watchdog
+    kills a wedged OMX pipeline so a stuck hardware job never hangs the station.
     (This replaces the earlier assumption that the A733 encoders were unreachable
-    from Linux -- ffmpeg cannot reach them, but GStreamer OMX can. Note the A733
-    exposes only an H.264 OMX *encoder*, not the once-assumed `omxhevcvideoenc`.)
+    from Linux -- ffmpeg cannot reach them, but GStreamer OMX can.)
 - **RAM output buffering** (`transcode.ram_buffer`): the input streams from the
   card while the output is staged in a size-capped `tmpfs` and written back in one
   bulk write, so the card is never read and written at once. Input size is

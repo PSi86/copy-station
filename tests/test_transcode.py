@@ -520,6 +520,208 @@ def test_process_falls_back_to_cpu_when_hardware_fails(tmp_path, monkeypatch):
     assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"cpu-encoded"
 
 
+def _pi5_mgr(tmp_path, monkeypatch, vcodec="hevc", src_wh=(3840, 2160)):
+    """A manager posing as a Pi 5 (no HW encoder; HEVC decode via -hwaccel drm)."""
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    mgr._board = "pi5"
+    mgr._encoders_avail = {"libx264", "libx265"}
+    mgr._hwaccels = {"drm"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": vcodec, "width": src_wh[0], "height": src_wh[1], "fps": 59.94,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+    return mgr, card
+
+
+def test_process_pi5_hevc_offloads_decode_to_hardware(tmp_path, monkeypatch):
+    # A Pi 5 has no HW encoder, but hardware-decodes HEVC: the CPU encode runs with
+    # -hwaccel drm so the 4K decode is offloaded. One attempt, no fallback needed.
+    mgr, card = _pi5_mgr(tmp_path, monkeypatch, vcodec="hevc")
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"hwdec-encoded")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert len(calls) == 1
+    assert calls[0][0] == "ffmpeg" and "libx264" in calls[0]
+    assert "-hwaccel" in calls[0] and calls[0][calls[0].index("-hwaccel") + 1] == "drm"
+    assert calls[0].index("-hwaccel") < calls[0].index("-i")
+    # It is a CPU *encode* (hw=False), but the label notes the hardware decode.
+    assert result["hw"] is False
+    assert result["encoder"] == "cpu (hevc hw-decode)"
+    assert (card / "Transcoded" / "clip_1080p-h264.mp4").read_bytes() == b"hwdec-encoded"
+
+
+def test_process_pi5_hevc_falls_back_to_software_decode(tmp_path, monkeypatch):
+    # If the hardware decode fails at runtime, it retries with plain software decode
+    # (same CPU encoder, no -hwaccel) rather than failing the job.
+    mgr, card = _pi5_mgr(tmp_path, monkeypatch, vcodec="hevc")
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self._hwaccel = "-hwaccel" in cmd
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            if self._hwaccel:
+                self.returncode = 1  # the hw-decode attempt fails
+            else:
+                self._dst.write_bytes(b"swdec-encoded")
+                self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert len(calls) == 2                     # hw-decode attempt, then software
+    assert "-hwaccel" in calls[0] and "-hwaccel" not in calls[1]
+    assert result["encoder"] == "cpu" and result["hw"] is False
+    assert (card / "Transcoded" / "clip_1080p-h264.mp4").read_bytes() == b"swdec-encoded"
+
+
+def test_process_pi5_h264_stays_on_software_decode(tmp_path, monkeypatch):
+    # H.264 has no hardware decoder on the Pi 5 -> a plain CPU transcode, no hwaccel.
+    mgr, card = _pi5_mgr(tmp_path, monkeypatch, vcodec="h264")
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"cpu")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert len(calls) == 1 and "-hwaccel" not in calls[0]
+    assert result["encoder"] == "cpu" and result["hw"] is False
+
+
+def test_process_pi5_hevc_no_hwaccel_when_acceleration_cpu(tmp_path, monkeypatch):
+    # acceleration: cpu means "no hardware at all" -> decode offload is skipped too.
+    mgr, card = _pi5_mgr(tmp_path, monkeypatch, vcodec="hevc")
+    mgr._acceleration = "cpu"
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"cpu")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "1080p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert len(calls) == 1 and "-hwaccel" not in calls[0]
+    assert result["encoder"] == "cpu"
+
+
+def test_process_pi4_hevc_uses_hw_decode_plus_hw_encode(tmp_path, monkeypatch):
+    # A Pi 4 has BOTH the HEVC hardware decoder and the H.264 hardware encoder, so
+    # an HEVC source is decoded (-hwaccel drm) AND encoded (h264_v4l2m2m) in one
+    # hardware pass -- the first candidate, so a single successful attempt.
+    card = _card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)
+    mgr._board = "pi4"
+    mgr._encoders_avail = {"h264_v4l2m2m", "libx264"}
+    mgr._hwaccels = {"drm"}
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 10.0)
+    monkeypatch.setattr(tc, "probe_video_info", lambda src: {
+        "vcodec": "hevc", "width": 3840, "height": 2160, "fps": 59.94,
+        "has_audio": False, "acodec": None, "container": "mp4"})
+    calls = []
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+            self._dst = Path(cmd[-1])
+            self.returncode = None
+            self.stdout = iter([])
+
+        def wait(self):
+            self._dst.write_bytes(b"hw-decode-hw-encode")
+            self.returncode = 0
+
+        def terminate(self):  # pragma: no cover
+            pass
+
+    monkeypatch.setattr(tc.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert len(calls) == 1                       # HW-decode + HW-encode succeeds first
+    assert "-hwaccel" in calls[0] and calls[0][calls[0].index("-hwaccel") + 1] == "drm"
+    assert calls[0][calls[0].index("-c:v") + 1] == "h264_v4l2m2m"
+    assert result["hw"] is True                  # a hardware *encode* this time
+    assert result["encoder"] == "h264_v4l2m2m (hevc hw-decode)"
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").read_bytes() == b"hw-decode-hw-encode"
+
+
 def _cubie_mgr(tmp_path, monkeypatch, src_wh=(3840, 2160)):
     card = _card(tmp_path)
     browse = _FakeBrowse({"sdb1": card})
@@ -751,9 +953,11 @@ def test_estimate_falls_back_to_seed_defaults(tmp_path):
     seed = DEFAULT_PERF["cubie"]["h264:3840x2160:1080p-h264"]["spf"]
     assert mgr._estimate(info, "1080p-h264") == pytest.approx(seed * 56.89 * 59.94)
     assert 80 < mgr._estimate(info, "1080p-h264") < 92
-    # the seeds are hardware-specific: a Pi must NOT use the Cubie's numbers
+    # the seeds are hardware-specific: the Pi 4 uses its OWN seed, never the Cubie's
     mgr._board = "pi4"
-    assert mgr._estimate(info, "1080p-h264") is None
+    pi4_seed = DEFAULT_PERF["pi4"]["h264:3840x2160:1080p-h264"]["spf"]
+    assert pi4_seed != seed  # different hardware -> different number
+    assert mgr._estimate(info, "1080p-h264") == pytest.approx(pi4_seed * 56.89 * 59.94)
     # a learned value always overrides the seed (any board)
     mgr._board = "cubie"
     mgr._perf["h264:3840x2160:1080p-h264"] = {"spf": 0.01}

@@ -6,6 +6,7 @@ from copystation.encoders import (
     Encoder,
     available_encoders,
     available_gst_elements,
+    available_hwaccels,
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
     cpu_encoder,
@@ -15,7 +16,9 @@ from copystation.encoders import (
     family_of,
     gst_can_handle,
     gstreamer_output_height,
+    hevc_decode_hwaccel,
     select_encoders,
+    with_decode_offload,
 )
 
 
@@ -48,12 +51,17 @@ def test_family_of():
 
 
 def test_available_encoders_parsing():
+    # Real ffmpeg lists the V4L2 hardware wrappers with NO capability flags
+    # ("V....."), the same token as the "V..... = Video" legend line -- so the
+    # parser must distinguish them by the name field, not by the flags value.
     sample = (
         "Encoders:\n"
         " V..... = Video\n"
+        " A..... = Audio\n"
         " ------\n"
         " V....D libx264              libx264 H.264\n"
-        " V....D h264_v4l2m2m         V4L2 mem2mem H.264 encoder\n"
+        " V..... h264_v4l2m2m         V4L2 mem2mem H.264 encoder wrapper\n"
+        " V..... hevc_v4l2m2m         V4L2 mem2mem HEVC encoder wrapper\n"
         " A..... aac                  AAC\n"
     )
 
@@ -62,8 +70,10 @@ def test_available_encoders_parsing():
 
     got = available_encoders(run=lambda *a, **k: _R())
     assert "libx264" in got
-    assert "h264_v4l2m2m" in got
-    assert "aac" not in got  # audio row ignored
+    assert "h264_v4l2m2m" in got   # "V....." hardware encoder must NOT be dropped
+    assert "hevc_v4l2m2m" in got
+    assert "aac" not in got        # audio row ignored
+    assert "=" not in got          # the "= Video"/"= Audio" legend lines ignored
 
 
 def test_available_encoders_empty_on_error():
@@ -115,11 +125,18 @@ def test_auto_cubie_h264_uses_gstreamer_omx_then_cpu():
     assert chain[1].kind == "sw" and chain[1].codec == "libx264"
 
 
-def test_auto_cubie_hevc_output_has_no_hardware_encoder():
-    # The A733 exposes no H.265 hardware *encoder* -> H.265 output is CPU-only
-    # (H.265 *input* is still hardware-decoded inside build_gstreamer_cmd).
-    chain = select_encoders(H265, board="cubie", available={"omxh264videoenc", "libx265"})
-    assert _names(chain) == ["cpu"]
+def test_auto_cubie_hevc_output_uses_omx_when_available_else_cpu():
+    # The A733 has an OMX H.265 encoder (omxhevcvideoenc); use it for H.265 output
+    # when the installed GStreamer exposes it, and fall back to the CPU otherwise
+    # (older Radxa images shipped it non-functional / absent).
+    chain = select_encoders(
+        H265, board="cubie",
+        available={"omxh264videoenc", "omxhevcvideoenc", "libx265"})
+    assert _names(chain) == ["omxhevcvideoenc", "cpu"]
+    assert chain[0].is_hardware and chain[0].is_gstreamer and chain[0].rate_mode == "bitrate"
+    # Without the OMX HEVC encoder available, H.265 output stays on the CPU.
+    chain2 = select_encoders(H265, board="cubie", available={"omxh264videoenc", "libx265"})
+    assert _names(chain2) == ["cpu"]
 
 
 def test_auto_skips_hardware_when_ffmpeg_lacks_it():
@@ -206,6 +223,118 @@ def test_build_keeps_resolution_when_height_zero():
     cmd = build_ffmpeg_cmd(cpu_encoder("libx265"), {"height": 0}, "a", "b")
     assert "-vf" not in cmd
     assert cmd[cmd.index("-c:v") + 1] == "libx265"
+
+
+# --------------------------------------------------------------------------- #
+# HEVC hardware-decode offload (Raspberry Pi 5, -hwaccel drm)
+# --------------------------------------------------------------------------- #
+
+def test_available_hwaccels_parsing():
+    sample = (
+        "Hardware acceleration methods:\n"
+        "vdpau\n"
+        "vaapi\n"
+        "drm\n"
+        "vulkan\n"
+        "\n"
+    )
+
+    class _R:
+        stdout = sample
+
+    got = available_hwaccels(run=lambda *a, **k: _R())
+    assert {"vdpau", "vaapi", "drm", "vulkan"} == got
+    assert "Hardware acceleration methods" not in got  # header line ignored
+
+
+def test_available_hwaccels_empty_on_error():
+    def boom(*a, **k):
+        raise FileNotFoundError("no ffmpeg")
+
+    assert available_hwaccels(run=boom) == set()
+
+
+def test_hevc_decode_hwaccel_pi5_offloads_only_hevc():
+    # Pi 5 hardware-decodes HEVC (via drm), but has no H.264 hardware decoder.
+    assert hevc_decode_hwaccel("pi5", "hevc", {"drm", "vaapi"}) == "drm"
+    assert hevc_decode_hwaccel("pi5", "h265", {"drm"}) == "drm"
+    assert hevc_decode_hwaccel("pi5", "h264", {"drm"}) is None
+    assert hevc_decode_hwaccel("pi5", "vp9", {"drm"}) is None
+    assert hevc_decode_hwaccel("pi5", None, {"drm"}) is None
+
+
+def test_hevc_decode_hwaccel_needs_ffmpeg_support():
+    # The board maps to drm, but this ffmpeg build has no drm hwaccel -> None.
+    assert hevc_decode_hwaccel("pi5", "hevc", {"vaapi"}) is None
+    assert hevc_decode_hwaccel("pi5", "hevc", set()) is None
+
+
+def test_hevc_decode_hwaccel_pi4_and_pi5():
+    # The Pi 4 and Pi 5 both carry the rpivid HEVC decoder (via drm). Other boards
+    # decode HEVC differently (Cubie: GStreamer OMX) or not at all.
+    assert hevc_decode_hwaccel("pi4", "hevc", {"drm"}) == "drm"
+    assert hevc_decode_hwaccel("pi5", "hevc", {"drm"}) == "drm"
+    assert hevc_decode_hwaccel("pi4", "h264", {"drm"}) is None  # H.264 stays software
+    for board in ("pi", "cubie", "generic"):
+        assert hevc_decode_hwaccel(board, "hevc", {"drm"}) is None
+
+
+def test_with_decode_offload_prepends_hw_decode_variant_on_pi5_hevc():
+    chain = select_encoders({"height": 1080, "vcodec": "libx264"}, board="pi5",
+                            available={"libx264"})
+    assert _names(chain) == ["cpu"]
+    out = with_decode_offload(chain, "pi5", "hevc", {"drm"})
+    # A hw-decode CPU variant is put in front, the plain CPU stays as fallback.
+    assert [e.decode_hwaccel for e in out] == ["drm", None]
+    assert out[0].kind == "sw" and out[0].codec == "libx264" and out[0].is_hardware is False
+    assert out[1] is chain[0]  # original plain-decode encoder kept as the fallback
+
+
+def test_with_decode_offload_noop_for_h264_and_other_boards():
+    chain = select_encoders({"height": 1080, "vcodec": "libx264"}, board="pi5",
+                            available={"libx264"})
+    assert with_decode_offload(chain, "pi5", "h264", {"drm"}) == chain    # H.264 source
+    assert with_decode_offload(chain, "pi5", "hevc", set()) == chain      # no drm hwaccel
+    assert with_decode_offload(chain, "cubie", "hevc", {"drm"}) == chain  # wrong board
+
+
+def test_with_decode_offload_pi4_decorates_hw_and_cpu_encoders():
+    # On the Pi 4 the chain is [h264_v4l2m2m (hw), cpu]. For an HEVC source a
+    # hw-decode variant is inserted in front of EACH ffmpeg encoder, so the fastest
+    # path (HW decode + HW encode) is tried first, then HW encode with software
+    # decode, then the CPU encoder (with and without HW decode) as fallbacks.
+    chain = select_encoders({"height": 720, "vcodec": "libx264"}, board="pi4",
+                            available={"h264_v4l2m2m", "libx264"})
+    assert _names(chain) == ["h264_v4l2m2m", "cpu"]
+    out = with_decode_offload(chain, "pi4", "hevc", {"drm"})
+    assert _names(out) == ["h264_v4l2m2m", "h264_v4l2m2m", "cpu", "cpu"]
+    assert [e.decode_hwaccel for e in out] == ["drm", None, "drm", None]
+    # The first candidate is the hardware encoder WITH hardware decode.
+    assert out[0].is_hardware and out[0].decode_hwaccel == "drm"
+    assert out[1] is chain[0] and out[3] is chain[1]  # originals kept as fallbacks
+
+
+def test_with_decode_offload_skips_gstreamer_encoders():
+    # A GStreamer (Cubie) encoder does its own hardware decode and is never
+    # decorated; but the Cubie is not a drm-decode board anyway, so this is a no-op.
+    gst = Encoder("omxh264videoenc", "omxh264videoenc", "hw", "bitrate", engine="gstreamer")
+    chain = [gst, cpu_encoder("libx264")]
+    assert with_decode_offload(chain, "cubie", "hevc", {"drm"}) == chain
+
+
+def test_build_ffmpeg_cmd_inserts_hwaccel_before_input():
+    enc = Encoder("cpu", "libx264", "sw", "crf", decode_hwaccel="drm")
+    cmd = build_ffmpeg_cmd(enc, {"height": 1080, "vcodec": "libx264", "crf": 21},
+                           "/in/a.mp4", "/out/b.mp4")
+    assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "drm"
+    # -hwaccel must precede -i (it configures the decoder for the input).
+    assert cmd.index("-hwaccel") < cmd.index("-i")
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"  # encoder unchanged (still CPU)
+
+
+def test_build_ffmpeg_cmd_no_hwaccel_by_default():
+    cmd = build_ffmpeg_cmd(cpu_encoder("libx264"), {"height": 1080}, "a", "b")
+    assert "-hwaccel" not in cmd
 
 
 def test_build_cpu_bitrate_cmd_uses_bitrate_and_keeps_preset():
@@ -346,6 +475,20 @@ def test_build_gstreamer_cmd_hevc_source_uses_hevc_decoder():
     assert "omxh264videoenc" in cmd                   # output is still H.264
     assert not any(x.startswith("output-height") for x in cmd)
     assert "target-bitrate=16000000" in cmd           # sized to the 1080p HW stage
+
+
+def test_build_gstreamer_cmd_hevc_output_uses_omx_hevc_encoder():
+    # H.265 OUTPUT: the OMX HEVC encoder is used and its output is parsed as H.265.
+    enc = select_encoders({"height": 1080, "vcodec": "libx265"}, board="cubie",
+                          available={"omxhevcvideoenc", "libx265"})[0]
+    assert enc.name == "omxhevcvideoenc"
+    cmd = build_gstreamer_cmd(enc, {"height": 1080, "vcodec": "libx265", "bitrate": "16M"},
+                              "a", "b", INFO_4K_H264)
+    assert "omxhevcvideoenc" in cmd and "h265parse" in cmd
+    assert "omxh264videoenc" not in cmd
+    assert "omxh264dec" in cmd            # a H.264 source is still hardware-decoded
+    assert "scale=1" in cmd               # 4K -> 1080p single HW pass
+    assert "target-bitrate=16000000" in cmd
 
 
 def test_build_gstreamer_cmd_carries_aac_audio_through_named_mux():

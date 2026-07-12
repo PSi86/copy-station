@@ -1,6 +1,11 @@
 # Copy_Station example configuration -- Raspberry Pi 4 / 5
 #
 # Copy to /etc/copystation/config.yaml and adjust the GPIO line offsets.
+# One example covers both boards: the station auto-detects the model and picks the
+# best transcode path itself (Pi 4 hardware H.264 encode; Pi 5 CPU encode + HEVC
+# hardware decode -- see the transcode: section). The presets carry both a `crf`
+# (used on the CPU/Pi 5 path) and a `bitrate` (used on the hardware/Pi 4 path), so
+# the same preset ladder works on either board.
 #
 # GPIO notes for the Pi:
 # * The 40-pin header is on `gpiochip0` (Pi 4, and Pi 5 with recent kernels).
@@ -100,15 +105,48 @@ wifi_ap:
 
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by
-# scripts/install.sh). Off by default; see config.example.yaml for presets.
-# `acceleration: auto` uses the Pi 4's h264_v4l2m2m hardware encoder; the Pi 5
-# has no hardware encoder, so it encodes on the CPU (auto handles both). It falls
-# back to the CPU automatically if a hardware encode fails.
+# scripts/install.sh). Off by default.
+#
+# `acceleration: auto` picks the best path for the detected board automatically:
+#  * Raspberry Pi 4 -> hardware H.264 encoder (`h264_v4l2m2m`), which is
+#    BITRATE-controlled (uses each preset's `bitrate`; `crf`/`preset` are ignored).
+#    H.265 output has no hardware encoder -> CPU. Falls back to the CPU on failure.
+#  * Raspberry Pi 5 -> no hardware encoder, so it encodes on the CPU (`libx264`/
+#    `libx265`, using each preset's `crf` + `preset`). HEVC (H.265) *input* is
+#    hardware-DECODED via `-hwaccel drm`, freeing the CPU for the encode (H.264
+#    input has no hardware decoder and decodes on the CPU). See the README's
+#    "Raspberry Pi 5 note".
+# Because a preset carries BOTH a `crf` (used by the CPU/Pi 5 path) and a `bitrate`
+# (used by the hardware/Pi 4 path), the SAME preset ladder below works on either
+# board -- the code just uses the knob that applies. Set `acceleration: cpu` to
+# force software everywhere.
+#
+# Expected speed (measured; `x` = fraction of real time, see the README):
+#  * Pi 5, 4K60 H.264 -> 1080p ~0.35x, 540p ~0.60x, 720p ~0.53x, 720p H.265 ~0.27x
+#    (all CPU). An HEVC source -> 1080p ~0.46x thanks to the hardware decoder.
+#    Sustained 4K runs the SoC hot -- use ACTIVE COOLING or it throttles (~80 C).
+#  * Pi 4: hardware H.264 encode + the same HEVC hardware decoder as the Pi 5, so an
+#    HEVC source -> 720p H.264 is a near-full-HW pass (~0.54x). Caveats: the HW H.264
+#    encoder defaults to H.264 level 4.0 (~1080p30), so a 1080p output ABOVE 30 fps
+#    (e.g. 4K60) exceeds it and falls back to the slow CPU (<=30fps 1080p and 720p60
+#    stay in HW); and a 4K H.264 source decodes on the weak A72 CPU (slow). Prefer
+#    720p and/or HEVC sources on the Pi 4.
 transcode:
   enabled: false
   output_dirname: Transcoded
   acceleration: auto      # auto | cpu | <ffmpeg encoder, e.g. h264_v4l2m2m>
   fallback_to_cpu: true
+  ram_buffer: true
+  ram_buffer_fraction: 0.66
+  # `height` downscales keeping the aspect ratio (0 = keep source). Each preset
+  # carries both quality knobs; the active path uses its own (Pi 4 HW -> `bitrate`,
+  # Pi 5 CPU -> `crf` + `preset`). Raise `bitrate` for the Pi 4 hardware encoder;
+  # lower `crf` for the Pi 5 CPU encoder.
+  presets:
+    - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 20M }
+    - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }
+    - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 8M }
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }   # H.265 = CPU only, crf
 
 # Optional GPIO user button. Shutdown gesture (DJI style): short click, release,
 # then press and HOLD 3 s -- a plain long hold alone does nothing (intent check).

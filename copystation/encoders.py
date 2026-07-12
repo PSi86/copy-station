@@ -8,12 +8,13 @@ The three target boards differ a lot in what they can encode in hardware:
   hardware video encoder at all (HEVC decode only). So it must encode on the CPU.
 * **Radxa Cubie A7S (Allwinner A733)** -- the Cedar VPU encodes H.264 in
   hardware, but **not through ffmpeg**: it is reachable only via GStreamer's
-  Allwinner OpenMAX element ``omxh264videoenc`` (driving ``/dev/cedar_dev``). The
-  VPU also *decodes* H.264 and H.265 in hardware (``omxh264dec`` /
-  ``omxhevcvideodec``), which we use to offload the 4K decode, but there is **no
-  HEVC hardware *encoder*** exposed in userspace, so H.265 *output* stays on the
-  CPU. These encoders therefore run as a **GStreamer pipeline** (see
-  ``build_gstreamer_cmd``), not an ffmpeg command.
+  Allwinner OpenMAX elements ``omxh264videoenc`` / ``omxhevcvideoenc`` (driving
+  ``/dev/cedar_dev``) -- so **both H.264 and H.265 output** encode in hardware when
+  the installed GStreamer exposes the element (older Radxa images shipped the HEVC
+  encoder non-functional, so it is only used when present and falls back to the CPU
+  otherwise). The VPU also *decodes* H.264 and H.265 in hardware (``omxh264dec`` /
+  ``omxhevcvideodec``), which we use to offload the 4K decode. These encoders run as
+  a **GStreamer pipeline** (see ``build_gstreamer_cmd``), not an ffmpeg command.
 
 This module maps ``(board, codec-family) -> preferred hardware encoder``, probes
 which encoders the installed ffmpeg (``-encoders``) and GStreamer
@@ -32,9 +33,9 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Any, Iterable, List, Optional, Set
 
 _LOG = logging.getLogger("copystation.encoders")
 
@@ -50,6 +51,10 @@ class Encoder:
     format_filter: Optional[str] = None   # appended to -vf (e.g. "format=yuv420p")
     extra_args: tuple = field(default_factory=tuple)
     engine: str = "ffmpeg"           # "ffmpeg" | "gstreamer" -- how to build/run it
+    # ffmpeg ``-hwaccel`` used to offload the SOURCE decode (e.g. "drm" for the
+    # Pi 5's HEVC hardware decoder). Independent of the encoder: the encode still
+    # runs on the CPU: this only moves the decode off it. ``None`` = software decode.
+    decode_hwaccel: Optional[str] = None
 
     @property
     def is_hardware(self) -> bool:
@@ -69,9 +74,11 @@ _HW_ENCODERS = {
     "pi4": {"h264": "h264_v4l2m2m", "hevc": None},
     "pi": {"h264": "h264_v4l2m2m", "hevc": None},   # other/older Pi with the encoder
     "pi5": {"h264": None, "hevc": None},            # Pi 5 dropped the HW encoder
-    # Allwinner A733: H.264 encode via GStreamer OMX; HEVC encode not exposed
-    # (decode is, but that is the input side, handled in build_gstreamer_cmd).
-    "cubie": {"h264": "omxh264videoenc", "hevc": None},
+    # Allwinner A733: H.264 AND H.265 encode via GStreamer OMX (omxh264videoenc /
+    # omxhevcvideoenc). Both are bitrate-controlled; the HEVC encoder is only used
+    # when the installed GStreamer actually exposes it (older Radxa images shipped it
+    # non-functional), and a runtime failure falls back to the CPU (libx265).
+    "cubie": {"h264": "omxh264videoenc", "hevc": "omxhevcvideoenc"},
     "generic": {"h264": None, "hevc": None},
 }
 
@@ -118,9 +125,13 @@ def available_encoders(run=subprocess.run) -> Set[str]:
     names: Set[str] = set()
     for line in out.splitlines():
         parts = line.split()
-        # Encoder rows start with a flags token whose first char is the media
-        # type: V(ideo)/A(udio)/S(ubtitle); the second token is the codec name.
-        if len(parts) >= 2 and parts[0] and parts[0][0] == "V" and parts[0] != "V.....":
+        # Encoder rows are "<flags> <name> <description>"; the 6-char flags token
+        # starts with the media type V(ideo)/A(udio)/S(ubtitle). Skip the legend
+        # lines ("V..... = Video", whose name field is "="): do NOT filter on the
+        # flags value itself, or a real encoder with no capability flags -- e.g. the
+        # Pi's ``h264_v4l2m2m`` / ``hevc_v4l2m2m``, listed as "V....." -- would be
+        # wrongly dropped and its hardware never selected.
+        if len(parts) >= 2 and parts[0][:1] == "V" and parts[1] != "=":
             names.add(parts[1])
     return names
 
@@ -146,6 +157,31 @@ def available_gst_elements(run=subprocess.run) -> Set[str]:
         m = _GST_ELEMENT_RE.match(line)
         if m:
             names.add(m.group(1))
+    return names
+
+
+def available_hwaccels(run=subprocess.run) -> Set[str]:
+    """Names of the ffmpeg hardware-acceleration methods (``ffmpeg -hwaccels``).
+
+    Used to detect the ``drm`` method that reaches the Raspberry Pi 5's HEVC
+    hardware decoder (see :func:`hevc_decode_hwaccel`). Empty when ffmpeg is
+    missing. ``run`` is injectable for tests.
+    """
+    try:
+        out = run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    names: Set[str] = set()
+    for line in out.splitlines():
+        s = line.strip()
+        # Skip blank lines and the "Hardware acceleration methods:" header (which
+        # is the only line ending in a colon); every other line is one method.
+        if not s or s.endswith(":"):
+            continue
+        names.add(s)
     return names
 
 
@@ -203,6 +239,62 @@ def _hw_encoder(name: str) -> Encoder:
         return Encoder(name=name, codec=name, kind="hw", rate_mode="bitrate",
                        format_filter="format=yuv420p")
     return Encoder(name=name, codec=name, kind="hw", rate_mode="bitrate")
+
+
+# Board -> the ffmpeg ``-hwaccel`` that offloads HEVC *decode* to that board's
+# video block. The Raspberry Pi 4 and Pi 5 both carry the V4L2-stateless HEVC
+# decoder (the "rpivid" block on /dev/video19), reached through ffmpeg's DRM-PRIME
+# path, so an HEVC source is hardware-decoded on both (measured ~2x the software
+# decode rate for 4K). This frees the CPU for the encode; on the **Pi 4** it also
+# pairs with the hardware H.264 *encoder* (``h264_v4l2m2m``) for a near-full-
+# hardware HEVC->H.264 pass (see ``with_decode_offload``). The **Pi 5** has no
+# hardware encoder, so the encode stays on the CPU. The Cubie hardware-decodes
+# through its own GStreamer OMX pipeline instead, so it is deliberately not listed.
+_HEVC_DECODE_HWACCEL = {"pi5": "drm", "pi4": "drm"}
+
+
+def hevc_decode_hwaccel(board: str, src_vcodec: Any,
+                        available: Iterable[str]) -> Optional[str]:
+    """The ffmpeg ``-hwaccel`` to offload this source's decode, or ``None``.
+
+    Returns the board's HEVC-decode hwaccel only when the source really is HEVC
+    (the sole codec the wired hardware decodes) **and** the installed ffmpeg
+    advertises that hwaccel (``ffmpeg -hwaccels``). Any other source codec --
+    notably H.264, for which the Pi 5 has no hardware decoder -- or a board with no
+    wired decoder returns ``None`` (plain software decode).
+    """
+    if family_of(str(src_vcodec or "")) != "hevc":
+        return None
+    hw = _HEVC_DECODE_HWACCEL.get(board)
+    return hw if hw and hw in set(available) else None
+
+
+def with_decode_offload(encoders: List[Encoder], board: str, src_vcodec: Any,
+                        hwaccels: Iterable[str]) -> List[Encoder]:
+    """Prepend a hardware-decode variant of the software encoder when it applies.
+
+    On a board whose hardware can *decode* the source (the Pi 4 / Pi 5 HEVC
+    decoder), a ``-hwaccel``-decorated copy of **each** ffmpeg encoder is inserted
+    right in front of it, with the plain (software-decode) encoder kept right
+    behind as the automatic fallback. Decorating the *hardware* encoder too matters
+    on the Pi 4: an HEVC source can then be hardware-decoded **and** hardware-
+    encoded in one pass (``h264_v4l2m2m`` with ``-hwaccel drm``), which is markedly
+    faster than either half alone; the Pi 5 has only a CPU encoder, so this reduces
+    to decorating that one encoder. A runtime hwaccel failure just drops to the
+    plain software-decode candidate through the existing loop. GStreamer encoders
+    (the Cubie, which does its own hardware decode) are never decorated. A no-op
+    when no hardware decode applies, so H.264 sources and other boards are
+    untouched.
+    """
+    hw = hevc_decode_hwaccel(board, src_vcodec, hwaccels)
+    if not hw:
+        return encoders
+    out: List[Encoder] = []
+    for e in encoders:
+        if not e.is_gstreamer and not e.decode_hwaccel:
+            out.append(replace(e, decode_hwaccel=hw))  # HW-decode variant first
+        out.append(e)                                   # plain-decode fallback
+    return out
 
 
 def select_encoders(
@@ -272,10 +364,16 @@ def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
     auto, forced even via ``scale=-2:H``); ``0``/absent keeps the source size.
     Software encoders use ``-crf``/``-preset``; hardware (V4L2 M2M) encoders use a
     target bitrate (``preset.bitrate`` or a height-based default). Progress is
-    emitted on stdout via ``-progress pipe:1``.
+    emitted on stdout via ``-progress pipe:1``. ``encoder.decode_hwaccel`` (e.g.
+    "drm" on the Pi 5) prepends ``-hwaccel`` so the source is hardware-decoded;
+    ffmpeg then downloads the frames back to normal memory for the ``scale``
+    filter and the CPU encode, so the rest of the command is unchanged.
     """
     height = int(preset.get("height", 0) or 0)
-    cmd: List[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src)]
+    cmd: List[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    if encoder.decode_hwaccel:  # hardware-decode the source (before -i)
+        cmd += ["-hwaccel", encoder.decode_hwaccel]
+    cmd += ["-i", str(src)]
 
     filters: List[str] = []
     if height > 0:
@@ -423,6 +521,8 @@ def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) ->
     parse, decoder = _GST_DECODERS.get(vcodec, ("h264parse", "omxh264dec"))
     dec: List[str] = [decoder] + ([] if scale == 0 else [f"scale={scale}"])
     enc: List[str] = [encoder.codec, "control-rate=variable", f"target-bitrate={bps}"]
+    # Parse the ENCODER's output: H.265 when the OMX HEVC encoder is used, else H.264.
+    out_parse = "h265parse" if encoder.codec == "omxhevcvideoenc" else "h264parse"
     has_audio = bool(info.get("has_audio")) and str(info.get("acodec") or "").lower() == "aac"
 
     cmd: List[str] = ["gst-launch-1.0", "-e", "filesrc", f"location={src}", "!"]
@@ -430,12 +530,12 @@ def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) ->
         # Named demux/mux so the audio can be carried alongside the re-encoded video.
         cmd += [demux, "name=d",
                 "d.", "!", "queue", "!", parse, "!", *dec, "!", "queue", "!",
-                *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
+                *enc, "!", out_parse, "!", "progressreport", "update-freq=2",
                 "!", "queue", "!", "mux.",
                 "d.", "!", "queue", "!", "aacparse", "!", "queue", "!", "mux.",
                 "mp4mux", "name=mux", "!", "filesink", f"location={dst}"]
     else:
         cmd += [demux, "!", parse, "!", *dec, "!", "queue", "!",
-                *enc, "!", "h264parse", "!", "progressreport", "update-freq=2",
+                *enc, "!", out_parse, "!", "progressreport", "update-freq=2",
                 "!", "mp4mux", "!", "filesink", f"location={dst}"]
     return cmd

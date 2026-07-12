@@ -153,9 +153,9 @@ boards differ a lot in what they can encode in hardware:
 
 | Board | Hardware encode | `auto` uses |
 |-------|-----------------|-------------|
-| Raspberry Pi 4 | H.264 (`h264_v4l2m2m`, `/dev/video11`) | hardware H.264, CPU for H.265 |
-| Raspberry Pi 5 | **none** -- the encoder block was removed | CPU (`libx264`/`libx265`) |
-| Radxa Cubie A7S | H.264 in the SoC via **GStreamer OpenMAX** (`omxh264videoenc`); hardware H.264/H.265 **decode** too (`omxh264dec`/`omxhevcvideodec`). No H.265 hardware *encoder*. | hardware H.264 (GStreamer), CPU for H.265 output |
+| Raspberry Pi 4 | H.264 (`h264_v4l2m2m`); HEVC *input* hardware-**decoded** via `-hwaccel drm` too | hardware H.264 (≤720p), CPU for H.265 and 1080p; HEVC input hardware-decoded |
+| Raspberry Pi 5 | **none** -- the encoder block was removed | CPU encode (`libx264`/`libx265`); HEVC *input* hardware-**decoded** via `-hwaccel drm` |
+| Radxa Cubie A7S | H.264 **and H.265** in the SoC via **GStreamer OpenMAX** (`omxh264videoenc` / `omxhevcvideoenc`); hardware H.264/H.265 **decode** too (`omxh264dec`/`omxhevcvideodec`). | hardware H.264 **and H.265** (GStreamer) |
 
 > **Cubie A7S note.** The Allwinner A733 encodes H.264 in hardware, but **not
 > through ffmpeg** -- only through GStreamer's Allwinner OpenMAX element
@@ -169,13 +169,53 @@ boards differ a lot in what they can encode in hardware:
 > encoder's *own* scaler is deliberately not used -- it leaves a thin magenta line
 > on the bottom row -- so a target that is **not** a clean 1/2-step (e.g. 720p from
 > 4K) is decoded/downscaled to the nearest larger clean size in hardware and then
-> **finished to the exact height by a short ffmpeg (CPU) pass**. There is **no
-> H.265 hardware *encoder*** exposed, so H.265 *output* stays on the CPU (H.265
-> *input* is still hardware-decoded). The OMX plugin is present on Radxa images;
+> **finished to the exact height by a short ffmpeg (CPU) pass**. **H.265 output is
+> hardware-encoded too** (`omxhevcvideoenc`), so a clean 1/2-step H.265 target (e.g.
+> `1080p-h265`) is a single hardware pass at the same ~0.66× as H.264 -- roughly
+> **10× faster than the CPU `libx265` path**. (The HEVC encoder is only used when the
+> installed GStreamer exposes it -- older Radxa images shipped it non-functional --
+> and a runtime failure falls back to the CPU. It also needs a **current
+> mesa/libgbm**: an older `libgbm` broke the decoder-scaler→encoder buffer handoff,
+> which an `apt full-upgrade` fixes.) The OMX plugin is present on Radxa images;
 > check with `gst-inspect-1.0 | grep omx`. The daemon runs as root, so it can open
-> the VPU's root-only device nodes (`/dev/cedar_dev`, `/dev/dma_heap`). A source
-> with non-AAC audio or an unusual container is handled by the CPU path instead
-> (audio is stream-copied on the hardware path, so it must already be AAC).
+> the VPU's root-only device nodes (`/dev/cedar_dev`, `/dev/dma_heap`) -- the OMX
+> **encoder** needs that (as non-root it fails "Could not initialize supporting
+> library"). A source with non-AAC audio or an unusual container is handled by the
+> CPU path instead (audio is stream-copied on the hardware path, so it must already
+> be AAC).
+
+> **Raspberry Pi 5 note.** The Pi 5 has **no hardware video encoder** (the H.264
+> block every earlier Pi had was removed), so every output is a software
+> `libx264`/`libx265` encode on its quad-core Cortex-A76. It does keep a **4Kp60
+> HEVC hardware *decoder*** (the only codec block on the chip), which the station
+> uses to offload the **decode** of H.265 sources: `acceleration: auto` prepends
+> ffmpeg `-hwaccel drm` for an HEVC input, freeing the CPU for the encode (measured
+> ~**1.4× faster** on a 4K HEVC → 1080p H.264 job on-device; the ffmpeg log shows
+> `Hwaccel V4L2 HEVC stateless … /dev/video19`). If the hardware decode fails it
+> falls back to software decode automatically, and the job row shows
+> `cpu (hevc hw-decode)` when it is used. **H.264 has no hardware decoder on the
+> Pi 5** — those sources decode on the CPU, so a 4K60 H.264 clip is CPU-bound end
+> to end (≈0.3–0.5× real-time to 1080p). `acceleration: cpu` forces pure software
+> (no hardware decode either). Sustained 4K transcoding runs the SoC hot — use
+> **active cooling**, or the Pi 5 thermally throttles at ~80 °C and slows down.
+
+> **Raspberry Pi 4 note.** The Pi 4 keeps a hardware **H.264 encoder**
+> (`h264_v4l2m2m`, bitrate-controlled) **and** the same HEVC hardware **decoder** as
+> the Pi 5 (`-hwaccel drm`). So `acceleration: auto` H.264-encodes in hardware, and
+> for an **HEVC source** it does a near-full-hardware pass: hardware decode **plus**
+> hardware encode in one command (measured ~0.54× for 4K HEVC → 720p H.264 on the
+> tested unit). Two things to know: (1) the hardware H.264 encoder defaults to H.264
+> **Level 4.0** (~1080p**30**), and ffmpeg's `h264_v4l2m2m` sets the framerate but
+> not the level — so a **1080p output above 30 fps** (e.g. from a 50/60 fps source
+> like the 4K60 test clip) exceeds level 4.0's macroblock budget, the driver refuses
+> it (`VIDIOC_STREAMON` / ESRCH, enforced since kernel 6.6.31), and it falls back to
+> the CPU automatically. A **≤30 fps** 1080p source encodes in hardware fine, and
+> **720p stays in hardware even at 60 fps** — so it is a framerate limit, not a
+> resolution bug (raising the level needs a patched ffmpeg, not done here). (2) There
+> is **no** hardware H.264 *decoder* for 4K (the block is 1080p-max), so a **4K
+> H.264** source decodes on the comparatively slow A72 CPU (~24 fps ceiling). So on
+> the Pi 4 prefer **720p** output and/or **HEVC** sources; a 60 fps 4K H.264 → 1080p
+> job is the slow, CPU-bound worst case — a Pi 5 or the Cubie is a better fit for it.
 
 * `acceleration: auto` (default) uses the board's hardware encoder **when the
   installed ffmpeg actually has it**, otherwise software.
@@ -202,6 +242,72 @@ boards differ a lot in what they can encode in hardware:
 > knobs; each path uses its own (the ⚙ dialog shows which path a file will take).
 > For the best quality/size, a CPU (`crf`) preset beats the hardware encoder -- at
 > the cost of speed.
+
+**Which preset field applies to which hardware.** A preset carries three
+rate/tuning fields; the station always uses the one that fits the encoder that
+actually runs for a given file+board (the ⚙ dialog shows the path, and the job row
+shows the encoder that ran). You never have to pick per board -- write all three
+and the right one is used -- but this is exactly what each does:
+
+| Field | Controls | Used by | Ignored by |
+|-------|----------|---------|------------|
+| `crf` | quality (constant-quality) | the **software** encoder: Pi 5 (every output), **H.265 output** on any board, the automatic CPU fallback, and the Cubie's 4K→720p CPU finishing pass | hardware encoders |
+| `preset` | speed/size (`ultrafast`…`veryfast`…`slow`) | same as `crf` -- the software encoder only | hardware encoders |
+| `bitrate` | target bit-rate | the **hardware** encoder: Pi 4 `h264_v4l2m2m`, and Cubie `omxh264videoenc` (H.264) / `omxhevcvideoenc` (H.265). Absent → a height- and framerate-aware default | the software (`crf`) path |
+
+So on the **Pi 5** only `crf`/`preset` ever matter (there is no hardware encoder);
+on the **Pi 4** and **Cubie**, `bitrate` drives the H.264 hardware output while
+`crf`/`preset` drive H.265 output and any CPU stage. To improve quality: raise
+`bitrate` for a hardware (Pi 4/Cubie H.264) encode, lower `crf` for a CPU (Pi 5,
+or any H.265) encode.
+
+**Throughput you can expect (measured on-device).** The numbers below are the
+**frames per wall-second** the station processes for a 4K test clip → the given
+target. fps is framerate-independent (a 4K30 source runs at roughly the same fps
+and so finishes in half the wall time of a 4K60 one); for the ×-real-time of a
+60 fps source divide by 60 (e.g. 21 fps ≈ 0.35×), and the wall time ≈
+(duration × source-fps) ÷ fps. `—` = not measured; actual speed varies with
+footage, cooling and the card.
+
+Source **4K60 H.264** (decoded on the CPU except on the Cubie):
+
+| Target | Radxa Cubie A7S | Raspberry Pi 5 | Raspberry Pi 4 |
+|--------|-----------------|----------------|----------------|
+| 1080p H.264 | **40** — single HW pass, CPU idle | **21** — CPU (`veryfast`) | **9** ¹ — CPU |
+| 720p H.264  | 20 — HW + CPU finish | 32 — CPU | 17 — HW encode |
+| 540p H.264  | 41 — single HW pass | 37 — CPU | 18 — HW encode |
+| 720p H.265  | 6 — HW HEVC 1080p + CPU finish ⁴ | 16 — CPU | 6 — CPU |
+
+Source **4K H.265 (HEVC)** — hardware-decoded on the Pi 4 / Pi 5 (`-hwaccel drm`):
+
+| Target | Radxa Cubie A7S | Raspberry Pi 5 | Raspberry Pi 4 |
+|--------|-----------------|----------------|----------------|
+| 1080p H.264 | — ² | **27** — HW dec + CPU enc | 12 ¹ — HW dec + CPU enc |
+| 720p H.264  | — ² | 48 — HW dec + CPU enc | **33** ³ — HW dec + **HW** enc |
+| 540p H.264  | — ² | 62 — HW dec + CPU enc | — |
+| 720p H.265  | — ² | 19 — HW dec + CPU enc | 7 — HW dec + CPU enc |
+
+¹ The Pi 4's hardware H.264 encoder defaults to H.264 **level 4.0** (~1080p30), so a
+**1080p output above 30 fps** (this clip is 60 fps) exceeds it and the driver rejects
+it (`VIDIOC_STREAMON`/ESRCH, enforced since kernel 6.6.31) → it falls back to the
+(slow) CPU. A ≤30 fps 1080p source, and **720p at any framerate**, stay in hardware.
+² The Cubie hardware-decodes HEVC too (`omxhevcvideodec`), so an HEVC source is a
+single hardware pass like H.264 (HEVC decode instead of H.264 decode, then the same
+HW encode) — its speed is close to the H.264-source values in the previous table.
+These specific cells were not separately benchmarked, so the station learns the real
+value on the first run.
+³ Pi 4, HEVC → 720p H.264 = hardware decode **and** hardware encode in one pass —
+its fastest transcode.
+⁴ On the Cubie, H.265 **output** is now hardware-encoded (`omxhevcvideoenc`). 720p is
+a two-stage job (HW HEVC to 1080p, then a CPU `libx265` finish that dominates). A
+**clean 1/2-step H.265 target is a single hardware pass** — e.g. **1080p H.265 runs
+at ~40 fps (~0.66×)**, like H.264 and ~10× faster than CPU `libx265`.
+
+A 4K H.264 source is **CPU-decode-bound** on the Pi 4 / Pi 5 (there is no hardware
+H.264 decoder), so the target resolution barely changes those rows. Sustained 4K on
+the **Pi 5** needs **active cooling** or it throttles (~80 °C). These numbers seed
+the per-job time estimate in the UI; the station then learns the real value per
+source+preset on your hardware and refines it.
 
 A transcode and a copy are **mutually exclusive**: a running job holds an
 in-process lock the copy daemon also takes, so the two never write to (or mount)
@@ -743,7 +849,8 @@ tools.
 Board-specific reference configs:
 [config.examples/cubie-a7s.yaml](config.examples/cubie-a7s.yaml) (with the pin
 derivation explained) and
-[config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml).
+[config.examples/raspberry-pi.yaml](config.examples/raspberry-pi.yaml) (Pi 4 / 5).
+The installer picks the one matching the detected board.
 
 ### 4. Uninstalling
 

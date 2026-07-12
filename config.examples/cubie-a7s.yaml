@@ -134,25 +134,37 @@ wifi_ap:
 # (omxh264videoenc), and hardware-decodes H.264/H.265 input (omxh264dec /
 # omxhevcvideodec) so even 4K sources are offloaded -- the CPU stays idle. H.265
 # *output* has no hardware encoder and falls back to the CPU. The daemon runs as
-# root, so it can open the /dev/cedar_dev + /dev/dma_heap VPU nodes. Confirm the
-# elements with `gst-inspect-1.0 | grep omx`.
+# root, so it can open the /dev/cedar_dev + /dev/dma_heap VPU nodes (the OMX encoder
+# needs root). Confirm the elements with `gst-inspect-1.0 | grep omx`.
+#
+# Which knob each preset uses here: HARDWARE output (H.264 via omxh264videoenc,
+# H.265 via omxhevcvideoenc) uses `bitrate`; a CPU stage (the 4K->720p finishing
+# pass, or the CPU fallback) uses `crf` + `preset`. Both H.264 AND H.265 output are
+# hardware-encoded on the A733 (needs a current image -- older ones shipped the OMX
+# HEVC encoder non-functional; it then falls back to CPU libx265). Keep mesa/libgbm
+# current: an older libgbm broke the decoder-scaler->encoder handoff.
+# Expected speed (measured; `x` = fraction of real time, see the README): a 4K60
+# source -> 1080p or 540p is a single hardware pass at ~0.66x with the CPU
+# essentially idle -- for BOTH H.264 and H.265 output; 4K->720p adds a CPU finish.
+# The UI shows a per-job estimate and learns the real value.
 transcode:
   enabled: false
   output_dirname: Transcoded
-  acceleration: auto      # auto | cpu | <encoder>; Cubie A7S -> HW H.264 (omx)
+  acceleration: auto      # auto | cpu | <encoder>; Cubie A7S -> HW H.264/H.265 (omx)
   fallback_to_cpu: true
   # The A733 hardware decoder scales only by 1/2 or 1/4, so from a 4K (2160p)
   # source `1080p` (1/2) and `540p` (1/4) are a SINGLE hardware pass and use
   # `bitrate` -- the Allwinner encoder is inefficient and ignores everything else,
   # so keep these generous (a low bitrate is why hardware output looked soft).
   # `720p` is hardware-scaled to 1080p then finished to 720p by a CPU pass that
-  # uses `crf` (quality); a hard-to-compress 60fps clip can still be large. 720p
-  # H.265 has no hardware encoder -> CPU-only, `crf`.
+  # uses `crf`. H.265 output is hardware too (omxhevcvideoenc, `bitrate`); HEVC is
+  # more efficient than H.264, so its bitrates can be lower for the same quality.
   presets:
     - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 24M }   # single HW pass (1/2), bitrate
+    - { id: "1080p-h265", label: "1080p H.265", height: 1080, vcodec: libx265, crf: 28, preset: veryfast, bitrate: 16M }   # single HW pass (1/2), bitrate (HW HEVC)
     - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }   # single HW pass (1/4), bitrate
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # HW 1080 + CPU finish, crf
-    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 = CPU only, crf
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # HW HEVC 1080 + CPU finish
 
 # Optional GPIO user button (set the line from `gpioinfo`). Shutdown gesture
 # (DJI style): short click, release, then press and HOLD 3 s -- a plain long
