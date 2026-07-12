@@ -5,4 +5,4 @@ as mass storage (DCIM folder) onto an SD card, verifies the transfer and then
 clears the source.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
