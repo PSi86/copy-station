@@ -361,14 +361,20 @@ DEFAULT_PERF: dict = {
     # omxhevcvideoenc). A clean 1/2-step output (1080p / 540p from 4K) is a single
     # hardware pass ~0.66x with the CPU idle -- H.265 output is just as fast as H.264
     # (1080p-h265 = 0.0255, measured 2026-07-12). 720p adds a CPU finishing pass;
-    # 720p-h265 finishes with CPU libx265 (the bottleneck). HEVC->H.264 (HEVC source)
-    # is the same single HW pass and left to learn on first run.
+    # 720p-h265 finishes with CPU libx265 (the bottleneck). An HEVC source runs the
+    # same pipeline but with the HEVC decoder, which on the A733 is FASTER than the
+    # H.264 decoder -- so the hevc: rows are faster than the h264: ones at the same
+    # target (measured 2026-07-12 with a 4K H.265 clip).
     "cubie": {
         "h264:3840x2160:1080p-h264": {"spf": 0.0251},  # single hardware pass
         "h264:3840x2160:1080p-h265": {"spf": 0.0255},  # single HW pass (HW HEVC encode)
         "h264:3840x2160:540p-h264": {"spf": 0.0243},   # single hardware pass
         "h264:3840x2160:720p-h264": {"spf": 0.0500},   # hardware 1080p + CPU finish
         "h264:3840x2160:720p-h265": {"spf": 0.1603},   # HW HEVC 1080p + CPU libx265 finish
+        "hevc:3840x2160:1080p-h264": {"spf": 0.0170},  # single HW pass (59 fps)
+        "hevc:3840x2160:540p-h264": {"spf": 0.0164},   # single HW pass (61 fps)
+        "hevc:3840x2160:720p-h264": {"spf": 0.0396},   # HW 1080 + CPU finish (25 fps)
+        "hevc:3840x2160:720p-h265": {"spf": 0.1512},   # HW HEVC 1080 + CPU libx265 finish (6.6 fps)
     },
     # Raspberry Pi 5: NO hardware encoder, so every output is a libx264/libx265 CPU
     # encode (preset veryfast). H.264 4K input decodes on the CPU too; HEVC input is

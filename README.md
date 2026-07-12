@@ -278,24 +278,26 @@ Source **4K60 H.264** (decoded on the CPU except on the Cubie):
 | 540p H.264  | 41 — single HW pass | 37 — CPU | 18 — HW encode |
 | 720p H.265  | 6 — HW HEVC 1080p + CPU finish ⁴ | 16 — CPU | 6 — CPU |
 
-Source **4K H.265 (HEVC)** — hardware-decoded on the Pi 4 / Pi 5 (`-hwaccel drm`):
+Source **4K H.265 (HEVC)** — hardware-decoded on all three boards (Cubie via the
+OMX pipeline, Pi 4 / Pi 5 via `-hwaccel drm`):
 
 | Target | Radxa Cubie A7S | Raspberry Pi 5 | Raspberry Pi 4 |
 |--------|-----------------|----------------|----------------|
-| 1080p H.264 | — ² | **27** — HW dec + CPU enc | 12 ¹ — HW dec + CPU enc |
-| 720p H.264  | — ² | 48 — HW dec + CPU enc | **33** ³ — HW dec + **HW** enc |
-| 540p H.264  | — ² | 62 — HW dec + CPU enc | — |
-| 720p H.265  | — ² | 19 — HW dec + CPU enc | 7 — HW dec + CPU enc |
+| 1080p H.264 | **59** ² — single HW pass | **27** — HW dec + CPU enc | 12 ¹ — HW dec + CPU enc |
+| 720p H.264  | 25 ² — HW 1080 + CPU finish | 48 — HW dec + CPU enc | **33** ³ — HW dec + **HW** enc |
+| 540p H.264  | 61 ² — single HW pass | 62 — HW dec + CPU enc | — |
+| 720p H.265  | 7 ⁴ — HW HEVC 1080 + CPU finish | 19 — HW dec + CPU enc | 7 — HW dec + CPU enc |
 
 ¹ The Pi 4's hardware H.264 encoder defaults to H.264 **level 4.0** (~1080p30), so a
 **1080p output above 30 fps** (this clip is 60 fps) exceeds it and the driver rejects
 it (`VIDIOC_STREAMON`/ESRCH, enforced since kernel 6.6.31) → it falls back to the
 (slow) CPU. A ≤30 fps 1080p source, and **720p at any framerate**, stay in hardware.
-² The Cubie hardware-decodes HEVC too (`omxhevcvideodec`), so an HEVC source is a
-single hardware pass like H.264 (HEVC decode instead of H.264 decode, then the same
-HW encode) — its speed is close to the H.264-source values in the previous table.
-These specific cells were not separately benchmarked, so the station learns the real
-value on the first run.
+² Cubie, HEVC source — measured on-device 2026-07-12 with a 4K H.265 clip. The A733
+hardware-decodes HEVC in the OMX pipeline (`omxhevcvideodec`), and its HEVC decoder
+is **faster than its H.264 decoder**, so the decode-bound single-pass targets run
+*faster* from an HEVC source than from the 4K H.264 source in the previous table
+(1080p 59 vs 40, 540p 61 vs 41). 720p is not a clean 1/2-step, so it hardware-decodes
+to 1080p and a CPU pass finishes it to 720p (⁴ for the 720p H.265 two-stage path).
 ³ Pi 4, HEVC → 720p H.264 = hardware decode **and** hardware encode in one pass —
 its fastest transcode.
 ⁴ On the Cubie, H.265 **output** is now hardware-encoded (`omxhevcvideoenc`). 720p is
