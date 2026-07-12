@@ -1,13 +1,18 @@
 # Changelog
 
 All notable changes to Copy_Station are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres
+to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Three optional feature areas were added on top of the copy station: a self-hosted
-**WiFi access point**, **web file access/download**, and **video transcoding** --
-all off by default, so existing status-only deployments are unaffected.
+## [1.0.0] - 2026-07-12
+
+First tagged release. It rolls up the autonomous copy station together with the
+optional status backends (LEDs, buzzer, WS2812, Grove LED Bar, e-paper) and adds
+three optional feature areas on top: a self-hosted **WiFi access point**, **web
+file access/download**, and **video transcoding** -- all off by default, so
+existing status-only deployments are unaffected.
 
 ### Added
 
@@ -190,3 +195,6 @@ all off by default, so existing status-only deployments are unaffected.
 - AP button feedback and the display badge appear immediately on the press
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
+
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/PSi86/copy-station/releases/tag/v1.0.0
