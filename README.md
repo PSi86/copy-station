@@ -285,7 +285,7 @@ OMX pipeline, Pi 4 / Pi 5 via `-hwaccel drm`):
 |--------|-----------------|----------------|----------------|
 | 1080p H.264 | **59** ² — single HW pass | **27** — HW dec + CPU enc | 12 ¹ — HW dec + CPU enc |
 | 720p H.264  | 25 ² — HW 1080 + CPU finish | 48 — HW dec + CPU enc | **33** ³ — HW dec + **HW** enc |
-| 540p H.264  | 61 ² — single HW pass | 62 — HW dec + CPU enc | — |
+| 540p H.264  | 61 ² — single HW pass | 62 — HW dec + CPU enc | 17 ⁵ — HW dec + **HW** enc |
 | 720p H.265  | 7 ⁴ — HW HEVC 1080 + CPU finish | 19 — HW dec + CPU enc | 7 — HW dec + CPU enc |
 
 ¹ The Pi 4's hardware H.264 encoder defaults to H.264 **level 4.0** (~1080p30), so a
@@ -304,6 +304,16 @@ its fastest transcode.
 a two-stage job (HW HEVC to 1080p, then a CPU `libx265` finish that dominates). A
 **clean 1/2-step H.265 target is a single hardware pass** — e.g. **1080p H.265 runs
 at ~40 fps (~0.66×)**, like H.264 and ~10× faster than CPU `libx265`.
+⁵ Pi 4, HEVC → 540p H.264 — measured on-device 2026-07-12. This is a single hardware
+pass (HW HEVC decode + HW H.264 encode), but the Pi 4's HEVC→H.264 transcodes are
+**HEVC-decode-bound**: the 4K HEVC block decodes at ~22 fps here and the HW H.264
+encode adds almost nothing (decode-only 22 → +scale 18 → +encode 17), so the rate
+depends on the **source clip's decode complexity**, not just the target. This cell was
+measured on a heavier 4K **100 fps** HEVC clip — the only HEVC test source available —
+which decodes slower than the lighter 60 fps clip behind the other Pi 4 cells; that is
+why 540p reads **below** 720p here even though both are a single HW-decode + HW-encode
+pass. (540p at 100 fps still fits H.264 level 4.0 and stays on the HW encoder; 720p and
+1080p at 100 fps exceed its MB/s budget and fall back to the CPU — see ¹.)
 
 A 4K H.264 source is **CPU-decode-bound** on the Pi 4 / Pi 5 (there is no hardware
 H.264 decoder), so the target resolution barely changes those rows. Sustained 4K on

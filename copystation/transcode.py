@@ -401,13 +401,18 @@ DEFAULT_PERF: dict = {
     # a 1080p output above 30 fps (this source is 60 fps) exceeds the level and the
     # driver rejects it (enforced since kernel 6.6.31) -- 1080p H.264 then runs on the
     # slow CPU. A <=30 fps 1080p source, and 720p at 60 fps, stay on the HW encoder.
-    # HEVC input is HW-decoded, and HEVC->720p H.264 is a near-full-HW pass.
+    # HEVC input is HW-decoded, and HEVC->720p H.264 is a near-full-HW pass. Note the
+    # HEVC-source rows are HEVC-DECODE-bound (4K HEVC HW-decodes at ~22 fps; the HW
+    # H.264 encode adds almost nothing), so they scale with the source's decode
+    # complexity -- the 540p seed was measured on a heavier 4K100 HEVC clip (17 fps),
+    # which is why it lands below the lighter-clip 720p value.
     "pi4": {
         "h264:3840x2160:1080p-h264": {"spf": 0.115},   # HW 1080p fails -> CPU x264
         "h264:3840x2160:720p-h264": {"spf": 0.0588},   # HW encode (decode-bound)
         "h264:3840x2160:540p-h264": {"spf": 0.0556},   # HW encode (decode-bound)
         "h264:3840x2160:720p-h265": {"spf": 0.182},    # CPU x265
         "hevc:3840x2160:720p-h264": {"spf": 0.0303},   # HW decode + HW encode
+        "hevc:3840x2160:540p-h264": {"spf": 0.0575},   # HW decode + HW encode; decode-bound (17 fps)
         "hevc:3840x2160:1080p-h264": {"spf": 0.0833},  # HW decode + CPU x264 (HW 1080p fails)
         "hevc:3840x2160:720p-h265": {"spf": 0.147},    # HW decode + CPU x265
     },
