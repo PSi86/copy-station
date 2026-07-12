@@ -203,12 +203,20 @@ transcode:
   # Hardware acceleration. `auto` uses the board's hardware encoder when it is
   # present and falls back to the CPU otherwise:
   #   * Raspberry Pi 4  -> h264_v4l2m2m (H.264 in hardware, via ffmpeg)
-  #   * Raspberry Pi 5  -> no hardware encoder exists -> CPU (libx264/libx265)
-  #   * Radxa Cubie A7S -> H.264 in hardware via GStreamer OpenMAX
-  #                        (omxh264videoenc), with hardware H.264/H.265 *decode*
-  #                        (omxh264dec / omxhevcvideodec) so even 4K input is
-  #                        offloaded. H.265 *output* has no hardware encoder and
-  #                        stays on the CPU. Needs the gstreamer1.0 OMX plugin
+  #   * Raspberry Pi 5  -> no hardware ENCODER exists -> CPU (libx264/libx265).
+  #                        But HEVC (H.265) *input* is hardware-DECODED via ffmpeg
+  #                        `-hwaccel drm` (the Pi 5's only codec block), which
+  #                        offloads the decode and frees the CPU for the encode
+  #                        (~1.4x faster on a 4K HEVC job). H.264 input has no
+  #                        hardware decoder here and decodes on the CPU.
+  #   * Radxa Cubie A7S -> H.264 AND H.265 in hardware via GStreamer OpenMAX
+  #                        (omxh264videoenc / omxhevcvideoenc), with hardware
+  #                        H.264/H.265 *decode* (omxh264dec / omxhevcvideodec) so
+  #                        even 4K input is offloaded. A clean 1/2-step H.265 target
+  #                        (e.g. 1080p) is a single HW pass ~10x faster than CPU
+  #                        libx265 (needs a current image + mesa/libgbm; the HEVC
+  #                        encoder falls back to CPU if unavailable). Needs the
+  #                        gstreamer1.0 OMX plugin
   #                        (present on Radxa images); the daemon runs as root, so
   #                        it can open the /dev/cedar_dev + /dev/dma_heap nodes.
   # Set `cpu` to force software, or a specific ffmpeg encoder name (e.g.
@@ -236,6 +244,20 @@ transcode:
   #     transcode looks poor, RAISE `bitrate` (that is the only quality lever).
   # A per-preset `accel:` overrides the global one.
   #
+  # Which board actually uses which knob (the code picks the encoder for the
+  # detected hardware, then the matching knob -- you never choose per board; write
+  # all three and the right one is used):
+  #   * Raspberry Pi 5  -> CPU always -> `crf` + `preset`. (An HEVC/H.265 INPUT is
+  #     hardware-decoded via `-hwaccel drm` to go faster, but the ENCODE is CPU.)
+  #   * Raspberry Pi 4  -> hardware H.264 -> `bitrate`; H.265 output -> CPU `crf`.
+  #   * Radxa Cubie A7S -> hardware H.264 AND H.265 -> `bitrate`; a 4K->720p CPU
+  #     finishing pass -> `crf`.
+  # Expected speed for a 4K60 H.264 source (measured on-device; `x` = fraction of
+  # real time -- see the README "Throughput you can expect" table for the full grid
+  # and the Pi 4 note): to 1080p, Cubie ~0.66x (hardware, CPU idle -- for H.264 AND
+  # H.265 output) and Pi 5 ~0.35x (CPU). The UI shows a per-job time estimate from
+  # these and then learns the real value on your board.
+  #
   # Cubie A7S single-pass note: the hardware DECODER scales only by 1/2 or 1/4, so
   # a `height` that is exactly the source height /2 or /4 is a single clean
   # hardware pass -- for a 4K (2160p) source that is `1080p` (1/2) and `540p`
@@ -248,13 +270,16 @@ transcode:
     #   * single hardware pass (4K -> 1080p/540p): uses `bitrate`. The Allwinner
     #     encoder is inefficient and ignores everything but the bitrate, so these
     #     are generous -- a low bitrate is why hardware output looked soft.
-    #   * HW + CPU finish (4K -> 720p) and CPU-only (H.265): the CPU pass uses
-    #     `crf` (quality-targeted). A high-detail 60fps source is hard to compress,
-    #     so a good crf can still produce a large file -- that is the quality.
+    #   * HW + CPU finish (4K -> 720p): the CPU pass uses `crf` (quality-targeted).
+    #     A high-detail 60fps source is hard to compress, so a good crf can still
+    #     produce a large file -- that is the quality.
+    # H.265 output is hardware on the Cubie (omxhevcvideoenc, `bitrate`) and on the
+    # CPU (`crf`) elsewhere; `bitrate` can be lower than H.264 for the same quality.
     - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 24M }   # 4K -> single HW pass (1/2), bitrate
+    - { id: "1080p-h265", label: "1080p H.265", height: 1080, vcodec: libx265, crf: 28, preset: veryfast, bitrate: 16M }   # Cubie: single HW HEVC pass; else CPU
     - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }   # 4K -> single HW pass (1/4), bitrate
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # 4K -> HW 1080 + CPU finish, crf
-    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast }                 # H.265 out = CPU only, crf
+    - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # Cubie: HW HEVC 1080 + CPU finish
 
 # In-browser video preview / playback. Clicking a file in the web browser plays
 # it directly (download moves to the gear dialog). Sources a browser plays well
