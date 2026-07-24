@@ -707,11 +707,10 @@ class _FakeTranscode:
         self.default_preset = default_preset
         self.calls = []
 
-    def submit_auto(self, device, rels, mount_root=None, output_device=None,
-                    preset_id=None):
+    def submit_auto(self, device, rels, mount_root=None, preset_id=None):
         self.calls.append({
             "device": device, "rels": list(rels), "mount_root": mount_root,
-            "output_device": output_device, "preset_id": preset_id,
+            "preset_id": preset_id,
         })
         return {"count": len(rels), "preset": preset_id, "jobs": []}
 
@@ -753,7 +752,7 @@ def test_auto_transcode_queues_only_video_files(tmp_path):
 
     assert len(tc.calls) == 1
     call = tc.calls[0]
-    assert call["device"] == "sdb1" and call["output_device"] == "sdb1"
+    assert call["device"] == "sdb1"  # output always goes to the source's own medium
     assert call["preset_id"] == "720p-h264"
     assert call["mount_root"] == tmp_path
     assert sorted(call["rels"]) == [

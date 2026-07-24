@@ -39,7 +39,7 @@ _LOG = logging.getLogger("copystation.settings")
 # feature owns one section; keys not listed here are dropped from the overlay on
 # load (so a config-key rename/removal in an update self-heals).
 USER_SETTINGS_SCHEMA: dict[str, tuple[str, ...]] = {
-    "transcode": ("auto_transcode", "default_preset"),
+    "transcode": ("auto_transcode", "default_preset", "output_location"),
     "wifi_ap": ("enabled",),
 }
 

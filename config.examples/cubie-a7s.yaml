@@ -150,6 +150,11 @@ wifi_ap:
 transcode:
   enabled: false
   output_dirname: Transcoded
+  # Where transcoded files land -- always on the SOURCE file's own medium:
+  #   same    -> a Transcoded/ folder next to the original (default)
+  #   central -> one Transcoded/ folder at the medium's root
+  # Changeable live from the web UI (the UI choice is persisted and wins).
+  output_location: same
   acceleration: auto      # auto | cpu | <encoder>; Cubie A7S -> HW H.264/H.265 (omx)
   fallback_to_cpu: true
   # The A733 hardware decoder scales only by 1/2 or 1/4, so from a 4K (2160p)
@@ -163,6 +168,7 @@ transcode:
     - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 24M }   # single HW pass (1/2), bitrate
     - { id: "1080p-h265", label: "1080p H.265", height: 1080, vcodec: libx265, crf: 28, preset: veryfast, bitrate: 16M }   # single HW pass (1/2), bitrate (HW HEVC)
     - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }   # single HW pass (1/4), bitrate
+    - { id: "540p-h265",  label: "540p H.265",  height: 540,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # single HW pass (1/4), bitrate (HW HEVC)
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # HW 1080 + CPU finish, crf
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # HW HEVC 1080 + CPU finish
 

@@ -27,13 +27,17 @@ from copystation.web.app import create_app  # noqa: E402
 @pytest.mark.parametrize(
     "info,expected",
     [
+        # The hint is resolution-only now: codec and container never force it.
         ({"vcodec": "h264", "height": 1080, "container": "mp4"}, "direct"),
         ({"vcodec": "h264", "height": 720, "container": "mov"}, "direct"),
-        ({"vcodec": "avc1", "height": 1080, "container": "m4v"}, "direct"),
+        ({"vcodec": "h264", "height": 1088, "container": "mp4"}, "direct"),      # 1080p coded padding
+        ({"vcodec": "hevc", "height": 540, "container": "mkv"}, "direct"),       # small HEVC/mkv: no hint
+        ({"vcodec": "hevc", "height": 1080, "container": "mp4"}, "direct"),      # codec ignored
+        ({"vcodec": "h264", "height": 1080, "container": "mkv"}, "direct"),      # container ignored
+        ({"vcodec": "h264", "height": 1440, "container": "mp4"}, "transcode"),   # QHD > Full HD
         ({"vcodec": "h264", "height": 2160, "container": "mp4"}, "transcode"),   # 4K
-        ({"vcodec": "hevc", "height": 1080, "container": "mp4"}, "transcode"),   # HEVC
-        ({"vcodec": "h264", "height": 1080, "container": "mkv"}, "transcode"),   # container
-        ({"vcodec": "vp9", "height": 720, "container": "webm"}, "transcode"),
+        ({"vcodec": "hevc", "height": 2160, "container": "mp4"}, "transcode"),   # 4K
+        ({"vcodec": "h264", "height": 0, "container": "mp4"}, "direct"),         # unknown -> no hint
     ],
 )
 def test_preview_mode(info, expected):

@@ -1,10 +1,11 @@
 """In-browser preview classification.
 
 Clicking a file in the web browser plays it **directly** via the byte-range file
-stream. Most browsers cannot decode 4K/HEVC smoothly (and the Cubie's VPU cannot
-transcode it in real time either -- H.264 4K decode is rated 30fps on the A733),
-so for such sources the player shows a hint that a transcode is needed for smooth
-playback; the user starts one from the file (gear) dialog when they want it.
+stream. A frame clearly larger than Full HD is the heavy case that stutters in a
+browser, so for such sources the player shows a hint that a transcode gives
+smooth playback; the user starts one from the file (gear) dialog when they want
+it. Up to and including Full HD plays fine, so no hint is shown there regardless
+of codec or container (a 540p HEVC/mkv clip is not flagged).
 
 This module only *classifies* a source -- ``direct`` (plays as-is) vs
 ``transcode`` (plays but stutters, transcode for smooth) -- from an ffprobe. The
@@ -32,22 +33,25 @@ class PreviewUnavailable(PreviewError):
     """ffprobe is not installed / previews are off."""
 
 
+# Coded-height padding tolerance: many cameras encode "1080p" as 1088 display
+# lines (a coding-block multiple), which is still Full HD -- allow it so a 1080p
+# clip never trips the hint.
+_HEIGHT_TOLERANCE = 8
+
+
 def preview_mode(info: dict, max_direct_height: int = 1080) -> str:
     """``"direct"`` if the source plays in a browser as-is, else ``"transcode"``.
 
-    Direct playback is fine for H.264 at or below ``max_direct_height`` in a
-    browser-friendly container; anything else (4K, HEVC, mkv/avi, ...) plays but
-    stutters, so the UI hints that a transcode gives smooth playback.
+    The hint is driven **only by resolution**: a frame clearly larger than Full HD
+    (``max_direct_height``, plus a small padding tolerance) is heavy enough to
+    stutter, so the UI suggests a transcode for smooth playback. Everything up to
+    and including Full HD plays fine regardless of codec or container, so a 540p or
+    1080p clip -- HEVC, mkv or otherwise -- never trips the hint. (A source the
+    browser cannot decode at all is handled separately by the player's own error
+    fallback, not here.)
     """
-    vcodec = str(info.get("vcodec") or "").lower()
     height = int(info.get("height") or 0)
-    container = str(info.get("container") or "").lower()
-    direct = (
-        vcodec in ("h264", "avc1")
-        and 0 < height <= int(max_direct_height)
-        and container in ("mp4", "mov", "m4v", "webm")
-    )
-    return "direct" if direct else "transcode"
+    return "transcode" if height > int(max_direct_height) + _HEIGHT_TOLERANCE else "direct"
 
 
 class PreviewManager:

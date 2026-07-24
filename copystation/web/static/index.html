@@ -55,10 +55,13 @@
       <h2>Transcode</h2>
       <div class="row files-toolbar">
         <label class="tc-lbl muted">Default preset&nbsp;<select id="tc-preset" class="select"></select></label>
-        <label class="tc-out muted">→&nbsp;<select id="tc-output" class="select"></select></label>
+        <label class="tc-lbl muted">Output&nbsp;<select id="tc-location" class="select">
+          <option value="same">Same folder</option>
+          <option value="central">Central folder</option>
+        </select></label>
       </div>
       <label class="tc-switch"><input type="checkbox" id="tc-auto"><span class="switch"></span><span>Auto-transcode after copy</span></label>
-      <div class="muted tc-hint">Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The default preset is preselected there, and is what auto-transcode uses on the just-copied files.</div>
+      <div class="muted tc-hint">Transcoded files are always written to the medium the source is on. “Same folder” puts them in a <code>Transcoded/</code> folder next to the original; “Central folder” collects them in one <code>Transcoded/</code> folder at the medium’s root. Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The default preset is preselected there, and is what auto-transcode uses on the just-copied files.</div>
       <div id="tc-queue" class="tc-queue" hidden>
         <div class="row">
           <span id="tc-queue-text"></span>
@@ -96,8 +99,6 @@
       <div class="dlg-grid">
         <label class="dlg-lbl" for="dlg-preset">Preset</label>
         <select id="dlg-preset" class="select"></select>
-        <label class="dlg-lbl" for="dlg-output">Output</label>
-        <select id="dlg-output" class="select"></select>
         <span class="dlg-lbl">Path</span>
         <span><span id="dlg-path" class="dlg-badge">--</span><span id="dlg-path-note" class="muted dlg-path-note"></span></span>
         <span class="dlg-lbl">Est. time</span>
@@ -124,8 +125,6 @@
       <div class="dlg-grid">
         <label class="dlg-lbl" for="fdlg-preset">Preset</label>
         <select id="fdlg-preset" class="select"></select>
-        <label class="dlg-lbl" for="fdlg-output">Output</label>
-        <select id="fdlg-output" class="select"></select>
       </div>
 
       <div id="fdlg-summary" class="fdlg-summary">--</div>

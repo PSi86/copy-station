@@ -12,6 +12,7 @@ import copystation.transcode as tc
 from copystation.mounts import NotFound, PathEscapesVolume, UnknownVolume
 from copystation.status import State, StatusIndicator
 from copystation.transcode import (
+    InvalidSetting,
     TranscodeBusy,
     TranscodeManager,
     TranscodeUnavailable,
@@ -404,41 +405,68 @@ def test_process_takes_over_phase_and_restores_it(tmp_path, monkeypatch):
     assert mgr.snapshot()["jobs"][0]["status"] == "done"
 
 
-def test_process_different_devices_mount_each_side(tmp_path, monkeypatch):
-    in_card = tmp_path / "in"
-    in_card.mkdir()
-    (in_card / "clip.mp4").write_bytes(b"\x00" * 32)
-    out_card = tmp_path / "out"
-    out_card.mkdir()
-    browse = _FakeBrowse({"sdb1": in_card, "sdc1": out_card})
-    mgr = _mgr(browse)
+class _WriteProc:
+    """A faked encoder subprocess that just writes its output file and exits 0."""
+
+    def __init__(self, cmd, **kw):
+        self._dst = Path(cmd[-1])
+        self.returncode = None
+        self.stdout = iter([])
+
+    def wait(self):
+        self._dst.write_bytes(b"x")
+        self.returncode = 0
+
+    def terminate(self):  # pragma: no cover
+        pass
+
+
+def _nested_card(tmp_path):
+    """A fake card with the source video one directory down (DCIM/clip.mp4)."""
+    card = tmp_path / "card"
+    (card / "DCIM").mkdir(parents=True)
+    (card / "DCIM" / "clip.mp4").write_bytes(b"\x00" * 32)
+    return card
+
+
+def test_output_location_same_writes_beside_source(tmp_path, monkeypatch):
+    card = _nested_card(tmp_path)
+    browse = _FakeBrowse({"sdb1": card})
+    mgr = _mgr(browse)  # the default output location is "same"
+    assert mgr.output_location == "same"
     monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
     monkeypatch.setattr(tc, "probe_duration", lambda src: 5.0)
-
-    class _P:
-        def __init__(self, cmd, **kw):
-            self._dst = Path(cmd[-1])
-            self.returncode = None
-            self.stdout = iter([])
-
-        def wait(self):
-            self._dst.write_bytes(b"x")
-            self.returncode = 0
-
-        def terminate(self):  # pragma: no cover
-            pass
-
-    monkeypatch.setattr(tc.subprocess, "Popen", _P)
+    monkeypatch.setattr(tc.subprocess, "Popen", _WriteProc)
     monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
 
-    job = mgr.submit("sdb1", "clip.mp4", "720p-h264", output_device="sdc1")
+    job = mgr.submit("sdb1", "DCIM/clip.mp4", "720p-h264")
     mgr._process(job["id"])
 
-    assert mgr.snapshot()["jobs"][0]["status"] == "done"
-    assert (out_card / "Transcoded" / "clip_720p-h264.mp4").exists()
-    # Output device mounted read-write, input device read-only; both released.
-    assert "mount_rw:sdc1" in browse.ops and "release:sdc1" in browse.ops
-    assert "mount_ro:sdb1" in browse.ops and "release:sdb1" in browse.ops
+    result = mgr.snapshot()["jobs"][0]
+    assert result["status"] == "done"
+    assert result["output_device"] == "sdb1"  # always the source's own medium
+    assert result["output_path"] == "DCIM/Transcoded/clip_720p-h264.mp4"
+    assert (card / "DCIM" / "Transcoded" / "clip_720p-h264.mp4").exists()
+    # The source's own device is mounted read-write once; no separate read-only mount.
+    assert "mount_rw:sdb1" in browse.ops and "umount_rw:sdb1" in browse.ops
+    assert not any(op.startswith("mount_ro:") for op in browse.ops)
+
+
+def test_output_location_central_writes_at_volume_root(tmp_path, monkeypatch):
+    card = _nested_card(tmp_path)
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    mgr._output_location = "central"
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(tc, "probe_duration", lambda src: 5.0)
+    monkeypatch.setattr(tc.subprocess, "Popen", _WriteProc)
+    monkeypatch.setattr(tc.subprocess, "run", lambda *a, **k: None)
+
+    job = mgr.submit("sdb1", "DCIM/clip.mp4", "720p-h264")
+    mgr._process(job["id"])
+
+    result = mgr.snapshot()["jobs"][0]
+    assert result["output_path"] == "Transcoded/clip_720p-h264.mp4"
+    assert (card / "Transcoded" / "clip_720p-h264.mp4").exists()
 
 
 def test_process_reports_ffmpeg_failure(tmp_path, monkeypatch):
@@ -1125,7 +1153,9 @@ def test_set_settings_persists_and_validates(tmp_path):
 
     mgr = _mgr_with_settings(tmp_path)
     out = mgr.set_settings(default_preset="720p-h264", auto_transcode=True)
-    assert out == {"default_preset": "720p-h264", "auto_transcode": True}
+    assert out == {"default_preset": "720p-h264", "auto_transcode": True,
+                   "output_location": "same"}
+    # output_location was not touched, so only the two changed keys are persisted
     assert _json.loads((tmp_path / "user-settings.json").read_text()) == {
         "transcode": {"auto_transcode": True, "default_preset": "720p-h264"}}
     # a fresh manager over the same overlay reloads the persisted values
@@ -1137,6 +1167,13 @@ def test_set_settings_persists_and_validates(tmp_path):
     # an unknown preset is rejected
     with pytest.raises(UnknownPreset):
         mgr.set_settings(default_preset="nope")
+    # the output location persists, reloads (overlay wins) and is validated
+    assert mgr.set_settings(output_location="central")["output_location"] == "central"
+    assert _json.loads((tmp_path / "user-settings.json").read_text())[
+        "transcode"]["output_location"] == "central"
+    assert TranscodeManager(mgr._config, _hub(), _FakeBrowse()).output_location == "central"
+    with pytest.raises(InvalidSetting):
+        mgr.set_settings(output_location="nowhere")
 
 
 def test_snapshot_exposes_settings_and_queue(tmp_path):
@@ -1144,6 +1181,7 @@ def test_snapshot_exposes_settings_and_queue(tmp_path):
     snap = mgr.snapshot()
     assert snap["default_preset"] == "1080p-h264"
     assert snap["auto_transcode"] is False
+    assert snap["output_location"] == "same"
     assert snap["queue"] == {"pending": 0, "index": 0, "count": 0,
                              "percent": 0.0, "eta_seconds": None}
 
@@ -1217,6 +1255,28 @@ def test_queue_aggregate_counts_pending_and_sums_estimates(tmp_path, monkeypatch
     assert q["pending"] == 2 and q["count"] == 2 and q["index"] == 1
     assert q["percent"] == 0.0
     assert q["eta_seconds"] and q["eta_seconds"] > 0   # sum of both estimates
+
+
+def test_queue_eta_extrapolates_when_queued_estimates_missing(tmp_path, monkeypatch):
+    # A batch whose source key is neither seeded nor learned: the queued jobs have
+    # no estimate of their own, so the running job's live projection stands in for
+    # them -- the total reflects ALL pending jobs, not just the running one.
+    card = _card(tmp_path)
+    (card / "b.mp4").write_bytes(b"\x00" * 32)
+    (card / "c.mp4").write_bytes(b"\x00" * 32)
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    # No mount_root -> submit_auto records no per-job estimates.
+    mgr.submit_auto("sdb1", ["clip.mp4", "b.mp4", "c.mp4"], preset_id="720p-h264")
+    ids = list(mgr._order)
+    assert all(mgr._jobs[i]["estimate_seconds"] is None for i in ids)
+    # First job running, 50% done after 20s of wall time -> ~20s remaining and a
+    # projected full time of ~40s used as the fallback for the two queued jobs.
+    mgr._set(ids[0], status="running", started=tc.time.monotonic() - 20.0, percent=50)
+    q = mgr.snapshot()["queue"]
+    assert q["pending"] == 3 and q["index"] == 1
+    # ~20 (running) + ~40 + ~40 (two extrapolated) -> well above the running job alone
+    assert q["eta_seconds"] is not None and q["eta_seconds"] > 60
 
 
 def test_run_batch_processes_all_jobs_and_restores_phase_once(tmp_path, monkeypatch):
@@ -1454,6 +1514,7 @@ class _FakeManager:
         return {
             "available": self._available,
             "output_dirname": "Transcoded",
+            "output_location": "same",
             "default_preset": "720p-h264",
             "auto_transcode": False,
             "presets": [{"id": "720p-h264", "label": "720p H.264"}],
@@ -1462,13 +1523,17 @@ class _FakeManager:
             "jobs": self.jobs,
         }
 
-    def set_settings(self, default_preset=None, auto_transcode=None):
+    def set_settings(self, default_preset=None, auto_transcode=None,
+                     output_location=None):
         if default_preset == "bad":
             raise UnknownPreset("bad")
+        if output_location == "bad":
+            raise InvalidSetting("bad")
         return {"default_preset": default_preset or "720p-h264",
-                "auto_transcode": bool(auto_transcode)}
+                "auto_transcode": bool(auto_transcode),
+                "output_location": output_location or "same"}
 
-    def submit(self, device, path, preset, output_device=None):
+    def submit(self, device, path, preset):
         if not self._available:
             raise TranscodeUnavailable("no ffmpeg")
         if preset == "busy":
@@ -1499,7 +1564,7 @@ class _FakeManager:
             "estimate_seconds": 20.0,
         }
 
-    def submit_folder(self, device, path, preset, output_device=None):
+    def submit_folder(self, device, path, preset):
         if not self._available:
             raise TranscodeUnavailable("no ffmpeg")
         if preset == "busy":
@@ -1600,12 +1665,19 @@ def test_api_transcode_settings_persists():
     r = client.post("/api/transcode/settings",
                     json={"default_preset": "720p-h264", "auto_transcode": True})
     assert r.status_code == 200
-    assert r.json() == {"default_preset": "720p-h264", "auto_transcode": True}
+    assert r.json() == {"default_preset": "720p-h264", "auto_transcode": True,
+                        "output_location": "same"}
 
 
 def test_api_transcode_settings_bad_preset_is_400():
     client = _client(_FakeManager())
     r = client.post("/api/transcode/settings", json={"default_preset": "bad"})
+    assert r.status_code == 400
+
+
+def test_api_transcode_settings_bad_location_is_400():
+    client = _client(_FakeManager())
+    r = client.post("/api/transcode/settings", json={"output_location": "bad"})
     assert r.status_code == 400
 
 

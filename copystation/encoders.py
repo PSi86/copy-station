@@ -357,7 +357,8 @@ def select_encoders(
     return chain
 
 
-def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
+def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst,
+                     pre_filters: Optional[Iterable[str]] = None) -> List[str]:
     """ffmpeg argument list for one encode with a specific ``encoder`` (pure).
 
     ``preset.height`` downscales to that height keeping the aspect ratio (width
@@ -368,6 +369,10 @@ def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
     "drm" on the Pi 5) prepends ``-hwaccel`` so the source is hardware-decoded;
     ffmpeg then downloads the frames back to normal memory for the ``scale``
     filter and the CPU encode, so the rest of the command is unchanged.
+    ``pre_filters`` are extra ``-vf`` filters inserted *before* the scale -- used to
+    crop the Allwinner OMX HEVC encoder's uncropped padding rows off an intermediate
+    before the CPU downscale finish; ``None`` (the default) leaves every other caller
+    byte-for-byte unchanged.
     """
     height = int(preset.get("height", 0) or 0)
     cmd: List[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
@@ -375,7 +380,7 @@ def build_ffmpeg_cmd(encoder: Encoder, preset: dict, src, dst) -> List[str]:
         cmd += ["-hwaccel", encoder.decode_hwaccel]
     cmd += ["-i", str(src)]
 
-    filters: List[str] = []
+    filters: List[str] = list(pre_filters or [])
     if height > 0:
         filters.append(f"scale=-2:{height}")
     if encoder.format_filter:
@@ -539,3 +544,41 @@ def build_gstreamer_cmd(encoder: Encoder, preset: dict, src, dst, info: dict) ->
                 *enc, "!", out_parse, "!", "progressreport", "update-freq=2",
                 "!", "mp4mux", "!", "filesink", f"location={dst}"]
     return cmd
+
+
+def hevc_conformance_crop(coded_w: int, coded_h: int,
+                          want_w: int, want_h: int) -> tuple:
+    """Pixels to crop ``(right, bottom)`` so a coded HEVC frame *displays* want_w x want_h.
+
+    The Allwinner OMX HEVC encoder (``omxhevcvideoenc``) pads the coded picture up to a
+    coding-block multiple (e.g. 1080 -> 1088) and emits **no conformance window**, so a
+    decoder renders the uninitialised padding as a magenta/green strip along the bottom
+    (and, for a non-aligned width, the right) edge. Its H.264 sibling crops correctly, so
+    only the HEVC output needs this. Feed the result to ffmpeg's ``hevc_metadata``
+    bitstream filter to add the missing crop without re-encoding. Offsets round down to
+    even values (required for 4:2:0 chroma). Returns ``(0, 0)`` when the coded size is
+    unknown or already matches -- i.e. nothing to fix.
+    """
+    right = max(0, int(coded_w or 0) - int(want_w or 0))
+    bottom = max(0, int(coded_h or 0) - int(want_h or 0))
+    return right - (right % 2), bottom - (bottom % 2)
+
+
+def build_hevc_crop_remux_cmd(src, dst, crop_right: int = 0,
+                              crop_bottom: int = 0) -> List[str]:
+    """``ffmpeg`` argv that rewrites the HEVC SPS conformance window WITHOUT re-encoding.
+
+    Uses ``-c copy`` plus the ``hevc_metadata`` bitstream filter to add the crop the
+    Allwinner OMX HEVC encoder omits (see :func:`hevc_conformance_crop`): the video
+    bitstream is only re-parsed and the audio is stream-copied, so this is a fast
+    container remux, not a second encode. Assumes at least one crop is > 0.
+    """
+    opts: List[str] = []
+    if int(crop_right or 0) > 0:
+        opts.append(f"crop_right={int(crop_right)}")
+    if int(crop_bottom or 0) > 0:
+        opts.append(f"crop_bottom={int(crop_bottom)}")
+    bsf = "hevc_metadata" + ("=" + ":".join(opts) if opts else "")
+    return ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src),
+            "-c", "copy", "-bsf:v", bsf, "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats", str(dst)]

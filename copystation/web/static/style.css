@@ -161,7 +161,6 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .filelist .fmeta { display: flex; align-items: center; gap: 0.6rem; flex: 0 0 auto; }
 .btn.tc { padding: 0.1rem 0.5rem; font-size: 0.9rem; line-height: 1.2; }
 
-.tc-out { display: flex; align-items: center; flex: 1 1 auto; }
 .tc-lbl { display: flex; align-items: center; flex: 1 1 auto; white-space: nowrap; gap: 0.4rem; }
 .tc-hint { margin: 0.5rem 0; }
 

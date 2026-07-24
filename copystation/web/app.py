@@ -40,23 +40,29 @@ from ..mounts import (
 )
 from ..preview import PreviewUnavailable
 from ..status import State
-from ..transcode import TranscodeBusy, TranscodeError, TranscodeUnavailable, UnknownPreset
+from ..transcode import (
+    InvalidSetting,
+    TranscodeBusy,
+    TranscodeError,
+    TranscodeUnavailable,
+    UnknownPreset,
+)
 
 
 class TranscodeRequest(BaseModel):
-    """POST /api/transcode body."""
+    """POST /api/transcode body. The output always goes to the source's own medium."""
 
     device: str
     path: str
     preset: str
-    output_device: Optional[str] = None
 
 
 class TranscodeSettingsRequest(BaseModel):
-    """POST /api/transcode/settings body (both fields optional)."""
+    """POST /api/transcode/settings body (all fields optional)."""
 
     default_preset: Optional[str] = None
     auto_transcode: Optional[bool] = None
+    output_location: Optional[str] = None
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -263,14 +269,16 @@ def create_app(
 
         @app.post("/api/transcode/settings")
         def post_transcode_settings(req: TranscodeSettingsRequest) -> JSONResponse:
-            # Persist the default preset and/or the auto-transcode toggle. Both
-            # fields are optional; an unknown preset is a 400.
+            # Persist the default preset, the auto-transcode toggle and/or the
+            # output location. All fields are optional; an unknown preset or an
+            # unsupported output location is a 400.
             try:
                 settings = transcode.set_settings(
                     default_preset=req.default_preset,
                     auto_transcode=req.auto_transcode,
+                    output_location=req.output_location,
                 )
-            except UnknownPreset as exc:
+            except (UnknownPreset, InvalidSetting) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse(settings)
 
@@ -312,9 +320,7 @@ def create_app(
         def post_transcode_folder(req: TranscodeRequest) -> JSONResponse:
             # Queue one job per video file in the folder (a single preset for all).
             try:
-                result = transcode.submit_folder(
-                    req.device, req.path, req.preset, req.output_device
-                )
+                result = transcode.submit_folder(req.device, req.path, req.preset)
             except TranscodeUnavailable as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from exc
             except TranscodeBusy as exc:
@@ -330,7 +336,7 @@ def create_app(
         @app.post("/api/transcode")
         def post_transcode(req: TranscodeRequest) -> JSONResponse:
             try:
-                job = transcode.submit(req.device, req.path, req.preset, req.output_device)
+                job = transcode.submit(req.device, req.path, req.preset)
             except TranscodeUnavailable as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from exc
             except TranscodeBusy as exc:

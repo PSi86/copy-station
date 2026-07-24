@@ -98,10 +98,12 @@ to allow browsing but not downloading.
 
 Set `transcode.enabled: true` (and install **ffmpeg**, which `scripts/install.sh`
 pulls in) to re-encode / downscale a video from the web UI: browse to a clip in
-**Files**, press the **⚙** button, pick a preset and an output volume. The job
-runs in the background with a live progress bar; the result is written to a
-`Transcoded/` folder (`transcode.output_dirname`) on the **target volume**
-(read-write) and is downloadable through the file browser.
+**Files**, press the **⚙** button and pick a preset. The job runs in the
+background with a live progress bar and is downloadable through the file browser.
+The result is **always written to the source file's own medium** (read-write),
+into a `Transcoded/` folder (`transcode.output_dirname`); the **Output** control
+(`transcode.output_location`) chooses where that folder goes -- `same` (next to
+the original, the default) or `central` (once at the medium's root).
 
 **Auto-transcode after a copy.** With `transcode.auto_transcode: true` (or the
 **Auto-transcode after copy** switch in the web UI's *Transcode* card), a
@@ -133,16 +135,16 @@ alongside the current file's own progress.
 Presets are configurable (`transcode.presets`): each sets a target `height`
 (downscale keeping the aspect ratio; `0` keeps the source resolution), a video
 codec (`libx264`/`libx265`), a CRF quality and an ffmpeg speed preset. The
-default set offers 1080p/720p H.264 and 720p H.265.
+default set offers 1080p, 540p and 720p in both H.264 and H.265.
 
 **Speed (software encoding).** The `preset` field is libx264/libx265's
 speed/size trade-off and defaults to **`veryfast`** -- a good choice on an SBC,
 where software encoding is CPU-bound (much faster than `medium` for a modest size
 increase). Use `ultrafast` for the most speed (larger files) or `fast`/`medium`/
 `slow` for smaller files. Software encoding matters on a board without a usable
-hardware encoder for the chosen output -- the Pi 5, or the Cubie A7S when an
-**H.265 output** preset is picked (its H.265 encoder is not exposed; H.264 output
-*is* hardware-accelerated). There a heavy source -- e.g. **4K60** drone footage
+hardware encoder for the chosen output -- the Pi 5 (every output), or the Cubie
+A7S for a non-1/2-step H.265 target (e.g. 720p) whose CPU **finishing** pass does
+the encode, plus any board's automatic CPU fallback. There a heavy source -- e.g. **4K60** drone footage
 -- is dominated by *decoding*, so expect well under real-time; a lower `height`
 and a faster `preset` are the levers that matter. (`preset` is ignored by
 hardware encoders, which are bitrate-controlled.)
