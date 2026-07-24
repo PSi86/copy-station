@@ -17,7 +17,7 @@
     </header>
 
     <section id="transfer" class="card">
-      <h2>Transfer</h2>
+      <h2 id="op-title">Transfer</h2>
       <div class="progress-track">
         <div id="progress-bar" class="progress-fill"></div>
       </div>
@@ -61,14 +61,7 @@
         </select></label>
       </div>
       <label class="tc-switch"><input type="checkbox" id="tc-auto"><span class="switch"></span><span>Auto-transcode after copy</span></label>
-      <div class="muted tc-hint">Transcoded files are always written to the medium the source is on. “Same folder” puts them in a <code>Transcoded/</code> folder next to the original; “Central folder” collects them in one <code>Transcoded/</code> folder at the medium’s root. Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The default preset is preselected there, and is what auto-transcode uses on the just-copied files.</div>
-      <div id="tc-queue" class="tc-queue" hidden>
-        <div class="row">
-          <span id="tc-queue-text"></span>
-          <span id="tc-queue-eta" class="muted"></span>
-        </div>
-        <div class="progress-track"><div id="tc-queue-bar" class="progress-fill"></div></div>
-      </div>
+      <div class="muted tc-hint">Transcoded files are always written to the medium the source is on. “Same folder” puts them in a <code>Transcoded/</code> folder next to the original; “Central folder” collects them in one <code>Transcoded/</code> folder at the medium’s root. Pick a video in Files and press ⚙ to open its dialog (properties, preset, transcode or delete). The default preset is preselected there, and is what auto-transcode uses on the just-copied files. Overall progress is shown in the bar at the top of the page.</div>
       <div id="tc-info" class="muted"></div>
       <ul id="tc-jobs" class="filelist"></ul>
     </section>

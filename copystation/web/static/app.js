@@ -81,15 +81,12 @@ function renderDevices(el, devices) {
     .join("");
 }
 
-function apply(data) {
-  const phase = (data.phase || "").toLowerCase();
-  const badge = document.getElementById("phase");
-  badge.textContent = phase || "--";
-  badge.className = "badge " + phase;
-
-  document.getElementById("ap").hidden = !data.wifi_ap;
-
-  document.getElementById("progress-bar").style.width = `${data.percent || 0}%`;
+// Copy (or idle): the main bar shows byte progress with speed + ETA.
+function renderMainCopy(data) {
+  document.getElementById("op-title").textContent = "Transfer";
+  const bar = document.getElementById("progress-bar");
+  bar.classList.remove("transcoding");
+  bar.style.width = `${data.percent || 0}%`;
   document.getElementById("percent").textContent = `${data.percent || 0}%`;
   document.getElementById("transfer-name").textContent = data.transfer_name || "";
   document.getElementById("elapsed").textContent = fmtDuration(data.elapsed_seconds);
@@ -98,6 +95,42 @@ function apply(data) {
     data.speed_bytes ? `${fmtBytes(data.speed_bytes)}/s` : "--";
   document.getElementById("bytes").textContent =
     data.bytes_total ? `${fmtBytes(data.bytes_done)} / ${fmtBytes(data.bytes_total)}` : "--";
+}
+
+// Transcode: the main bar shows the whole-queue progress + total remaining time
+// (the figures the e-paper shows), plus the current file and job position. The
+// per-file bars and finished results stay in the Transcode card below.
+function renderMainTranscode(tr) {
+  document.getElementById("op-title").textContent = "Transcoding";
+  const q = tr.queue || {};
+  const pct = q.percent != null ? q.percent : (tr.percent || 0);
+  const bar = document.getElementById("progress-bar");
+  bar.classList.add("transcoding");
+  bar.style.width = `${pct}%`;
+  document.getElementById("percent").textContent = `${pct}%`;
+  document.getElementById("transfer-name").textContent = tr.name || "";
+  document.getElementById("elapsed").textContent = fmtDuration(tr.elapsed_seconds);
+  document.getElementById("eta").textContent =
+    q.eta_seconds != null ? fmtDuration(q.eta_seconds) : "--";
+  document.getElementById("speed").textContent = tr.fps ? `${Math.round(tr.fps)} fps` : "--";
+  document.getElementById("bytes").textContent =
+    q.count ? `job ${q.index}/${q.count}${q.pending ? ` · ${q.pending} pending` : ""}` : "";
+}
+
+function apply(data) {
+  const phase = (data.phase || "").toLowerCase();
+  const badge = document.getElementById("phase");
+  badge.textContent = phase || "--";
+  badge.className = "badge " + phase;
+
+  document.getElementById("ap").hidden = !data.wifi_ap;
+
+  // The top bar is shared between a copy and a transcode (like the e-paper): a
+  // running transcode drives it with the whole-queue progress + total remaining
+  // time; otherwise it shows the copy's byte progress.
+  const tr = data.transcode;
+  if (tr && tr.active) renderMainTranscode(tr);
+  else renderMainCopy(data);
 
   renderDevices(document.getElementById("devices"), data.devices);
   renderLog(document.getElementById("log"), data.events);
@@ -421,21 +454,6 @@ async function cancelJob(id) {
   loadJobs();
 }
 
-function renderQueue(queue) {
-  const box = document.getElementById("tc-queue");
-  if (!box) return;
-  if (!queue || !queue.pending) {
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const parts = [`job ${queue.index}/${queue.count}`, `${queue.pending} pending`];
-  document.getElementById("tc-queue-text").textContent = parts.join(" · ");
-  document.getElementById("tc-queue-eta").textContent =
-    queue.eta_seconds != null ? `~${fmtDuration(queue.eta_seconds)} total` : "";
-  document.getElementById("tc-queue-bar").style.width = `${queue.percent || 0}%`;
-}
-
 // Reflect the persisted auto-transcode toggle without fighting a mid-click.
 function syncAutoToggle(value) {
   const cb = document.getElementById("tc-auto");
@@ -473,7 +491,6 @@ async function loadJobs() {
       updatePresetLabels(data.presets);
       lastJobs = data.jobs || [];
       renderJobs(lastJobs);
-      renderQueue(data.queue);
       syncAutoToggle(data.auto_transcode);
       syncLocation(data.output_location);
     }
