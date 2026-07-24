@@ -109,7 +109,9 @@ function renderMainTranscode(tr) {
   bar.style.width = `${pct}%`;
   document.getElementById("percent").textContent = `${pct}%`;
   document.getElementById("transfer-name").textContent = tr.name || "";
-  document.getElementById("elapsed").textContent = fmtDuration(tr.elapsed_seconds);
+  // Elapsed + ETA both span the whole queue (the bar's scope), not the current file.
+  document.getElementById("elapsed").textContent =
+    fmtDuration(q.elapsed_seconds != null ? q.elapsed_seconds : tr.elapsed_seconds);
   document.getElementById("eta").textContent =
     q.eta_seconds != null ? fmtDuration(q.eta_seconds) : "--";
   document.getElementById("speed").textContent = tr.fps ? `${Math.round(tr.fps)} fps` : "--";

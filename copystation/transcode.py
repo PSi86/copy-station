@@ -529,6 +529,9 @@ class TranscodeManager:
         self._seq = 0
         # Jobs finished in the current batch/run, for the queue's overall progress.
         self._run_done = 0
+        # Monotonic time the current run started (spans the whole batch), for the
+        # queue's overall elapsed time. ``None`` between runs.
+        self._run_started: Optional[float] = None
         self._current_proc: Optional[subprocess.Popen] = None
         self._current_id: Optional[int] = None
         self._worker: Optional[threading.Thread] = None
@@ -863,9 +866,10 @@ class TranscodeManager:
 
         ``pending`` counts queued+running jobs; ``count``/``index`` frame it as
         "job index of count" within the current run; ``percent`` is a count-based
-        overall fraction (robust without estimates); ``eta_seconds`` sums the
-        remaining time (the running job's live ETA + the queued jobs' estimates),
-        ``None`` when nothing could be estimated.
+        overall fraction (robust without estimates); ``elapsed_seconds`` is the wall
+        time since the run started (across all its files, not just the current one);
+        ``eta_seconds`` sums the remaining time (the running job's live ETA + the
+        queued jobs' estimates), ``None`` when nothing could be estimated.
         """
         run_done = self._run_done
         running: Optional[dict] = None
@@ -881,7 +885,7 @@ class TranscodeManager:
         pending = (1 if running is not None else 0) + len(queued)
         if pending == 0:
             return {"pending": 0, "index": 0, "count": run_done,
-                    "percent": 0.0, "eta_seconds": None}
+                    "percent": 0.0, "elapsed_seconds": None, "eta_seconds": None}
         count = run_done + pending
         run_frac = 0.0
         if running is not None:
@@ -921,8 +925,13 @@ class TranscodeManager:
             if est is not None:
                 eta += est
                 known = True
+        # Wall time the whole run has been going (spans every file, so it keeps
+        # climbing between jobs instead of resetting to each file's own elapsed).
+        elapsed = (now - self._run_started) if self._run_started is not None else None
         return {"pending": pending, "index": run_done + 1, "count": count,
-                "percent": percent, "eta_seconds": round(eta, 1) if known else None}
+                "percent": percent,
+                "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+                "eta_seconds": round(eta, 1) if known else None}
 
     def _push_queue_state(self) -> None:
         """Mirror the queue aggregate into StationState (for the e-paper panel)."""
@@ -932,6 +941,7 @@ class TranscodeManager:
         self._state.set_transcode_queue(
             pending=q["pending"], index=q["index"], count=q["count"],
             eta_seconds=q["eta_seconds"], percent=q["percent"],
+            elapsed_seconds=q["elapsed_seconds"],
         )
 
     def snapshot(self) -> dict:
@@ -1173,6 +1183,7 @@ class TranscodeManager:
         """End a run: surface the last error (ERROR phase) or restore ``prev_phase``."""
         with self._lock:
             self._run_done = 0
+            self._run_started = None
         if last_error is not None:
             self._hub.fail_transcode(f"Transcode failed: {last_error}")
         else:
@@ -1192,6 +1203,7 @@ class TranscodeManager:
             prev_phase = self._prev_phase_for_run()
             with self._lock:
                 self._run_done = 0
+                self._run_started = time.monotonic()
             last_error: Optional[str] = None
             job_id = first_job_id
             while True:
@@ -1213,6 +1225,7 @@ class TranscodeManager:
             prev_phase = self._prev_phase_for_run()
             with self._lock:
                 self._run_done = 0
+                self._run_started = time.monotonic()
             err = self._process_one(job_id)
             with self._lock:
                 self._run_done += 1

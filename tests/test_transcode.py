@@ -1183,7 +1183,7 @@ def test_snapshot_exposes_settings_and_queue(tmp_path):
     assert snap["auto_transcode"] is False
     assert snap["output_location"] == "same"
     assert snap["queue"] == {"pending": 0, "index": 0, "count": 0,
-                             "percent": 0.0, "eta_seconds": None}
+                             "percent": 0.0, "elapsed_seconds": None, "eta_seconds": None}
 
 
 def test_transcode_overlay_prunes_stale_keys(tmp_path):
@@ -1277,6 +1277,22 @@ def test_queue_eta_extrapolates_when_queued_estimates_missing(tmp_path, monkeypa
     assert q["pending"] == 3 and q["index"] == 1
     # ~20 (running) + ~40 + ~40 (two extrapolated) -> well above the running job alone
     assert q["eta_seconds"] is not None and q["eta_seconds"] > 60
+
+
+def test_queue_elapsed_spans_the_whole_run(tmp_path, monkeypatch):
+    # The queue's elapsed time is the whole run's wall time, not just the current
+    # file's -- so it keeps climbing across files instead of resetting each time.
+    card = _card(tmp_path)
+    (card / "b.mp4").write_bytes(b"\x00" * 32)
+    mgr = _mgr(_FakeBrowse({"sdb1": card}))
+    monkeypatch.setattr(mgr, "_ensure_worker", lambda: None)
+    mgr.submit_auto("sdb1", ["clip.mp4", "b.mp4"], preset_id="720p-h264")
+    ids = list(mgr._order)
+    # Run started 30s ago; the current (first) file only started 5s ago.
+    mgr._run_started = tc.time.monotonic() - 30.0
+    mgr._set(ids[0], status="running", started=tc.time.monotonic() - 5.0, percent=40)
+    q = mgr.snapshot()["queue"]
+    assert q["elapsed_seconds"] is not None and q["elapsed_seconds"] >= 29
 
 
 def test_run_batch_processes_all_jobs_and_restores_phase_once(tmp_path, monkeypatch):

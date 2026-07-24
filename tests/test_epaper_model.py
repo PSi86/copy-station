@@ -106,12 +106,14 @@ def _transcoding(queue, percent=40.0, eta=30.0):
 
 def test_build_view_batch_shows_queue_and_uses_overall_bar():
     v = build_view(_transcoding(
-        {"pending": 3, "index": 2, "count": 5, "eta_seconds": 300.0, "percent": 55.0}))
+        {"pending": 3, "index": 2, "count": 5, "eta_seconds": 300.0, "percent": 55.0,
+         "elapsed_seconds": 240.0}))
     assert v.transcode_active is True
     assert v.transcode_queue_text == "2/5"       # position within the batch
     assert v.transcode_file_text == "file 40%"   # the current file's own progress
     assert v.percent == 55                        # main bar = whole queue
     assert v.eta_text == fmt_duration(300.0)      # footer ETA = total remaining
+    assert v.elapsed_text == fmt_duration(240.0)  # elapsed = whole queue too (Σ)
 
 
 def test_build_view_single_file_transcode_unchanged():
@@ -121,6 +123,7 @@ def test_build_view_single_file_transcode_unchanged():
     assert v.transcode_file_text == ""
     assert v.percent == 40                 # per-file bar, as before
     assert v.eta_text == fmt_duration(30.0)
+    assert v.elapsed_text == fmt_duration(12.0)   # single file -> its own elapsed
 
 
 def test_build_view_transcode_without_queue_block():
