@@ -98,5 +98,6 @@ def test_missing_corrupt_or_nonobject_file_reads_empty(tmp_path):
 def test_default_schema_covers_both_features():
     # The shipped schema declares exactly the runtime sections used across the app.
     assert set(USER_SETTINGS_SCHEMA) == {"transcode", "wifi_ap"}
-    assert set(USER_SETTINGS_SCHEMA["transcode"]) == {"auto_transcode", "default_preset"}
+    assert set(USER_SETTINGS_SCHEMA["transcode"]) == {
+        "auto_transcode", "default_preset", "output_location"}
     assert set(USER_SETTINGS_SCHEMA["wifi_ap"]) == {"enabled"}

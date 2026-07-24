@@ -168,16 +168,19 @@ class StationState:
                     self._transcode["fps"] = float(fps)
 
     def set_transcode_queue(self, pending: int, index: int, count: int,
-                            eta_seconds: Optional[float], percent: float) -> None:
-        """Record the transcode queue aggregate (pending count, position, total
-        remaining time, overall %) so the e-paper panel can show the whole batch,
-        not just the current file. No-op unless a transcode is active."""
+                            eta_seconds: Optional[float], percent: float,
+                            elapsed_seconds: Optional[float] = None) -> None:
+        """Record the transcode queue aggregate (pending count, position, overall %,
+        total elapsed + remaining time) so the e-paper panel and the web top bar can
+        show the whole batch, not just the current file. No-op unless a transcode is
+        active."""
         with self._lock:
             if self._transcode.get("active"):
                 self._transcode["queue_pending"] = int(pending)
                 self._transcode["queue_index"] = int(index)
                 self._transcode["queue_count"] = int(count)
                 self._transcode["queue_eta_seconds"] = eta_seconds
+                self._transcode["queue_elapsed_seconds"] = elapsed_seconds
                 self._transcode["queue_percent"] = float(percent)
 
     def finish_transcode(self) -> None:
@@ -293,6 +296,7 @@ class StationState:
                 "pending": int(tr.get("queue_pending", 0) or 0),
                 "index": int(tr.get("queue_index", 0) or 0),
                 "count": int(tr.get("queue_count", 0) or 0),
+                "elapsed_seconds": tr.get("queue_elapsed_seconds"),
                 "eta_seconds": tr.get("queue_eta_seconds"),
                 "percent": round(float(tr.get("queue_percent", 0.0) or 0.0), 1),
             },

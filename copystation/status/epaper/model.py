@@ -197,7 +197,10 @@ def build_view(snapshot: dict[str, Any], version: str = "") -> ViewModel:
         transcode_encoder=str(transcode.get("encoder", "") or ""),
         transcode_size_text=fmt_bytes(transcode.get("input_size")) if (tr_active and transcode.get("input_size")) else "",
         transcode_fps_text=(f"{round(transcode['fps'])} fps" if (tr_active and transcode.get("fps")) else ""),
-        elapsed_text=fmt_duration(transcode.get("elapsed_seconds")) if tr_active else "",
+        # For a batch the elapsed time is the whole queue's (Σ, matching the bar),
+        # otherwise the single running job's.
+        elapsed_text=(fmt_duration(queue.get("elapsed_seconds")) if batch
+                      else fmt_duration(transcode.get("elapsed_seconds"))) if tr_active else "",
         transcode_queue_text=(f"{q_index}/{q_count}" if batch else ""),
         transcode_file_text=(f"file {file_percent}%" if batch else ""),
     )

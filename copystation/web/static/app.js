@@ -81,15 +81,12 @@ function renderDevices(el, devices) {
     .join("");
 }
 
-function apply(data) {
-  const phase = (data.phase || "").toLowerCase();
-  const badge = document.getElementById("phase");
-  badge.textContent = phase || "--";
-  badge.className = "badge " + phase;
-
-  document.getElementById("ap").hidden = !data.wifi_ap;
-
-  document.getElementById("progress-bar").style.width = `${data.percent || 0}%`;
+// Copy (or idle): the main bar shows byte progress with speed + ETA.
+function renderMainCopy(data) {
+  document.getElementById("op-title").textContent = "Transfer";
+  const bar = document.getElementById("progress-bar");
+  bar.classList.remove("transcoding");
+  bar.style.width = `${data.percent || 0}%`;
   document.getElementById("percent").textContent = `${data.percent || 0}%`;
   document.getElementById("transfer-name").textContent = data.transfer_name || "";
   document.getElementById("elapsed").textContent = fmtDuration(data.elapsed_seconds);
@@ -98,6 +95,44 @@ function apply(data) {
     data.speed_bytes ? `${fmtBytes(data.speed_bytes)}/s` : "--";
   document.getElementById("bytes").textContent =
     data.bytes_total ? `${fmtBytes(data.bytes_done)} / ${fmtBytes(data.bytes_total)}` : "--";
+}
+
+// Transcode: the main bar shows the whole-queue progress + total remaining time
+// (the figures the e-paper shows), plus the current file and job position. The
+// per-file bars and finished results stay in the Transcode card below.
+function renderMainTranscode(tr) {
+  document.getElementById("op-title").textContent = "Transcoding";
+  const q = tr.queue || {};
+  const pct = q.percent != null ? q.percent : (tr.percent || 0);
+  const bar = document.getElementById("progress-bar");
+  bar.classList.add("transcoding");
+  bar.style.width = `${pct}%`;
+  document.getElementById("percent").textContent = `${pct}%`;
+  document.getElementById("transfer-name").textContent = tr.name || "";
+  // Elapsed + ETA both span the whole queue (the bar's scope), not the current file.
+  document.getElementById("elapsed").textContent =
+    fmtDuration(q.elapsed_seconds != null ? q.elapsed_seconds : tr.elapsed_seconds);
+  document.getElementById("eta").textContent =
+    q.eta_seconds != null ? fmtDuration(q.eta_seconds) : "--";
+  document.getElementById("speed").textContent = tr.fps ? `${Math.round(tr.fps)} fps` : "--";
+  document.getElementById("bytes").textContent =
+    q.count ? `job ${q.index}/${q.count}${q.pending ? ` · ${q.pending} pending` : ""}` : "";
+}
+
+function apply(data) {
+  const phase = (data.phase || "").toLowerCase();
+  const badge = document.getElementById("phase");
+  badge.textContent = phase || "--";
+  badge.className = "badge " + phase;
+
+  document.getElementById("ap").hidden = !data.wifi_ap;
+
+  // The top bar is shared between a copy and a transcode (like the e-paper): a
+  // running transcode drives it with the whole-queue progress + total remaining
+  // time; otherwise it shows the copy's byte progress.
+  const tr = data.transcode;
+  if (tr && tr.active) renderMainTranscode(tr);
+  else renderMainCopy(data);
 
   renderDevices(document.getElementById("devices"), data.devices);
   renderLog(document.getElementById("log"), data.events);
@@ -282,8 +317,6 @@ async function loadVolumes() {
       .map((v) => `<option value="${escapeHtml(v.sys_name)}">${escapeHtml(v.name)} (${escapeHtml(v.sys_name)})</option>`)
       .join("");
     sel.innerHTML = options;
-    const tcOut = document.getElementById("tc-output");
-    if (tcOut) tcOut.innerHTML = options; // transcode output volume picker
     if (vols.length === 0) {
       fileState.device = null;
       document.getElementById("file-path").textContent = "";
@@ -423,25 +456,17 @@ async function cancelJob(id) {
   loadJobs();
 }
 
-function renderQueue(queue) {
-  const box = document.getElementById("tc-queue");
-  if (!box) return;
-  if (!queue || !queue.pending) {
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const parts = [`job ${queue.index}/${queue.count}`, `${queue.pending} pending`];
-  document.getElementById("tc-queue-text").textContent = parts.join(" · ");
-  document.getElementById("tc-queue-eta").textContent =
-    queue.eta_seconds != null ? `~${fmtDuration(queue.eta_seconds)} total` : "";
-  document.getElementById("tc-queue-bar").style.width = `${queue.percent || 0}%`;
-}
-
 // Reflect the persisted auto-transcode toggle without fighting a mid-click.
 function syncAutoToggle(value) {
   const cb = document.getElementById("tc-auto");
   if (cb && document.activeElement !== cb) cb.checked = !!value;
+}
+
+// Reflect the persisted output-location choice (central / same), unless the user
+// is mid-selection on it.
+function syncLocation(value) {
+  const sel = document.getElementById("tc-location");
+  if (sel && value && document.activeElement !== sel) sel.value = value;
 }
 
 async function postTranscodeSettings(body) {
@@ -468,8 +493,8 @@ async function loadJobs() {
       updatePresetLabels(data.presets);
       lastJobs = data.jobs || [];
       renderJobs(lastJobs);
-      renderQueue(data.queue);
       syncAutoToggle(data.auto_transcode);
+      syncLocation(data.output_location);
     }
   } catch (e) {
     /* transient */
@@ -488,6 +513,7 @@ async function loadPresets() {
       .join("");
     if (data.default_preset) sel.value = data.default_preset;  // the persisted default
     syncAutoToggle(data.auto_transcode);
+    syncLocation(data.output_location);
     const info = document.getElementById("tc-info");
     if (info) {
       if (data.available === false) {
@@ -501,15 +527,14 @@ async function loadPresets() {
   }
 }
 
-async function submitTranscode(path, presetId, outputDevice) {
+async function submitTranscode(path, presetId) {
   const preset = presetId || document.getElementById("tc-preset").value;
-  const output = outputDevice || document.getElementById("tc-output").value || fileState.device;
   if (!preset || !fileState.device) return;
   try {
     const res = await fetch("/api/transcode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device: fileState.device, path, preset, output_device: output }),
+      body: JSON.stringify({ device: fileState.device, path, preset }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -562,9 +587,6 @@ function openFileDialog(path) {
   const mainPreset = document.getElementById("tc-preset");
   dlgPreset.innerHTML = mainPreset.innerHTML;
   dlgPreset.value = mainPreset.value;
-  const dlgOut = document.getElementById("dlg-output");
-  dlgOut.innerHTML = document.getElementById("tc-output").innerHTML;
-  dlgOut.value = document.getElementById("tc-output").value || fileState.device;
   for (const id of ["dlg-size", "dlg-codec", "dlg-res", "dlg-fps", "dlg-dur"]) {
     document.getElementById(id).textContent = "…";
   }
@@ -689,9 +711,6 @@ function openFolderDialog(path) {
   const mainPreset = document.getElementById("tc-preset");
   dlgPreset.innerHTML = mainPreset.innerHTML;
   dlgPreset.value = mainPreset.value;
-  const dlgOut = document.getElementById("fdlg-output");
-  dlgOut.innerHTML = document.getElementById("tc-output").innerHTML;
-  dlgOut.value = document.getElementById("tc-output").value || fileState.device;
   document.getElementById("fdlg-summary").textContent = "scanning folder…";
   document.getElementById("fdlg-files").innerHTML = "";
   document.getElementById("fdlg-transcode").disabled = true;
@@ -764,12 +783,11 @@ async function refreshFolderPlan() {
 async function submitFolder() {
   if (folderState.path == null || !fileState.device) return;
   const preset = document.getElementById("fdlg-preset").value;
-  const output = document.getElementById("fdlg-output").value || fileState.device;
   try {
     const res = await fetch("/api/transcode/folder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device: fileState.device, path: folderState.path, preset, output_device: output }),
+      body: JSON.stringify({ device: fileState.device, path: folderState.path, preset }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -858,8 +876,8 @@ function hidePvHint() {
   if (h) { h.hidden = true; h.innerHTML = ""; }
 }
 
-// Heavy sources (bigger than 1080p / HEVC) play here but stutter -- hint that a
-// transcode gives smooth playback, with a shortcut into the transcode dialog.
+// Sources larger than Full HD play here but stutter -- hint that a transcode
+// gives smooth playback, with a shortcut into the transcode dialog.
 function showPvHint(path, info) {
   const h = document.getElementById("pv-hint");
   if (!h) return;
@@ -989,6 +1007,9 @@ async function initFeatures() {
     document.getElementById("tc-auto").addEventListener("change", (e) => {
       postTranscodeSettings({ auto_transcode: e.target.checked });
     });
+    document.getElementById("tc-location").addEventListener("change", (e) => {
+      postTranscodeSettings({ output_location: e.target.value });
+    });
     document.getElementById("tc-jobs").addEventListener("click", (e) => {
       const btn = e.target.closest("button.tc-cancel[data-job]");
       if (!btn) return;
@@ -1005,11 +1026,7 @@ async function initFeatures() {
     document.getElementById("dlg-cancel").addEventListener("click", closeDialog);
     document.getElementById("dlg-delete").addEventListener("click", deleteCurrentFile);
     document.getElementById("dlg-transcode").addEventListener("click", () => {
-      submitTranscode(
-        dlgState.path,
-        document.getElementById("dlg-preset").value,
-        document.getElementById("dlg-output").value || fileState.device
-      );
+      submitTranscode(dlgState.path, document.getElementById("dlg-preset").value);
       closeDialog();
     });
     // Click on the backdrop (outside the body) closes the dialog.

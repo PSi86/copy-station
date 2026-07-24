@@ -6,6 +6,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-24
+
+Transcode usability release: the output goes where the source lives, the browser
+stutter hint stops crying wolf, and the whole batch is reported consistently on the
+main progress bar (like the e-paper).
+
+### Added
+- **Transcode output location** (`transcode.output_location`, toggleable in the web
+  UI's Transcode card and persisted in the user-settings overlay). Transcoded files
+  are always written to the **source file's own medium**, either in a `Transcoded/`
+  folder **next to the original** (`same`, the default) or in one **central
+  `Transcoded/` folder at the medium's root** (`central`).
+- The **main progress bar** now shows a running transcode, the same way the e-paper
+  does: the whole-queue percent, elapsed and remaining time, the current file with
+  its job position (`job X/N`) and the encode fps. The Transcode card keeps the
+  per-file rows (each with its own bar) and the finished results with download links.
+
+### Changed
+- The in-browser preview **"may stutter" hint** is now driven only by resolution
+  (clearly above Full HD, `preview.max_direct_height`). A 540p HEVC clip or a 1080p
+  `.mkv` no longer trips it -- codec and container are ignored; a source the browser
+  cannot decode at all is still handled by the player's own fallback.
+
+### Fixed
+- The transcode **queue ETA** now spans every pending job: a queued job with no
+  learned estimate of its own is extrapolated from the running job's projected time,
+  so the total no longer collapses to just the current file.
+- The **elapsed time** on the main bar (and the e-paper batch view) is now the whole
+  queue's wall time instead of resetting to each file's own elapsed at every file.
+- The Allwinner OMX **HEVC** encoder's magenta bottom strip is removed by applying
+  the conformance-window crop the encoder omits (a no-re-encode SPS-crop remux for a
+  single-pass job, and a padding-row crop before the CPU downscale for a two-stage
+  job).
+
+### Removed
+- The transcode **output-volume picker** (from the Transcode card and the file/folder
+  dialogs) and the `output_device` request field: the output always follows the
+  source's medium now, so there is nothing to choose.
+
 ## [1.0.1] - 2026-07-12
 
 Documentation/estimate refinement only -- no behaviour change to an existing
@@ -216,6 +255,7 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/PSi86/copy-station/releases/tag/v1.1.0
 [1.0.1]: https://github.com/PSi86/copy-station/releases/tag/v1.0.1
 [1.0.0]: https://github.com/PSi86/copy-station/releases/tag/v1.0.0

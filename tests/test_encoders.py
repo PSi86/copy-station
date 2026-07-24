@@ -9,6 +9,7 @@ from copystation.encoders import (
     available_hwaccels,
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
+    build_hevc_crop_remux_cmd,
     cpu_encoder,
     decoder_scale_factor,
     default_bitrate,
@@ -16,6 +17,7 @@ from copystation.encoders import (
     family_of,
     gst_can_handle,
     gstreamer_output_height,
+    hevc_conformance_crop,
     hevc_decode_hwaccel,
     select_encoders,
     with_decode_offload,
@@ -503,3 +505,53 @@ def test_build_gstreamer_cmd_keeps_resolution_when_height_zero():
     assert not any(x.startswith("scale=") for x in cmd)   # no decoder downscale
     assert not any(x.startswith("output-width") or x.startswith("output-height") for x in cmd)
     assert "target-bitrate=40000000" in cmd           # default_bitrate(2160) = 40M
+
+
+# --------------------------------------------------------------------------- #
+# Allwinner OMX HEVC conformance-window crop (magenta bottom-line fix)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "coded,want,expected",
+    [
+        ((1920, 1088), (1920, 1080), (0, 8)),   # 4K -> 1080p HEVC: 8 padding rows
+        ((960, 544), (960, 540), (0, 4)),        # 4K -> 540p HEVC: 4 padding rows
+        ((1920, 1088), (1920, 1088), (0, 0)),    # already aligned -> nothing to crop
+        ((1920, 1080), (1920, 1080), (0, 0)),    # H.264-style already-cropped output
+        ((0, 0), (1920, 1080), (0, 0)),          # unknown coded size -> no-op
+        ((1928, 1088), (1920, 1080), (8, 8)),    # non-aligned width crops the right too
+        ((1920, 1087), (1920, 1080), (0, 6)),    # odd delta rounds DOWN to even (4:2:0)
+    ],
+)
+def test_hevc_conformance_crop(coded, want, expected):
+    assert hevc_conformance_crop(coded[0], coded[1], want[0], want[1]) == expected
+
+
+def test_build_hevc_crop_remux_cmd_copies_and_sets_bsf():
+    cmd = build_hevc_crop_remux_cmd("/in/a.mp4", "/out/b.mp4", crop_right=0, crop_bottom=8)
+    # Stream-copy remux (NO re-encode), video bitstream filter adds the crop.
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert cmd[cmd.index("-bsf:v") + 1] == "hevc_metadata=crop_bottom=8"
+    assert "-crf" not in cmd and "libx265" not in cmd and "-c:v" not in cmd
+    assert "+faststart" in cmd
+    assert cmd[cmd.index("-i") + 1] == "/in/a.mp4" and cmd[-1] == "/out/b.mp4"
+
+
+def test_build_hevc_crop_remux_cmd_includes_both_crops():
+    cmd = build_hevc_crop_remux_cmd("a", "b", crop_right=8, crop_bottom=8)
+    assert cmd[cmd.index("-bsf:v") + 1] == "hevc_metadata=crop_right=8:crop_bottom=8"
+
+
+def test_build_ffmpeg_cmd_pre_filters_run_before_scale():
+    # The two-stage HEVC finish crops the encoder's padding rows off before downscaling.
+    cmd = build_ffmpeg_cmd(cpu_encoder("libx265"), {"height": 720, "vcodec": "libx265"},
+                           "a", "b", pre_filters=["crop=iw:1080:0:0"])
+    assert cmd[cmd.index("-vf") + 1] == "crop=iw:1080:0:0,scale=-2:720"
+
+
+def test_build_ffmpeg_cmd_pre_filters_none_is_unchanged():
+    # Default (no pre_filters) keeps every existing caller (the Pi/CPU path) identical.
+    base = build_ffmpeg_cmd(cpu_encoder("libx264"), {"height": 720}, "a", "b")
+    same = build_ffmpeg_cmd(cpu_encoder("libx264"), {"height": 720}, "a", "b", pre_filters=None)
+    assert base == same
+    assert base[base.index("-vf") + 1] == "scale=-2:720"

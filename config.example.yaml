@@ -179,18 +179,24 @@ wifi_ap:
   captive_portal_port: 80
 
 # Optional video transcoding / resolution change via ffmpeg. Jobs are submitted
-# from the web interface (Files -> the ⚙ button on a video). The output is
-# written to <output_dirname>/ on the chosen TARGET volume (read-write) and is
-# also downloadable. Serialised with the copy daemon, so a copy and a transcode
-# never touch the same card at once. Needs ffmpeg installed (scripts/install.sh
-# pulls it in); a no-op with a clear error otherwise. Off by default.
+# from the web interface (Files -> the ⚙ button on a video). The output is always
+# written to a <output_dirname>/ folder on the SOURCE file's OWN medium (read-write)
+# and is also downloadable. Serialised with the copy daemon, so a copy and a
+# transcode never touch the same card at once. Needs ffmpeg installed
+# (scripts/install.sh pulls it in); a no-op with a clear error otherwise. Off by default.
 transcode:
   enabled: false
   output_dirname: Transcoded
+  # Where the <output_dirname>/ folder is created on the source's own medium:
+  #   same    -> next to the original file (default)
+  #   central -> once at the medium's root
+  # Only the factory default -- the live value is set from the web UI's Transcode
+  # card and persisted in `user_settings_file` (top of this file), which then wins.
+  output_location: same
   max_jobs: 1
   # Auto-transcode: after a successful copy, automatically queue a transcode of
-  # every just-copied VIDEO file (written onto the target, into <output_dirname>/)
-  # using `default_preset`. The source card is cleanly unmounted BEFORE the batch
+  # every just-copied VIDEO file (written back onto the target, per output_location
+  # above) using `default_preset`. The source card is cleanly unmounted BEFORE the batch
   # starts, so it can be removed while the transcodes run. This is only the
   # factory default -- the live value is toggled from the web UI's Transcode card
   # and persisted in `user_settings_file` (top of this file), which then wins.
@@ -278,6 +284,7 @@ transcode:
     - { id: "1080p-h264", label: "1080p H.264", height: 1080, vcodec: libx264, crf: 21, preset: veryfast, bitrate: 24M }   # 4K -> single HW pass (1/2), bitrate
     - { id: "1080p-h265", label: "1080p H.265", height: 1080, vcodec: libx265, crf: 28, preset: veryfast, bitrate: 16M }   # Cubie: single HW HEVC pass; else CPU
     - { id: "540p-h264",  label: "540p H.264",  height: 540,  vcodec: libx264, crf: 23, preset: veryfast, bitrate: 12M }   # 4K -> single HW pass (1/4), bitrate
+    - { id: "540p-h265",  label: "540p H.265",  height: 540,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # Cubie: single HW HEVC pass; else CPU
     - { id: "720p-h264",  label: "720p H.264",  height: 720,  vcodec: libx264, crf: 24, preset: veryfast, bitrate: 10M }   # 4K -> HW 1080 + CPU finish, crf
     - { id: "720p-h265",  label: "720p H.265",  height: 720,  vcodec: libx265, crf: 28, preset: veryfast, bitrate: 8M }    # Cubie: HW HEVC 1080 + CPU finish
 

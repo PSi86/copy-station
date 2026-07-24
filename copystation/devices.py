@@ -625,8 +625,9 @@ class DeviceWatcher:
         """Queue an auto-transcode of the just-copied video files, if enabled.
 
         The copied files live under ``dest`` on the target volume; each video
-        file becomes one transcode job (output onto the same target's
-        ``Transcoded/`` folder), using the persisted default preset. Enqueuing
+        file becomes one transcode job written back to that same target (in a
+        ``Transcoded/`` folder per the configured output location), using the
+        persisted default preset. Enqueuing
         happens here (target still mounted) but the transcode worker only starts
         once the caller's ``finally`` has unmounted the cards and released the
         operation lock -- so the source is safely released first. Best-effort: any
@@ -654,7 +655,7 @@ class DeviceWatcher:
                 self._hub.log_event("Auto-transcode: no video files to convert")
                 return
             tc.submit_auto(target.sys_name, rels, mount_root=target.mountpoint,
-                           output_device=target.sys_name, preset_id=preset)
+                           preset_id=preset)
             self._hub.log_event(
                 f"Auto-transcode: queued {len(rels)} file(s) [{preset}]"
             )

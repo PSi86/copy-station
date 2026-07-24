@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, List, Optional
 
 from .encoders import (
@@ -32,11 +32,14 @@ from .encoders import (
     available_hwaccels,
     build_ffmpeg_cmd,
     build_gstreamer_cmd,
+    build_hevc_crop_remux_cmd,
     cpu_encoder,
+    decoder_scale_factor,
     default_bitrate,
     detect_board,
     gst_can_handle,
     gstreamer_output_height,
+    hevc_conformance_crop,
     select_encoders,
     with_decode_offload,
 )
@@ -65,6 +68,14 @@ PERF_STABLE_MIN_OUTPUT_SEC = 10
 
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Where a transcoded file is written -- always on the SOURCE file's own medium
+# (the output device is never chosen separately), only the sub-directory differs:
+#   "central" -> <volume-root>/<output_dirname>/       (one folder per medium)
+#   "same"    -> <source-dir>/<output_dirname>/         (a Transcoded folder beside
+#                                                        the source file)
+OUTPUT_LOCATIONS = ("central", "same")
+DEFAULT_OUTPUT_LOCATION = "same"
+
 # Extensions treated as transcodable video when a whole folder is submitted. The
 # GStreamer hardware path only takes a subset (see ``encoders._GST_DEMUX``); the
 # rest still transcode on the CPU. Non-video files (photos, sidecars) are skipped.
@@ -92,6 +103,10 @@ class TranscodeUnavailable(TranscodeError):
 
 class UnknownPreset(TranscodeError):
     """The requested preset id is not configured."""
+
+
+class InvalidSetting(TranscodeError):
+    """A runtime setting was given an unsupported value (mapped to 400)."""
 
 
 class TranscodeBusy(TranscodeError):
@@ -248,6 +263,28 @@ def probe_video_info(src: Any) -> dict:
             AttributeError, TypeError):
         pass
     return info
+
+
+def probe_coded_dims(src: Any) -> tuple:
+    """``(coded_width, coded_height)`` of the first video stream via ffprobe, or ``(0, 0)``.
+
+    The *coded* size includes the encoder's coding-block padding (e.g. 1088 for a
+    1080-line HEVC frame). Used to compute the conformance-window crop that the
+    Allwinner OMX HEVC encoder omits (see ``encoders.hevc_conformance_crop``).
+    Best-effort: any failure returns ``(0, 0)``, which makes the crop a no-op.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=coded_width,coded_height", "-of", "json", str(src)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        streams = json.loads(out).get("streams") or []
+        st = streams[0] if streams else {}
+        return int(st.get("coded_width") or 0), int(st.get("coded_height") or 0)
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError,
+            IndexError, TypeError):
+        return 0, 0
 
 
 def _parse_fps(rate: Any) -> float:
@@ -461,6 +498,13 @@ class TranscodeManager:
             if self._settings.has("default_preset")
             else tc.get("default_preset")
         )
+        # Where transcoded files land on the source medium ("central" | "same").
+        # The overlay (a web-UI change) wins over the config default.
+        self._output_location = self._resolve_output_location(
+            self._settings.get("output_location")
+            if self._settings.has("output_location")
+            else tc.get("output_location")
+        )
         # Mirror the auto-transcode setting onto the shared state so the e-paper
         # badge and the web header reflect it (and a button toggle updates it live).
         self._state.set_auto_transcode(self._auto_transcode)
@@ -485,6 +529,9 @@ class TranscodeManager:
         self._seq = 0
         # Jobs finished in the current batch/run, for the queue's overall progress.
         self._run_done = 0
+        # Monotonic time the current run started (spans the whole batch), for the
+        # queue's overall elapsed time. ``None`` between runs.
+        self._run_started: Optional[float] = None
         self._current_proc: Optional[subprocess.Popen] = None
         self._current_id: Optional[int] = None
         self._worker: Optional[threading.Thread] = None
@@ -541,11 +588,37 @@ class TranscodeManager:
             return str(requested)
         return self._first_preset_id()
 
+    @staticmethod
+    def _resolve_output_location(requested: Any) -> str:
+        """A valid output location ("central"/"same"); the default when unset/bad."""
+        val = str(requested).strip().lower() if requested is not None else ""
+        return val if val in OUTPUT_LOCATIONS else DEFAULT_OUTPUT_LOCATION
+
+    def _output_rel_dir(self, input_path: str) -> str:
+        """Volume-relative directory the transcoded file is written into.
+
+        ``central`` -> ``<output_dirname>`` at the volume root; ``same`` -> an
+        ``<output_dirname>`` folder inside the source file's own directory (so the
+        transcode lands beside its original). The output is always on the source's
+        own medium either way.
+        """
+        if self.output_location == "same":
+            parent = PurePosixPath(str(input_path)).parent
+            base = "" if parent.as_posix() in (".", "") else parent.as_posix()
+            return f"{base}/{self._output_dirname}" if base else self._output_dirname
+        return self._output_dirname
+
     @property
     def default_preset(self) -> Optional[str]:
         """The preset preselected in the web UI dialogs / used by auto-transcode."""
         with self._settings_lock:
             return self._default_preset
+
+    @property
+    def output_location(self) -> str:
+        """Where transcoded files land on the source medium ("central" | "same")."""
+        with self._settings_lock:
+            return self._output_location
 
     @property
     def auto_transcode(self) -> bool:
@@ -554,11 +627,13 @@ class TranscodeManager:
             return self._auto_transcode
 
     def set_settings(self, default_preset: Any = None,
-                     auto_transcode: Any = None) -> dict:
+                     auto_transcode: Any = None,
+                     output_location: Any = None) -> dict:
         """Update and persist the runtime settings; return the current values.
 
         Only the provided fields change. An unknown ``default_preset`` raises
-        :class:`UnknownPreset`.
+        :class:`UnknownPreset`; an unsupported ``output_location`` raises
+        :class:`InvalidSetting`.
         """
         with self._settings_lock:
             changed: dict[str, Any] = {}
@@ -570,12 +645,20 @@ class TranscodeManager:
             if auto_transcode is not None:
                 self._auto_transcode = bool(auto_transcode)
                 changed["auto_transcode"] = self._auto_transcode
+            if output_location is not None:
+                loc = str(output_location).strip().lower()
+                if loc not in OUTPUT_LOCATIONS:
+                    raise InvalidSetting(f"unknown output_location {output_location!r}")
+                self._output_location = loc
+                changed["output_location"] = loc
             if changed:
                 self._settings.update(**changed)  # persist only the changed key(s)
-            _LOG.info("Transcode settings updated (default_preset=%s, auto_transcode=%s)",
-                      self._default_preset, self._auto_transcode)
+            _LOG.info("Transcode settings updated (default_preset=%s, auto_transcode=%s, "
+                      "output_location=%s)", self._default_preset, self._auto_transcode,
+                      self._output_location)
             result = {"default_preset": self._default_preset,
-                      "auto_transcode": self._auto_transcode}
+                      "auto_transcode": self._auto_transcode,
+                      "output_location": self._output_location}
         # Reflect the (possibly changed) auto-transcode flag on the shared state
         # for the e-paper badge / web header. Done outside the settings lock.
         self._state.set_auto_transcode(result["auto_transcode"])
@@ -783,9 +866,10 @@ class TranscodeManager:
 
         ``pending`` counts queued+running jobs; ``count``/``index`` frame it as
         "job index of count" within the current run; ``percent`` is a count-based
-        overall fraction (robust without estimates); ``eta_seconds`` sums the
-        remaining time (the running job's live ETA + the queued jobs' estimates),
-        ``None`` when nothing could be estimated.
+        overall fraction (robust without estimates); ``elapsed_seconds`` is the wall
+        time since the run started (across all its files, not just the current one);
+        ``eta_seconds`` sums the remaining time (the running job's live ETA + the
+        queued jobs' estimates), ``None`` when nothing could be estimated.
         """
         run_done = self._run_done
         running: Optional[dict] = None
@@ -801,28 +885,53 @@ class TranscodeManager:
         pending = (1 if running is not None else 0) + len(queued)
         if pending == 0:
             return {"pending": 0, "index": 0, "count": run_done,
-                    "percent": 0.0, "eta_seconds": None}
+                    "percent": 0.0, "elapsed_seconds": None, "eta_seconds": None}
         count = run_done + pending
         run_frac = 0.0
         if running is not None:
             run_frac = max(0.0, min(1.0, float(running.get("percent") or 0) / 100.0))
         percent = round((run_done + run_frac) / count * 100.0, 1) if count else 0.0
+        # Remaining wall time across the WHOLE queue, not just the running job. The
+        # running job's remaining is its live ETA; each queued job uses its own
+        # learned estimate, or -- when it has none (its source key was never seeded
+        # nor learned) -- a fallback, so the total still scales with the number of
+        # pending jobs. The fallback is the running job's projected full time (a
+        # batch is usually homogeneous), else the mean of the estimates we do have.
+        running_remaining: Optional[float] = None
+        running_full: Optional[float] = None
+        if running is not None:
+            pj = self._public_job(running, now)
+            elapsed, remaining = pj.get("elapsed_seconds"), pj.get("eta_seconds")
+            running_remaining = (remaining if remaining is not None
+                                 else running.get("estimate_seconds"))
+            if elapsed is not None and remaining is not None:
+                running_full = elapsed + remaining
+            elif running.get("estimate_seconds"):
+                running_full = running.get("estimate_seconds")
+        known_ests = [j["estimate_seconds"] for j in queued if j.get("estimate_seconds")]
+        if running is not None and running.get("estimate_seconds"):
+            known_ests.append(running["estimate_seconds"])
+        per_job_fallback = running_full or (
+            sum(known_ests) / len(known_ests) if known_ests else None)
         eta = 0.0
         known = False
-        if running is not None:
-            remaining = self._public_job(running, now).get("eta_seconds")
-            if remaining is None:
-                remaining = running.get("estimate_seconds")
-            if remaining is not None:
-                eta += remaining
-                known = True
+        if running_remaining is not None:
+            eta += running_remaining
+            known = True
         for j in queued:
             est = j.get("estimate_seconds")
+            if est is None:
+                est = per_job_fallback
             if est is not None:
                 eta += est
                 known = True
+        # Wall time the whole run has been going (spans every file, so it keeps
+        # climbing between jobs instead of resetting to each file's own elapsed).
+        elapsed = (now - self._run_started) if self._run_started is not None else None
         return {"pending": pending, "index": run_done + 1, "count": count,
-                "percent": percent, "eta_seconds": round(eta, 1) if known else None}
+                "percent": percent,
+                "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+                "eta_seconds": round(eta, 1) if known else None}
 
     def _push_queue_state(self) -> None:
         """Mirror the queue aggregate into StationState (for the e-paper panel)."""
@@ -832,6 +941,7 @@ class TranscodeManager:
         self._state.set_transcode_queue(
             pending=q["pending"], index=q["index"], count=q["count"],
             eta_seconds=q["eta_seconds"], percent=q["percent"],
+            elapsed_seconds=q["elapsed_seconds"],
         )
 
     def snapshot(self) -> dict:
@@ -842,9 +952,11 @@ class TranscodeManager:
         with self._settings_lock:
             default_preset = self._default_preset
             auto_transcode = self._auto_transcode
+            output_location = self._output_location
         return {
             "available": self._available,
             "output_dirname": self._output_dirname,
+            "output_location": output_location,
             "board": self._board,
             "acceleration": self._acceleration,
             "default_preset": default_preset,
@@ -910,7 +1022,6 @@ class TranscodeManager:
         input_device: str,
         input_path: str,
         preset_id: str,
-        output_device: Optional[str] = None,
     ) -> dict:
         if not self._available:
             raise TranscodeUnavailable("ffmpeg is not installed on the station")
@@ -924,7 +1035,8 @@ class TranscodeManager:
         # Validate the input up front (mounts read-only) so a bad file/volume is
         # reported immediately instead of failing asynchronously.
         self._browse.resolve_input(input_device, input_path)
-        out_dev = output_device or input_device
+        # The transcode is always written to the SOURCE file's own medium.
+        out_dev = input_device
         with self._lock:
             self._seq += 1
             job_id = self._seq
@@ -944,7 +1056,6 @@ class TranscodeManager:
         input_device: str,
         input_path: str,
         preset_id: str,
-        output_device: Optional[str] = None,
     ) -> dict:
         """Queue one independent job per video file in a folder (single preset).
 
@@ -966,7 +1077,7 @@ class TranscodeManager:
                  if not e.get("is_dir") and is_video_file(e.get("name", ""))]
         if not names:
             raise TranscodeError("no video files in this folder")
-        out_dev = output_device or input_device
+        out_dev = input_device  # always written to the source's own medium
         rels = [f"{folder}/{name}" if folder else name for name in names]
         estimates = {rel: self._estimate_via_browse(input_device, rel, preset_id)
                      for rel in rels}
@@ -993,7 +1104,6 @@ class TranscodeManager:
         input_device: str,
         rels: List[str],
         mount_root: Any = None,
-        output_device: Optional[str] = None,
         preset_id: Optional[str] = None,
     ) -> dict:
         """Queue one job per already-listed file, for auto-transcode after a copy.
@@ -1012,7 +1122,7 @@ class TranscodeManager:
         if not preset:
             raise TranscodeError("no transcode preset configured")
         self._preset(preset)  # validate -> UnknownPreset
-        out_dev = output_device or input_device
+        out_dev = input_device  # always written to the source's own medium
         estimates = ({rel: self._estimate_for_path(mount_root, rel, preset)
                       for rel in rels} if mount_root is not None else {})
         snaps: List[dict] = []
@@ -1073,6 +1183,7 @@ class TranscodeManager:
         """End a run: surface the last error (ERROR phase) or restore ``prev_phase``."""
         with self._lock:
             self._run_done = 0
+            self._run_started = None
         if last_error is not None:
             self._hub.fail_transcode(f"Transcode failed: {last_error}")
         else:
@@ -1092,6 +1203,7 @@ class TranscodeManager:
             prev_phase = self._prev_phase_for_run()
             with self._lock:
                 self._run_done = 0
+                self._run_started = time.monotonic()
             last_error: Optional[str] = None
             job_id = first_job_id
             while True:
@@ -1113,6 +1225,7 @@ class TranscodeManager:
             prev_phase = self._prev_phase_for_run()
             with self._lock:
                 self._run_done = 0
+                self._run_started = time.monotonic()
             err = self._process_one(job_id)
             with self._lock:
                 self._run_done += 1
@@ -1129,15 +1242,14 @@ class TranscodeManager:
                 return None  # canceled before it started, or already handled
             input_device = job["input_device"]
             input_path = job["input_path"]
-            output_device = job["output_device"]
             preset_id = job["preset"]
 
         started = time.monotonic()
         self._set(job_id, status="running", started=started)
+        out_dir_rel = self._output_rel_dir(input_path)  # central vs same folder
         out_name = output_name(Path(input_path).name, preset_id)
-        out_rel = f"{self._output_dirname}/{out_name}"
+        out_rel = f"{out_dir_rel}/{out_name}"
         self._set(job_id, filename=out_name, output_path=out_rel)
-        same_device = input_device == output_device
         # Update the current-file name on every backend (phase already TRANSCODING).
         self._hub.begin_transcode(Path(input_path).name)
         self._push_queue_state()
@@ -1146,17 +1258,15 @@ class TranscodeManager:
         # the ``finally`` has unmounted the volume -- a re-probe there would fail).
         src_info: Optional[dict] = None
         try:
-            # A block device can't be mounted read-only and read-write at once
-            # (shared superblock -> the read-only one wins), so drop any browse
-            # mount of the output device before mounting it read-write. Under the
-            # operation lock the daemon holds no mount of it either.
-            self._browse.release(output_device)
-            out_root = self._browse.mount_rw(output_device)
+            # The transcode reads its source and writes its output on the SAME
+            # (source) medium, so mount it once read-write. Drop any read-only
+            # browse mount of it first: a block device can't be mounted read-only
+            # and read-write at once (shared superblock -> the read-only one wins).
+            # Under the operation lock the daemon holds no mount of it either.
+            self._browse.release(input_device)
+            root = self._browse.mount_rw(input_device)
             try:
-                # Read the input from the read-write mount when it is the same
-                # device; otherwise mount the (different) input device read-only.
-                in_root = out_root if same_device else self._browse.mount_ro(input_device)
-                src = safe_resolve(in_root, input_path)
+                src = safe_resolve(root, input_path)
                 if not src.is_file():
                     raise NotFound(f"{input_path!r} is not a file")
                 try:
@@ -1168,14 +1278,14 @@ class TranscodeManager:
                 # Probe now (still mounted); reused for the perf model on both
                 # completion and cancel, and warms the cache for the encode.
                 src_info = self._probe(src)
-                out_dir = out_root / self._output_dirname
+                out_dir = root / out_dir_rel
                 out_dir.mkdir(parents=True, exist_ok=True)
                 # Never clobber an existing output (e.g. two sources in a batch
                 # that map to the same name): fall back to <stem>_2, _3, ...
                 dst = unique_output_path(out_dir / out_name)
                 if dst.name != out_name:
                     out_name = dst.name
-                    out_rel = f"{self._output_dirname}/{out_name}"
+                    out_rel = f"{out_dir_rel}/{out_name}"
                     self._set(job_id, filename=out_name, output_path=out_rel)
                 self._encode(job_id, src, dst, self._preset(preset_id))
                 try:
@@ -1189,15 +1299,13 @@ class TranscodeManager:
                     pass
                 subprocess.run(["sync"], check=False)
             finally:
-                self._browse.umount_rw(output_device)
-                if not same_device:
-                    self._browse.release(input_device)
+                self._browse.umount_rw(input_device)
             with self._lock:
                 job = self._jobs.get(job_id)
                 if job is not None and job["status"] == "running":
                     job["status"] = "done"
                     job["percent"] = 100
-            _LOG.info("Transcode #%d done -> %s:%s", job_id, output_device, out_rel)
+            _LOG.info("Transcode #%d done -> %s:%s", job_id, input_device, out_rel)
             return None
         except _Canceled:
             self._set(job_id, status="canceled")
@@ -1379,14 +1487,47 @@ class TranscodeManager:
         the nearest larger clean size and a light ffmpeg pass scales it down to the
         exact target on the CPU. The encoder scaler (which leaves a magenta bottom
         line) is never used. Raising propagates to the caller's CPU fallback.
+
+        The Allwinner OMX **HEVC** encoder additionally pads the coded picture up to a
+        coding-block multiple (e.g. 1080 -> 1088) and emits no conformance window --
+        rendered as a magenta bottom strip. So for ``omxhevcvideoenc`` output only, a
+        single hardware pass is followed by a ``-c copy`` remux that rewrites the SPS
+        crop (no re-encode), and a two-stage job crops those padding rows off the
+        intermediate before the CPU downscale. The H.264 encoder crops correctly and is
+        left untouched; the ffmpeg encoders on the Pi never reach this GStreamer path.
         """
         src_fps = info.get("fps")
         target_h = int(preset.get("height", 0) or 0)
-        out_h = gstreamer_output_height(int(info.get("height") or 0), target_h)
+        src_w, src_h = int(info.get("width") or 0), int(info.get("height") or 0)
+        scale = decoder_scale_factor(src_h, target_h)
+        out_h = (src_h >> scale) if src_h > 0 else target_h
+        out_w = (src_w >> scale) if src_w > 0 else 0
+        is_hevc_hw = enc.codec == "omxhevcvideoenc"
+
+        # Single hardware pass: the decoder lands exactly on the target height.
         if not (target_h > 0 and out_h > 0 and out_h != target_h):
             self._set(job_id, path="hw")
-            self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, dst, info),
-                             duration, "gstreamer", src_fps=src_fps, track_perf=True)
+            if not is_hevc_hw:
+                self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, dst, info),
+                                 duration, "gstreamer", src_fps=src_fps, track_perf=True)
+                return
+            # HEVC: encode to a temp, then add the conformance-window crop the encoder
+            # omits via a no-re-encode remux (bar 0-90% HW, 90-100% remux).
+            stage = dst.parent / f"{dst.stem}.hw{dst.suffix}"
+            try:
+                self._run_encode(job_id, build_gstreamer_cmd(enc, preset, src, stage, info),
+                                 duration, "gstreamer", src_fps=src_fps,
+                                 pct_base=0.0, pct_span=90.0)
+                crop_r, crop_b = hevc_conformance_crop(*probe_coded_dims(stage), out_w, out_h)
+                if crop_r or crop_b:
+                    self._set(job_id, note=f"fixing HEVC crop -> {out_w}x{out_h}")
+                    self._run_encode(
+                        job_id, build_hevc_crop_remux_cmd(stage, dst, crop_r, crop_b),
+                        duration, "ffmpeg", pct_base=90.0, pct_span=10.0)
+                else:
+                    stage.replace(dst)  # already aligned -> nothing to crop
+            finally:
+                _cleanup(stage)          # no-op once renamed onto dst
             return
         # Two-stage: hardware decode-scale to out_h (bar 0-50%), then a CPU scale to
         # target_h (bar 50-100%). The finish is CRF (quality-controlled): the
@@ -1402,9 +1543,14 @@ class TranscodeManager:
                              duration, "gstreamer", src_fps=src_fps,
                              pct_base=0.0, pct_span=50.0)
             self._set(job_id, encoder=f"{enc.name}+cpu", note=f"pass 2/2: CPU {target_h}p")
+            # For the HEVC hardware encoder, crop its uncropped padding rows off the
+            # intermediate before the CPU downscale (it emits no conformance window);
+            # this also yields the exact target width. The H.264 intermediate is already
+            # cropped, so it keeps the plain finish.
+            finish_pre = [f"crop=iw:{out_h}:0:0"] if is_hevc_hw and out_h > 0 else None
             self._run_encode(job_id, build_ffmpeg_cmd(
                 cpu_encoder(str(preset.get("vcodec", "libx264"))),  # CRF (quality)
-                preset, stage1, dst),
+                preset, stage1, dst, pre_filters=finish_pre),
                 duration, "ffmpeg", pct_base=50.0, pct_span=50.0)
         finally:
             _cleanup(stage1)
