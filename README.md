@@ -74,6 +74,12 @@ The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API
 docs). Open `http://<device-ip>:8080/`.
 
+Leave `web.host` at `0.0.0.0` unless you really want to serve a single address:
+a `host` that is not assigned to the machine fails to bind (`[Errno 99] cannot
+assign requested address`), and the AP address in particular only exists while
+the AP is up. A failed bind is reported as `Web interface could not be started:
+...` and the daemon keeps copying without the web UI.
+
 **Access control (optional).** Once file download or the WiFi AP are in play you
 may want the interface behind a password. Set `web.auth.enabled: true` with a
 `username`/`password` and the whole interface (status, files, transcode) is
