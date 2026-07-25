@@ -74,6 +74,12 @@ The frontend is a single static page (vanilla JS, no build step) that polls
 `/api/status` every 500 ms; the backend is FastAPI (`/docs` for the auto API
 docs). Open `http://<device-ip>:8080/`.
 
+Leave `web.host` at `0.0.0.0` unless you really want to serve a single address:
+a `host` that is not assigned to the machine fails to bind (`[Errno 99] cannot
+assign requested address`), and the AP address in particular only exists while
+the AP is up. A failed bind is reported as `Web interface could not be started:
+...` and the daemon keeps copying without the web UI.
+
 **Access control (optional).** Once file download or the WiFi AP are in play you
 may want the interface behind a password. Set `web.auth.enabled: true` with a
 `username`/`password` and the whole interface (status, files, transcode) is
@@ -535,6 +541,14 @@ renderer uses **Pillow** (`python3-pil` + `fonts-dejavu-core`, installed by
 > MOSI line with strict timing and no chip-select, so it cannot coexist with the
 > e-paper on the same bus -- drive **either** a strip **or** an e-paper panel.
 
+> **Do not share a GPIO line either.** `dc`/`rst`/`busy` (plus `pwr`/`cs` when
+> set) must not be used by another **enabled** feature -- an LED, the buzzer, the
+> Grove bar or a user button. A line has one owner, so whichever feature is
+> initialised second fails with `Device or resource busy` (EBUSY). The daemon
+> checks the config at startup and names both sides (`GPIO line conflict:
+> gpiochip0 line 17 is claimed by ...`); `gpioinfo` shows who actually holds a
+> line at runtime (`consumer` -- the panel's own request is `copystation-epaper`).
+
 The exact panel init/partial waveform and BUSY polarity may need confirming on
 your specific module (`busy_active_high`, `rotation`/`mirror`, `cs` for a panel
 that needs a GPIO chip-select). See [config.example.yaml](config.example.yaml)
@@ -835,7 +849,10 @@ in the config and restart. When enabled it serves on `http://<device-ip>:8080/`
 The shipped config already contains **suggested** pins, so the station works as
 a starting point. Confirm them once for your wiring before relying on the LEDs,
 then list the hardware you actually connected in `status.backends` (any
-combination of `log`, `led`, `buzzer`, `ws2812`, `grove_led_bar`).
+combination of `log`, `led`, `buzzer`, `ws2812`, `grove_led_bar`, `epaper`).
+Only `log` is enabled out of the box: a backend in that list claims its GPIO
+lines the moment the daemon starts, whether the hardware is there or not, so an
+unused one would just block the pins of the hardware you do use.
 
 A pin is addressed by a **gpiochip name** plus a **line offset**. To find them:
 

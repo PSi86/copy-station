@@ -19,8 +19,12 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 
-def _chip_name(chip: str) -> str:
-    """Normalise a chip identifier to a bare name (e.g. ``gpiochip0``) for v1."""
+def chip_name(chip: str) -> str:
+    """Normalise a chip identifier to a bare name (e.g. ``gpiochip0``).
+
+    Used by the v1 backend and by the configuration's GPIO conflict check, which
+    compares lines across features that may spell the same chip differently.
+    """
     c = str(chip)
     if c.startswith("/dev/"):
         c = c[len("/dev/"):]
@@ -51,7 +55,7 @@ class OutputLines:
 
 class _V1OutputLines(OutputLines):
     def __init__(self, mod, chip: str, offsets: Iterable[int], consumer: str) -> None:
-        self._chip = mod.Chip(_chip_name(chip))
+        self._chip = mod.Chip(chip_name(chip))
         self._lines: dict[int, object] = {}
         for off in offsets:
             line = self._chip.get_line(int(off))
@@ -136,7 +140,7 @@ def _v1_input_flags(mod, active_low: bool, bias: str) -> int:
 
 class _V1InputLines(InputLines):
     def __init__(self, mod, chip, offsets, consumer, active_low, bias) -> None:
-        self._chip = mod.Chip(_chip_name(chip))
+        self._chip = mod.Chip(chip_name(chip))
         self._lines: dict[int, object] = {}
         flags = _v1_input_flags(mod, active_low, bias)
         for off in offsets:

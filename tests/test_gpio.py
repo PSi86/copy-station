@@ -6,7 +6,7 @@ import pytest
 from copystation.status.gpio import (
     _V1OutputLines,
     _V2OutputLines,
-    _chip_name,
+    chip_name,
     _chip_path,
     _select_impl,
     open_input_lines,
@@ -133,9 +133,9 @@ class FakeV2Module:
 
 
 def test_chip_name_and_path_normalisation():
-    assert _chip_name("gpiochip0") == "gpiochip0"
-    assert _chip_name("/dev/gpiochip4") == "gpiochip4"
-    assert _chip_name("0") == "gpiochip0"
+    assert chip_name("gpiochip0") == "gpiochip0"
+    assert chip_name("/dev/gpiochip4") == "gpiochip4"
+    assert chip_name("0") == "gpiochip0"
     assert _chip_path("gpiochip0") == "/dev/gpiochip0"
     assert _chip_path("/dev/gpiochip4") == "/dev/gpiochip4"
     assert _chip_path("0") == "/dev/gpiochip0"

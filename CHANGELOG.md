@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-25
+
+Diagnostics release from field feedback on a Raspberry Pi 4: two startup failures
+that reported themselves misleadingly (an anonymous GPIO `EBUSY`, and a web
+interface logged as up while its socket never bound) now name their cause.
+
+### Added
+- **GPIO conflict check at startup.** The configured lines of every *enabled*
+  status backend and user button are compared before any hardware is opened, and a
+  line claimed twice is reported with both sides
+  (`GPIO line conflict: gpiochip0 line 17 is claimed by status.grove_led_bar.data_line
+  and status.epaper.rst ...`). Previously only the feature initialised second failed,
+  with a bare `Device or resource busy` and no hint at the first owner. Pins the
+  panel preset supplies (the 2.13" HATs' `pwr: 18`) are included.
+
+### Changed
+- The example configs (which `install.sh` copies to `/etc/copystation/config.yaml`)
+  no longer enable the **Grove LED bar** out of the box -- `status.backends` is
+  `[log]` on both boards now. An enabled backend claims its GPIO lines whether the
+  hardware is connected or not, so the pre-enabled bar silently blocked the pins of
+  the hardware the user actually wired.
+- The **Raspberry Pi example config** no longer pre-assigns colliding pins: the Grove
+  LED bar moved to BCM6/BCM5 (was BCM18/BCM17 -- the e-paper's `pwr`/`rst`) and the
+  buzzer to BCM12 (was BCM24 -- the e-paper's `busy`), so the status backends can be
+  enabled side by side. Same for the Pi hints in `config.example.yaml`.
+
+### Fixed
+- The web interface is now logged as **listening only once uvicorn has actually
+  bound** the socket. A failed bind (e.g. a `web.host` that does not exist on the
+  machine -> `[Errno 99] cannot assign requested address`) is reported as
+  `Web interface could not be started: ...` with the cause, instead of a success line
+  followed by an unattributed uvicorn error; the AP URL is no longer advertised for
+  an interface that is down.
+
 ## [1.1.0] - 2026-07-24
 
 Transcode usability release: the output goes where the source lives, the browser
@@ -255,7 +289,8 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/PSi86/copy-station/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PSi86/copy-station/releases/tag/v1.1.0
 [1.0.1]: https://github.com/PSi86/copy-station/releases/tag/v1.0.1
 [1.0.0]: https://github.com/PSi86/copy-station/releases/tag/v1.0.0
