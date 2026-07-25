@@ -459,6 +459,11 @@ def run_daemon(config: Config) -> int:
     """
     # Lazy import: devices needs pyudev, which is not available on Windows.
     from .devices import DeviceWatcher
+    from .pins import log_gpio_conflicts
+
+    # Before any hardware is opened: name GPIO lines that two configured features
+    # would both request -- the second one only ever gets a bare EBUSY.
+    log_gpio_conflicts(config)
 
     state = StationState()
     hub = StatusHub(state, build_indicator(config, state=state))

@@ -53,6 +53,10 @@ status:
   # before the first hardware test. On a Raspberry Pi use the BCM numbers from
   # config.examples/raspberry-pi.yaml instead (line offset == BCM number).
   # The pins are inert until you add a hardware backend to `backends` above.
+  # No line may be used by two ENABLED features at once (status backends, user
+  # button): the one initialised second fails with "Device or resource busy"
+  # (EBUSY). The daemon warns about it at startup ("GPIO line conflict: ..."),
+  # so keep the blocks below collision-free when you re-pin them.
   led:
     gpiochip: gpiochip0
     lines:
@@ -62,7 +66,7 @@ status:
 
   buzzer:
     gpiochip: gpiochip0
-    line: 37         # Cubie PB5 (pin 12) | Pi: BCM24
+    line: 37         # Cubie PB5 (pin 12) | Pi: BCM12 (BCM24 = e-paper BUSY)
 
   # Addressable WS2812B / NeoPixel strip (1-10 LEDs) over SPI MOSI.
   # Enable SPI first and point `device` at the resulting node:
@@ -83,8 +87,8 @@ status:
   # Error: whole bar blinks. Ready: single segment (3).
   grove_led_bar:
     gpiochip: gpiochip0
-    clock_line: 108    # Cubie PD12 (pin 19) | Pi: BCM18 (Grove DCKI)
-    data_line: 109     # Cubie PD13 (pin 21) | Pi: BCM17 (Grove DI)
+    clock_line: 108    # Cubie PD12 (pin 19) | Pi: BCM6 (Grove DCKI)
+    data_line: 109     # Cubie PD13 (pin 21) | Pi: BCM5 (Grove DI)
     reverse: false     # flip if segment 1 is the wrong physical end
 
   # SPI e-paper display (black/white). Renders the transfer progress bar, the

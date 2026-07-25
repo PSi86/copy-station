@@ -535,6 +535,14 @@ renderer uses **Pillow** (`python3-pil` + `fonts-dejavu-core`, installed by
 > MOSI line with strict timing and no chip-select, so it cannot coexist with the
 > e-paper on the same bus -- drive **either** a strip **or** an e-paper panel.
 
+> **Do not share a GPIO line either.** `dc`/`rst`/`busy` (plus `pwr`/`cs` when
+> set) must not be used by another **enabled** feature -- an LED, the buzzer, the
+> Grove bar or a user button. A line has one owner, so whichever feature is
+> initialised second fails with `Device or resource busy` (EBUSY). The daemon
+> checks the config at startup and names both sides (`GPIO line conflict:
+> gpiochip0 line 17 is claimed by ...`); `gpioinfo` shows who actually holds a
+> line at runtime (`consumer` -- the panel's own request is `copystation-epaper`).
+
 The exact panel init/partial waveform and BUSY polarity may need confirming on
 your specific module (`busy_active_high`, `rotation`/`mirror`, `cs` for a panel
 that needs a GPIO chip-select). See [config.example.yaml](config.example.yaml)

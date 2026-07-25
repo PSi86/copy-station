@@ -11,8 +11,13 @@
 # * The 40-pin header is on `gpiochip0` (Pi 4, and Pi 5 with recent kernels).
 #   On older Pi 5 images the header is on `gpiochip4` (kept as an alias) -- set
 #   `gpiochip: gpiochip4` then. Check with `gpiodetect` / `gpioinfo`.
-# * The libgpiod line offset == the BCM GPIO number. So `data_line: 17` means
-#   BCM GPIO17 (physical pin 11). Pick free BCM pins for your wiring.
+# * The libgpiod line offset == the BCM GPIO number. So `data_line: 5` means
+#   BCM GPIO5 (physical pin 29). Pick free BCM pins for your wiring.
+# * No line may be used by two ENABLED features at once (status backends, user
+#   button): the one initialised second fails with "Device or resource busy"
+#   (EBUSY). The daemon warns about such a collision at startup ("GPIO line
+#   conflict: ..."). The blocks below are pre-assigned collision-free, so several
+#   backends can be enabled side by side -- keep it that way when you re-pin.
 
 mount_base: /run/copystation/mnt
 media_dirname: DCIM
@@ -35,8 +40,8 @@ status:
 
   grove_led_bar:
     gpiochip: gpiochip0   # gpiochip4 on older Pi 5 images
-    clock_line: 18        # BCM GPIO18 (example -- set to your wiring)
-    data_line: 17         # BCM GPIO17 (example -- set to your wiring)
+    clock_line: 6         # BCM GPIO6 (pin 31) -- example, set to your wiring
+    data_line: 5          # BCM GPIO5 (pin 29) -- example, set to your wiring
     reverse: false
 
   # Alternative single LEDs instead of the bar (BCM numbers):
@@ -73,7 +78,7 @@ status:
 
   buzzer:
     gpiochip: gpiochip0
-    line: 24              # BCM GPIO24
+    line: 12              # BCM GPIO12 (pin 32) -- BCM24 is the e-paper's BUSY line
 
 web:
   enabled: true
