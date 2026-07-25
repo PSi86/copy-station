@@ -22,6 +22,11 @@ interface logged as up while its socket never bound) now name their cause.
   panel preset supplies (the 2.13" HATs' `pwr: 18`) are included.
 
 ### Changed
+- The example configs (which `install.sh` copies to `/etc/copystation/config.yaml`)
+  no longer enable the **Grove LED bar** out of the box -- `status.backends` is
+  `[log]` on both boards now. An enabled backend claims its GPIO lines whether the
+  hardware is connected or not, so the pre-enabled bar silently blocked the pins of
+  the hardware the user actually wired.
 - The **Raspberry Pi example config** no longer pre-assigns colliding pins: the Grove
   LED bar moved to BCM6/BCM5 (was BCM18/BCM17 -- the e-paper's `pwr`/`rst`) and the
   buzzer to BCM12 (was BCM24 -- the e-paper's `busy`), so the status backends can be

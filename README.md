@@ -849,7 +849,10 @@ in the config and restart. When enabled it serves on `http://<device-ip>:8080/`
 The shipped config already contains **suggested** pins, so the station works as
 a starting point. Confirm them once for your wiring before relying on the LEDs,
 then list the hardware you actually connected in `status.backends` (any
-combination of `log`, `led`, `buzzer`, `ws2812`, `grove_led_bar`).
+combination of `log`, `led`, `buzzer`, `ws2812`, `grove_led_bar`, `epaper`).
+Only `log` is enabled out of the box: a backend in that list claims its GPIO
+lines the moment the daemon starts, whether the hardware is there or not, so an
+unused one would just block the pins of the hardware you do use.
 
 A pin is addressed by a **gpiochip name** plus a **line offset**. To find them:
 
