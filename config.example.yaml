@@ -188,6 +188,12 @@ wifi_ap:
   # existing connection over Ethernet, SSH included. The daemon warns at startup
   # if it clashes with a configured address.
   ipv4_address: 10.42.0.1/24
+  # NetworkManager's autoconnect flag on the AP profile. It only ever keeps a
+  # RUNNING AP alive (e.g. across an interface flap) -- it can no longer raise the
+  # AP by itself at boot, because the profile is deleted whenever the AP is
+  # switched off. That deletion is what makes a persisted "off" hold during the
+  # boot too: a leftover profile used to be auto-activated seconds into the boot,
+  # broadcasting and serving DHCP for ~20 s until the daemon reconciled it away.
   autoconnect: true
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
   # The AP on/off state is persisted in `user_settings_file` (top of this file)

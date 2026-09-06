@@ -70,8 +70,13 @@ if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   # (gst-launch/gst-inspect, qtdemux/mp4mux/matroskademux/aacparse from -good,
   # h264parse/h265parse from -bad). Cubie-only and best-effort -- the Pi uses
   # ffmpeg, and a missing element just makes the transcoder fall back to the CPU.
+  # "sun" is in the pattern because that is what the board actually reports: an
+  # A733 Cubie A7S has model "sun60iw2" (the Allwinner sunxi SoC name), not any
+  # marketing name -- without it this whole branch is skipped on the very board
+  # it exists for, and hardware transcoding silently falls back to the CPU. Keep
+  # the list in step with copystation/encoders.py:detect_board().
   MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
-  if printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s|allwinner"; then
+  if printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s|allwinner|sun"; then
     echo ">> Installing GStreamer for A733 hardware transcoding ..."
     apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
@@ -138,7 +143,7 @@ else
   if printf '%s' "${MODEL}" | grep -qi "raspberry pi"; then
     [[ -f "${REPO_DIR}/config.examples/raspberry-pi.yaml" ]] &&
       SOURCE="${REPO_DIR}/config.examples/raspberry-pi.yaml"
-  elif printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s"; then
+  elif printf '%s' "${MODEL}" | grep -qiE "cubie|radxa|a733|a7s|allwinner|sun"; then
     [[ -f "${REPO_DIR}/config.examples/cubie-a7s.yaml" ]] &&
       SOURCE="${REPO_DIR}/config.examples/cubie-a7s.yaml"
   fi

@@ -23,6 +23,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
 * [Deployment](#deployment)
 * [Source/target detection](#sourcetarget-detection)
 * [Configuration](#configuration)
+* [Backing up and restoring a station](docs/backup-and-restore.md)
 * [Changelog](CHANGELOG.md)
 
 ## Flow
@@ -693,13 +694,27 @@ sudo systemctl poweroff
 ```
 
 This stops the service, flushes buffers and unmounts the filesystems; once the
-board has halted it is safe to remove power. **Always use `poweroff`, never
-`reboot`:** on the A733 (tested on `radxa-a733_trixie_cli_t4`) a warm `reboot`
-never comes back up -- recovery always needs a full power-cycle (remove power,
-then reapply). A normal cold boot is reliable (an earlier "random boot failure"
-turned out to be a marginal microSD card -- if cold boot ever flakes, suspect the
-card first). The copy itself is safe against a sudden disconnect: the source is
-never cleared unless verification succeeded.
+board has halted it is safe to remove power. The copy itself is safe against a
+sudden disconnect: the source is never cleared unless verification succeeded.
+
+**On the A733, whether `reboot` works depends on the image.** It is worth knowing
+which one you are on before relying on a remote restart:
+
+| Kernel | Warm `reboot` |
+|---|---|
+| `6.6.98-4-aw2511` and newer | **Works.** Measured 3/3, back in 42-52 s. |
+| `6.6.98-3-aw2511` (image `radxa-a733_trixie_cli_t4`) | **Never comes back.** Needs a full power-cycle -- remove power, then reapply. |
+
+Check with `uname -r`. On an older or unknown image use `poweroff` and a real
+power-cycle, and note that a software watchdog does not help there -- its reset is
+also a warm reset. To confirm a reboot really happened rather than the connection
+merely returning, compare `/proc/sys/kernel/random/boot_id` before and after.
+`copystation.service` reaches `active` about 30 s into the boot, so a status check
+made sooner reads `inactive` with nothing actually wrong.
+
+A normal cold boot is reliable on both images. If a *cold* boot ever flakes,
+suspect the microSD card first -- an earlier "random boot failure" turned out to be
+a marginal card, not the board.
 
 ### User button (optional)
 
@@ -1001,6 +1016,13 @@ is kept unless you pass `--purge`. The apt packages the installer pulled in
 (`rsync`, `python3-pyudev`, `python3-libgpiod`, `python3-spidev`, `gpiod`, exFAT
 tools, `ffmpeg`) are left in place -- remove them by hand if nothing else needs
 them.
+
+Before you re-image a card, save the two files that make the station yours --
+`/etc/copystation/config.yaml` and the runtime overlay
+`/var/lib/copystation/user-settings.json`, which **wins over the config** and is
+the one people forget. See **[Backing up and restoring a
+station](docs/backup-and-restore.md)** for what else is worth recording, what
+provably does not need saving, and the restore in full.
 
 ## Source/target detection
 

@@ -273,13 +273,53 @@ def up(cfg: Any) -> bool:
     return True
 
 
+def forget(cfg: Any) -> None:
+    """Remove the profile so NetworkManager cannot auto-activate it at boot.
+
+    The profile carries ``autoconnect yes``, which is what keeps a *running* AP
+    alive across an interface flap -- but a profile left behind after the AP is
+    switched off is auto-activated by NetworkManager on the next boot, seconds
+    into it and long before this daemon starts. The AP would then broadcast, run
+    WPA2 and hand out DHCP leases for ~20 s before the startup reconcile takes it
+    down again, despite being persisted off. Deleting costs nothing: every
+    bring-up goes through :func:`ensure_profile`, which builds the profile from
+    the config from scratch anyway.
+    """
+    try:
+        _run(delete_cmd(cfg), check=False)  # ignore 'unknown connection'
+    except OSError as exc:  # pragma: no cover - defensive
+        _LOG.warning("WiFi AP profile could not be removed: %s", exc)
+
+
+# nmcli's exit code for "connection, device, or access point does not exist".
+# Since switching the AP off deletes the profile, switching it off *again* --
+# or at startup when it is already down -- finds nothing to bring down. That is
+# the desired end state, not a failure worth a warning.
+_NMCLI_NOT_FOUND = 10
+
+
 def down(cfg: Any) -> bool:
+    """Bring the AP down and drop its profile (see :func:`forget`).
+
+    Idempotent: with no profile left there is nothing to bring down, which nmcli
+    reports as an error but is exactly the state we want.
+    """
+    ok = True
     try:
         _run(down_cmd(cfg), check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == _NMCLI_NOT_FOUND:
+            _LOG.debug("WiFi AP already down (no '%s' profile)", con_name(cfg))
+        else:
+            _LOG.warning("WiFi AP could not be brought down: %s", exc)
+            ok = False
+    except OSError as exc:
         _LOG.warning("WiFi AP could not be brought down: %s", exc)
-        return False
-    return True
+        ok = False
+    # Even when the 'down' failed: an orphaned profile is exactly what would
+    # raise the AP behind our back at the next boot.
+    forget(cfg)
+    return ok
 
 
 def is_active(cfg: Any) -> bool:

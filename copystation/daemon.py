@@ -370,11 +370,17 @@ def _apply_wifi_ap_state(config: Config, want_up: bool) -> bool:
             _LOG.warning("WiFi AP could not be started: %s", exc)
             return False
     try:
-        from .wifi_ap import down, is_active
+        from .wifi_ap import down, forget, is_active
 
         if is_active(ap_cfg):
             _LOG.info("WiFi AP is active but persisted off -- bringing it down")
             down(ap_cfg)
+        else:
+            # Down already, but a leftover profile may still be on disk with
+            # autoconnect enabled -- and that is what raises the AP at the NEXT
+            # boot, before this reconcile can run. Drop it now so "persisted
+            # off" also means "off during boot", not just afterwards.
+            forget(ap_cfg)
     except Exception as exc:  # pragma: no cover - defensive
         _LOG.warning("WiFi AP reconcile failed: %s", exc)
     return False

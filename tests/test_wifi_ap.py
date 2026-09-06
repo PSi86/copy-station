@@ -109,6 +109,59 @@ def test_button_wifi_ap_action_toggles(monkeypatch):
     assert seen["cfg"] == FULL
 
 
+def test_down_also_deletes_the_profile(monkeypatch):
+    """A profile left behind is auto-activated by NetworkManager at the next boot.
+
+    It carries ``autoconnect yes``, so NM raises the AP seconds into the boot --
+    broadcasting and serving DHCP for ~20 s before the daemon can reconcile it
+    away, although it is persisted off. So 'down' must also drop the profile.
+    """
+    calls = []
+    monkeypatch.setattr(ap, "_run", lambda cmd, check=True: calls.append(cmd))
+    assert ap.down(FULL) is True
+    assert calls == [
+        ["nmcli", "connection", "down", "copystation-ap"],
+        ["nmcli", "connection", "delete", "copystation-ap"],
+    ]
+
+
+def test_down_deletes_the_profile_even_when_the_down_fails(monkeypatch):
+    """An orphaned profile is precisely what must not survive a failed 'down'."""
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, check=True):
+        calls.append(cmd)
+        if cmd[2] == "down":
+            raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    assert ap.down(FULL) is False
+    assert calls[-1] == ["nmcli", "connection", "delete", "copystation-ap"]
+
+
+def test_down_is_idempotent_when_there_is_no_profile(monkeypatch, caplog):
+    """Switching off an AP that is already off is not a failure.
+
+    Because switching off deletes the profile, a second 'off' -- or the startup
+    reconcile on a station that was already down -- finds nothing to bring down.
+    nmcli calls that exit 10 ("does not exist"), which must not surface as a
+    warning: it is the state we are asking for.
+    """
+    import logging
+    import subprocess
+
+    def fake_run(cmd, check=True):
+        if cmd[2] == "down":
+            raise subprocess.CalledProcessError(ap._NMCLI_NOT_FOUND, cmd)
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    with caplog.at_level(logging.WARNING, logger="copystation.wifi_ap"):
+        assert ap.down(FULL) is True
+    assert caplog.records == []
+
+
 def test_set_active_up_and_down(monkeypatch):
     seen = {}
     monkeypatch.setattr(ap, "start_ap", lambda cfg: True)
@@ -270,11 +323,14 @@ def test_apply_wifi_ap_state_starts_or_reconciles(monkeypatch):
     assert _apply_wifi_ap_state({"wifi_ap": {}}, False) is False
     assert calls == ["down"]
 
-    # want_up=False and already down -> nothing to do, no nmcli 'down'.
+    # want_up=False and already down -> no 'down', but the profile is still
+    # dropped: a leftover with autoconnect is what raises the AP at the NEXT
+    # boot, before this reconcile ever runs.
     calls.clear()
     monkeypatch.setattr(ap, "is_active", lambda cfg: False)
+    monkeypatch.setattr(ap, "forget", lambda cfg: calls.append("forget"))
     assert _apply_wifi_ap_state({"wifi_ap": {}}, False) is False
-    assert calls == []
+    assert calls == ["forget"]
 
 
 def test_check_ap_web_reachability_warns_when_web_disabled(caplog):

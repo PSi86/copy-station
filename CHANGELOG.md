@@ -6,6 +6,67 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-06
+
+A re-image of the A733 station turned up two silent failures and dated one
+warning: an access point that raised itself at every boot despite being switched
+off, an installer that did not recognise the very board it has a special case
+for, and a warm-reboot bug that the current kernel has fixed.
+
+### Fixed
+- **The WiFi AP no longer comes up on its own at boot when it is switched off.**
+  Switching the AP off only ran `nmcli connection down` and left the profile on
+  disk -- and that profile carries `autoconnect yes`, so NetworkManager
+  auto-activated it about 19 s into every boot, long before the daemon starts.
+  The station broadcast its SSID, accepted WPA2 clients and handed out DHCP
+  leases (1 h) for ~20 s until the startup reconcile brought it down again, all
+  while the persisted state said off. Measured on a Cubie A7S: hotspot up at
+  boot +19 s, taken down at boot +39 s. Switching the AP off now also deletes
+  the profile, and the startup reconcile deletes a leftover one even when the AP
+  is already down -- so a persisted "off" holds *during* the boot, not just
+  after it. Nothing is lost by deleting: every bring-up rebuilds the profile
+  from the config anyway. `autoconnect` keeps its remaining job, holding a
+  *running* AP up across an interface flap. Switching off is idempotent with it:
+  with no profile left `nmcli connection down` exits 10 ("does not exist"), which
+  is the state being asked for and no longer surfaces as a warning.
+- **`scripts/install.sh` did not recognise the Radxa Cubie A7S.**
+  `/proc/device-tree/model` reads `sun60iw2` -- the Allwinner sunxi SoC name, not
+  a marketing name -- which matched none of the installer's
+  `cubie|radxa|a733|a7s|allwinner` patterns. So on the exact board those branches
+  exist for, the installer silently skipped both the GStreamer install (leaving
+  hardware transcoding to fall back to the CPU, since the OMX elements need
+  `gstreamer1.0-tools`/`-plugins-bad`) and the board-specific config example
+  (installing the generic one with placeholder pins instead). Both patterns now
+  include `sun`, matching `encoders.py:detect_board()`, which had it right all
+  along -- which is why the daemon reported `board: cubie` on a station whose
+  installer had treated it as generic.
+
+### Changed
+- **The A733 warm-reboot warning is now qualified by kernel version.** The README
+  stated flatly that a warm `reboot` never comes back on the A733 and that
+  `poweroff` plus a physical power-cycle is the only way. That was measured on
+  kernel `6.6.98-3-aw2511`; on `6.6.98-4-aw2511` a warm reboot recovers -- 3 of 3
+  attempts, back in 42-52 s, each with a new boot id and the service active. The
+  section now gives both cases in a table and says to check `uname -r`, because
+  the old blanket advice sends someone to the device for no reason on a current
+  image while still being correct on an older one. It also notes that
+  `copystation.service` reaches `active` about 30 s into the boot, so a status
+  check made sooner reads `inactive` with nothing wrong, and that `boot_id` is the
+  way to tell a real reboot from a connection that merely came back.
+
+### Added
+- **`docs/backup-and-restore.md`** -- what to save before re-imaging a card, and
+  how to put it back. The point of it is the runtime overlay
+  `/var/lib/copystation/user-settings.json`: it **wins over `config.yaml`**, so a
+  station restored from its config alone comes back subtly different from the one
+  that was backed up -- the access point down, the default preset reset -- for no
+  visible reason. The document also names what provably does NOT need saving (the
+  AP's NetworkManager profile is deleted and re-created from the config on every
+  raise, so backing it up would be backing up a cache), and warns that GPIO line
+  offsets are kernel-dependent while header pins are not, which is why a `gpioinfo`
+  capture belongs in the backup. Linked from the README's Contents and from
+  "Uninstalling", the step right before a re-image.
+
 ## [1.2.0] - 2026-09-06
 
 Access-point release from field feedback on a Raspberry Pi 4 that lost its
