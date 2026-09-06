@@ -40,6 +40,21 @@ def test_index_served():
     assert "Copy_Station" in res.text
 
 
+def test_index_links_the_project_with_an_inline_icon():
+    """The page footer carries the GitHub link, spelled out, with an inline mark.
+
+    Both properties matter for the same reason: a client reading this is usually
+    joined to the station's own access point and has no internet. It cannot follow
+    the link there and then -- so the repository name has to be written out rather
+    than reduced to an icon -- and an icon fetched from a CDN would not load at
+    all, so the SVG has to live in the document.
+    """
+    res = _client(StationState()).get("/")
+    assert 'href="https://github.com/PSi86/copy-station"' in res.text
+    assert "PSi86/copy-station</span>" in res.text
+    assert '<svg class="repo-icon"' in res.text
+
+
 def test_settings_placeholder():
     res = _client(StationState()).get("/api/settings")
     assert res.status_code == 200
