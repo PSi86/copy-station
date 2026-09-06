@@ -53,6 +53,115 @@ def test_ap_status_in_status_endpoint():
     assert _client(state).get("/api/status").json()["wifi_ap"] is True
 
 
+class _FakeApControl:
+    """Stand-in for wifi_ap.ApController (no nmcli in the test suite)."""
+
+    def __init__(self, bring_up_works=True):
+        self.bring_up_works = bring_up_works
+        self.calls = []
+        self.active = False
+
+    def apply(self, active):
+        self.calls.append(active)
+        self.active = bool(active) and self.bring_up_works
+        return self.active
+
+
+def test_wifi_ap_switch_absent_without_a_controller():
+    # No AP configured -> no endpoint and no switch in the frontend.
+    client = _client(StationState())
+    assert client.get("/api/settings").json()["features"]["wifi_ap"] is False
+    assert client.post("/api/wifi_ap", json={"enabled": True}).status_code == 404
+
+
+def test_wifi_ap_switch_turns_the_ap_on_and_off():
+    control = _FakeApControl()
+    client = TestClient(create_app(StationState(), wifi_ap=control))
+    assert client.get("/api/settings").json()["features"]["wifi_ap"] is True
+
+    res = client.post("/api/wifi_ap", json={"enabled": True})
+    assert res.status_code == 200 and res.json() == {"enabled": True}
+    res = client.post("/api/wifi_ap", json={"enabled": False})
+    assert res.status_code == 200 and res.json() == {"enabled": False}
+    assert control.calls == [True, False]
+
+
+def test_wifi_ap_switch_reports_a_failed_bringup():
+    control = _FakeApControl(bring_up_works=False)
+    client = TestClient(create_app(StationState(), wifi_ap=control))
+    res = client.post("/api/wifi_ap", json={"enabled": True})
+    assert res.status_code == 503
+    assert "password" in res.json()["detail"]
+
+
+def test_address_availability_probe():
+    from copystation.web import address_available, is_wildcard_host
+
+    for wildcard in ("0.0.0.0", "", "::", "*"):
+        assert is_wildcard_host(wildcard) is True
+    assert is_wildcard_host("192.168.1.50") is False
+    assert address_available("127.0.0.1") is True
+    assert address_available("10.255.255.1") is False  # not an address of this box
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_web_server_does_not_block_on_a_missing_host_and_binds_later(monkeypatch):
+    """The boot race: web.host appears late, the station must not wait for it."""
+    import threading
+    import time
+    from http.client import HTTPConnection
+
+    import copystation.web as web
+
+    # The address is "not up yet" until the event is set (an interface coming up).
+    appeared = threading.Event()
+    monkeypatch.setattr(web, "address_available", lambda host: appeared.is_set())
+    monkeypatch.setattr(web, "_BIND_RETRY_START", 0.02)
+    monkeypatch.setattr(web, "_BIND_RETRY_MAX", 0.02)
+
+    port = _free_port()
+    began = time.monotonic()
+    thread = web.start_web_server(StationState(), "127.0.0.1", port)
+    # Returned at once instead of waiting for the address: the daemon walks on to
+    # the device watcher and the station copies regardless of the network.
+    assert time.monotonic() - began < 1.0
+    assert thread.is_alive()
+
+    appeared.set()  # the interface comes up
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/api/status")
+            assert conn.getresponse().status == 200
+            conn.close()
+            return  # bound and serving without any restart
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError("the web server never bound after the address appeared")
+
+
+def test_web_server_still_raises_on_a_real_bind_failure():
+    """A taken port is a config error, not a wait -- it must be reported at once."""
+    import socket
+
+    import copystation.web as web
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        port = taken.getsockname()[1]
+        with pytest.raises(RuntimeError, match="could not bind"):
+            web.start_web_server(StationState(), "127.0.0.1", port)
+
+
 def test_transcode_phase_and_block_in_snapshot():
     state = StationState()
     assert state.snapshot()["transcode"] == {"active": False}

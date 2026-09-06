@@ -1,4 +1,4 @@
-"""Start-up behaviour of the web server thread (bind success/failure)."""
+"""Start-up behaviour of the web server thread (bind success/failure/pending)."""
 
 import threading
 
@@ -12,8 +12,9 @@ import uvicorn  # noqa: E402
 from copystation import web  # noqa: E402
 from copystation.state import StationState  # noqa: E402
 
-# TEST-NET-3: never assigned to a host, so the bind fails with EADDRNOTAVAIL
-# (errno 99) -- exactly the tester's "cannot assign requested address".
+# TEST-NET-3: never assigned to a host, so a bind would fail with EADDRNOTAVAIL
+# (errno 99) -- "cannot assign requested address". Indistinguishable from an
+# address whose interface is merely not up YET, which is why it is waited for.
 UNASSIGNED_HOST = "203.0.113.1"
 
 
@@ -33,12 +34,20 @@ class _FakeServer:
         self._stop.wait(10)
 
 
-def test_failed_bind_raises_instead_of_reporting_success():
-    with pytest.raises(RuntimeError) as excinfo:
-        web.start_web_server(StationState(), UNASSIGNED_HOST, 8080)
-    message = str(excinfo.value)
-    assert f"{UNASSIGNED_HOST}:8080" in message
-    assert "0.0.0.0" in message  # points at the fix
+def test_missing_host_address_is_waited_for_not_reported_as_success(monkeypatch, caplog):
+    # A host address that is not on this machine is NOT an error: at boot it is
+    # usually just DHCP being slower than this service. The daemon is released
+    # immediately (the station copies without a network) and the server thread
+    # binds whenever the address turns up.
+    monkeypatch.setattr(web, "_BIND_RETRY_START", 5.0)  # keep the idle retry quiet
+    monkeypatch.setattr(web, "_BIND_RETRY_MAX", 5.0)
+    with caplog.at_level("INFO", logger="copystation.web"):
+        thread = web.start_web_server(StationState(), UNASSIGNED_HOST, 8080)
+    assert thread.is_alive()
+    assert UNASSIGNED_HOST in caplog.text
+    assert "0.0.0.0" in caplog.text  # points at the fix
+    # ... and it must never claim to be serving in the meantime.
+    assert "listening on" not in caplog.text
 
 
 def test_successful_start_is_logged_once_listening(monkeypatch, caplog):

@@ -10,9 +10,11 @@ to open the web UI. A captive portal fixes both:
   own IP. So every request the client makes -- including the OS connectivity
   checks (Android ``generate_204``, Apple ``hotspot-detect``, Windows
   ``connecttest``) -- lands on this host.
-* **Redirect responder** -- a tiny HTTP server on port 80 answers those requests
-  with a 302 to the web UI. The OS sees a non-success reply, flags a captive
-  network ("Sign in to network") and opens the page automatically.
+* **Redirect responder** -- a tiny HTTP server on the AP address, port 80,
+  answers those requests with a 302 to the web UI. The OS sees a non-success
+  reply, flags a captive network ("Sign in to network") and opens the page
+  automatically. It listens on the AP address only, so port 80 stays free on the
+  LAN side and no LAN request is bounced to an AP-only address.
 
 Opt-in via ``wifi_ap.captive_portal``. Needs port 80 and writes one file under
 ``dnsmasq-shared.d/``. Best-effort: any failure is logged and the AP still works,
@@ -26,8 +28,10 @@ are unit-tested; the redirect server is exercised over a loopback socket.
 
 from __future__ import annotations
 
+import errno
 import logging
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -37,6 +41,11 @@ _LOG = logging.getLogger("copystation.captive_portal")
 # NetworkManager reads this directory for its shared-connection dnsmasq instance.
 DNSMASQ_DIR = Path("/etc/NetworkManager/dnsmasq-shared.d")
 DNSMASQ_CONF = DNSMASQ_DIR / "copystation-captive.conf"
+
+# The AP address appears when NetworkManager finishes activating the profile,
+# which can be a moment after `nmcli connection up` returns -- retry the bind
+# for this long instead of losing the portal to a race.
+BIND_TIMEOUT = 10.0
 
 
 def dnsmasq_hijack_content(ap_ip: str) -> str:
@@ -93,13 +102,21 @@ class _RedirectHandler(BaseHTTPRequestHandler):
 
 
 class CaptivePortal:
-    """A port-80 redirect server pointing captive clients at the web UI."""
+    """A port-80 redirect server pointing captive clients at the web UI.
 
-    def __init__(self, ap_ip: str, web_port: int, listen_port: int = 80, host: str = "0.0.0.0") -> None:
+    Bound to the **AP address only** by default: a wildcard bind would occupy
+    port 80 on every interface and bounce requests that arrive over the LAN to an
+    address only AP clients can reach. Because the AP address only exists while
+    the AP is up, the portal is started/stopped along with it (see :meth:`sync`).
+    """
+
+    def __init__(self, ap_ip: str, web_port: int, listen_port: int = 80,
+                 host: Optional[str] = None, bind_timeout: float = BIND_TIMEOUT) -> None:
         self._ap_ip = ap_ip
         self._web_port = int(web_port)
         self._listen_port = int(listen_port)
-        self._host = host
+        self._host = ap_ip if host is None else host
+        self._bind_timeout = float(bind_timeout)
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -111,14 +128,45 @@ class CaptivePortal:
         """The actually bound port (useful when ``listen_port=0`` in tests)."""
         return self._server.server_address[1] if self._server else self._listen_port
 
-    def start(self) -> None:
+    @property
+    def running(self) -> bool:
+        return self._server is not None
+
+    def start(self, timeout: Optional[float] = None) -> None:
+        """Bind and serve; idempotent. Raises OSError if the bind never works."""
+        if self._server is not None:
+            return
         handler = type("_CopystationRedirect", (_RedirectHandler,), {"target": self.target()})
-        self._server = ThreadingHTTPServer((self._host, self._listen_port), handler)
+        self._server = self._bind(handler, self._bind_timeout if timeout is None else timeout)
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="copystation-captive", daemon=True
         )
         self._thread.start()
-        _LOG.info("Captive portal redirecting :%d -> %s", self.port, self.target())
+        _LOG.info("Captive portal redirecting %s:%d -> %s",
+                  self._host, self.port, self.target())
+
+    def _bind(self, handler, timeout: float) -> ThreadingHTTPServer:
+        """Bind the listening socket, waiting out a not-yet-present AP address."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                return ThreadingHTTPServer((self._host, self._listen_port), handler)
+            except OSError as exc:
+                # EADDRNOTAVAIL = the address is not (yet) on this machine.
+                if exc.errno != errno.EADDRNOTAVAIL or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
+
+    def sync(self, active: bool) -> None:
+        """Follow the AP: serve while it is up, stop when it goes down."""
+        if not active:
+            self.stop()
+            return
+        try:
+            self.start()
+        except OSError as exc:
+            _LOG.warning("Captive portal could not bind %s:%d: %s",
+                         self._host, self._listen_port, exc)
 
     def stop(self) -> None:
         if self._server is not None:
@@ -128,3 +176,4 @@ class CaptivePortal:
             except Exception:  # pragma: no cover - best effort
                 pass
             self._server = None
+            self._thread = None

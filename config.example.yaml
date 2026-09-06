@@ -133,16 +133,28 @@ status:
 # optional transcoding). Served on all interfaces, so it is also reachable over
 # the WLAN access point below.
 web:
-  enabled: false
-  host: 0.0.0.0        # all interfaces; robust to interfaces going up/down
+  # On by default -- it is what the WiFi AP and the captive portal below exist to
+  # serve, and the installer's prompt defaults to enabling it anyway. Turn it off
+  # for a station that should only ever copy.
+  enabled: true
+  # Keep 0.0.0.0: it serves ALL interfaces and copes with them going up/down --
+  # which is exactly what the WiFi AP below does. A concrete address (e.g. the
+  # LAN IP) makes the interface listen on that ONE address, so it is refused over
+  # the access point; and while that address is missing (interface down, DHCP not
+  # in yet) there is simply no web interface -- the daemon binds it as soon as the
+  # address shows up, but everything else about the station runs regardless.
+  host: 0.0.0.0
   port: 8080
   # Optional HTTP Basic auth for the whole interface (off by default). Sensible
   # once file download is reachable over the AP. Fail-safe: enabling this with an
-  # empty password rejects every request rather than leaving it open.
+  # empty password rejects every request rather than leaving it open -- hence the
+  # ready-made password below, so flipping `enabled` is all it takes. It is the
+  # SAME as the WLAN password (one credential to remember) and, shipping in this
+  # file, public knowledge: change both before the station meets strangers.
   auth:
     enabled: false
     username: admin
-    password: ""
+    password: "copystation"
   # Read-only browsing + download of the ATTACHED USB mass storage only (never
   # the OS partitions). Effective only while the web interface is enabled.
   files:
@@ -164,9 +176,17 @@ wifi_ap:
   enabled: false         # factory default; a runtime toggle (below) overrides it
   con_name: copystation-ap
   ssid: Copy_Station
-  password: ""            # >= 8 chars for WPA2; empty -> AP stays down
+  # Ready-made so the AP works out of the box; same string as web.auth.password
+  # above. Public knowledge (it ships in this file) -- change it for anything but
+  # a closed circle, and remember every AP client can reach the file browser.
+  password: "copystation"  # >= 8 chars for WPA2; empty -> AP stays down
   band: bg               # bg (2.4 GHz) | a (5 GHz)
   channel: 6
+  # The AP's own subnet (NetworkManager serves DHCP+NAT here). It must NOT
+  # overlap a network the station is already on: an overlapping subnet -- or a
+  # duplicate address -- routes LAN replies out over Wi-Fi and kills every
+  # existing connection over Ethernet, SSH included. The daemon warns at startup
+  # if it clashes with a configured address.
   ipv4_address: 10.42.0.1/24
   autoconnect: true
   ifname: ""             # empty -> NetworkManager picks the Wi-Fi interface
@@ -176,10 +196,13 @@ wifi_ap:
   # state until the first toggle.
   # Captive portal: point all DNS at the AP and redirect port 80 to the web UI,
   # so a joining device auto-opens the interface ("Sign in to network") and stays
-  # on the AP instead of falling back to mobile data. Needs web.enabled and port
-  # 80 free. Note: AP clients then get no general internet (expected for a field
-  # AP that only serves this UI).
-  captive_portal: false
+  # on the AP instead of falling back to mobile data. On by default -- without it
+  # phones report "no internet" and route around the AP, which is the single most
+  # common "I joined the WLAN but the page will not open". Needs web.enabled
+  # (above) and a free port 80; it only ever listens on the AP address. Note: AP
+  # clients then get no general internet (expected for a field AP that only
+  # serves this UI).
+  captive_portal: true
   captive_portal_port: 80
 
 # Optional video transcoding / resolution change via ffmpeg. Jobs are submitted

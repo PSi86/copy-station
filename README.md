@@ -13,6 +13,7 @@ or a **Raspberry Pi 4 / 5** (Raspberry Pi OS Bookworm 64-bit).
   * [File access & download](#file-access--download-optional)
   * [Video transcoding](#video-transcoding-optional)
 * [WiFi access point](#wifi-access-point-optional)
+  * [Running the AP while the station is on a LAN](#running-the-ap-while-the-station-is-on-a-lan)
 * [E-Paper display](#e-paper-display-optional)
 * [WS2812B / NeoPixel strip](#ws2812b--neopixel-strip-optional)
 * [Grove LED Bar v2.0](#grove-led-bar-v20-optional)
@@ -62,8 +63,8 @@ Ready ──device detected──► Detecting ──source+target ok──► C
 
 ## Web interface (optional)
 
-Set `web.enabled: true` in the config to host a local status page on **all
-network interfaces** (`0.0.0.0:8080` by default). It shows live phase, copy
+`web.enabled: true` (the shipped default; the installer asks) hosts a local status
+page on **all network interfaces** (`0.0.0.0:8080` by default). It shows live phase, copy
 progress (percent, elapsed, ETA, **speed**), the **detected devices** with their
 assigned role (source/target/candidate) and used/total storage, and a scrolling
 **activity log** of recent actions (newest first); it is prepared for future
@@ -85,7 +86,11 @@ may want the interface behind a password. Set `web.auth.enabled: true` with a
 `username`/`password` and the whole interface (status, files, transcode) is
 guarded by HTTP Basic auth. It is off by default (unchanged behaviour), and
 **fail-safe**: enabling it with an empty password rejects every request rather
-than leaving it open.
+than leaving it open. The shipped configs come with `admin` /
+**`copystation`** already filled in -- the same string as the WLAN password, so
+enabling auth is a one-word change and there is one credential to remember. Both
+ship in this repository and are therefore **public knowledge**: change them
+before the station is used anywhere its cards should stay private.
 
 ### File access & download (optional)
 
@@ -387,19 +392,60 @@ automatically, so a device that associates gets an address and can open
 wifi_ap:
   enabled: true
   ssid: Copy_Station
-  password: "change-me-8+"   # >= 8 chars for WPA2; empty leaves the AP down
+  password: "copystation"    # shipped default; >= 8 chars for WPA2, empty leaves the AP down
   band: bg                   # bg (2.4 GHz) | a (5 GHz)
   channel: 6
   ipv4_address: 10.42.0.1/24
   ifname: ""                 # empty -> NetworkManager picks the Wi-Fi interface
+  captive_portal: true       # shipped default: joining a device opens the web UI
 ```
 
 WPA2 requires a password of **at least 8 characters**; a shorter or empty one
-leaves the AP down (logged). It needs **NetworkManager** -- the default network
+leaves the AP down (logged). The configs ship with **`copystation`** so the AP
+works out of the box -- which also means it is in this repository for everyone to
+read. Anyone within radio range can then join and reach the file browser
+(download *and* delete), so **pick your own password** whenever the station holds
+material that should stay private, and consider `web.auth.enabled: true` on top. It needs **NetworkManager** -- the default network
 stack on Raspberry Pi OS Bookworm and current Radxa images. The installer is not
 allowed to force-install it (it can clash with an existing `dhcpcd`/`networkd`
 setup), so if `nmcli` is missing it prints a note; install `network-manager` by
 hand to use the AP. Verify with `nmcli connection show --active`.
+
+### Running the AP while the station is on a LAN
+
+The AP is built for the field, but it is often enabled on a station that is *also*
+cabled to a LAN (that is how it gets configured in the first place). Two things
+decide whether that works, and both bite as "Ethernet/SSH dies the moment the AP
+comes up":
+
+* **Pick an AP subnet you do not otherwise use.** `ipv4.method shared` puts the
+  station on `ipv4_address`' subnet and serves DHCP+NAT there. If that subnet
+  overlaps the LAN -- or worse, the address is one the station already has -- the
+  routing table gets a second path into the LAN and replies leave over Wi-Fi:
+  every established connection over Ethernet, SSH included, breaks. The daemon
+  now compares the AP subnet against the addresses already configured and warns
+  with both sides named, e.g.
+  `WiFi AP address conflict: eth0 is on 192.168.1.0/24 which OVERLAPS the AP subnet
+  192.168.1.0/24`. The default `10.42.0.1/24` is a good choice on a typical
+  `192.168.x.y` LAN.
+* **Do not run two network stacks.** NetworkManager manages *every* interface by
+  default. Installing it next to an active `dhcpcd`/`systemd-networkd` (older
+  Raspberry Pi OS images) means both fight over `eth0`, and the first `nmcli` call
+  -- raising the AP -- is what wakes NetworkManager up. Check with
+  `nmcli device status` (is `eth0` *managed*?) and
+  `systemctl is-active dhcpcd systemd-networkd NetworkManager`: exactly one of
+  them should be running the show.
+
+Useful when something looks wrong (run them on the device, not over the link you
+are debugging):
+
+```bash
+nmcli device status                     # who manages eth0/wlan0?
+nmcli connection show --active          # is copystation-ap up?
+ip -4 addr; ip route                    # AP subnet vs LAN subnet
+sudo ss -ltnp | grep 8080               # is the web interface listening, and on what?
+journalctl -u copystation -b | grep -i "wifi\|web"
+```
 
 **Turning the AP on/off from the button.** Bind the `wifi_ap` action to a user
 button gesture to toggle the access point on demand -- the recommended binding is
@@ -429,22 +475,64 @@ buttons:
       triple_click: wifi_ap   # toggle the WiFi access point
 ```
 
+**Turning the AP on/off without a button.** A station with no button attached is
+not stuck with whatever `wifi_ap.enabled` says:
+
+* **Web interface** -- the header carries a **`WiFi AP on/off` switch** whenever
+  the AP is configured (i.e. it has a password). It is the same operation as the
+  button press, including the display badge, the blink code and the persisted
+  state. Switching it *off* while the page is open over the AP drops your own
+  connection, which is why it asks first.
+* **Shell** -- for when neither a button nor a reachable interface exists:
+
+  ```bash
+  sudo /opt/copystation/venv/bin/python -m copystation.daemon \
+      --config /etc/copystation/config.yaml wifi-ap off   # on | off | toggle | status
+  ```
+
+  This writes the same persisted state, so it survives a restart. It talks to
+  NetworkManager directly, so with the daemon running the display badge and the
+  captive portal only catch up on the next service restart -- prefer the web
+  switch or the button when you have one.
+
+Straight `nmcli` also works, but remember the profile is created with
+`autoconnect: true`, so a plain `nmcli connection down copystation-ap` comes back
+on the next boot; `nmcli connection delete copystation-ap` (or one of the routes
+above) is the durable off.
+
 **Reaching the web UI over the AP.** The AP only serves the web interface if the
 **web interface is enabled** -- they are independent switches. If
-`http://10.42.0.1:8080/` is *refused* after joining the AP, the usual cause is
-`web.enabled: false` (nothing is listening); set it `true` and restart. The
-daemon logs a warning for exactly this case and prints the reachable URL at
-startup (`journalctl -u copystation`). Quick checks on the device:
-`sudo ss -ltnp | grep 8080` (uvicorn listening on `0.0.0.0:8080`?) and
-`nmcli connection show --active` / `ip -4 addr` (is `10.42.0.1/24` on the Wi-Fi
-interface?).
+`http://10.42.0.1:8080/` is *refused* after joining the AP, the two usual causes
+are:
 
-**Captive portal (optional).** Set `wifi_ap.captive_portal: true` so a device that
-joins **auto-opens the web UI** (the OS "Sign in to network" prompt) and stays on
-the AP. Without it, phones detect "no internet" on the AP and route to mobile
-data, so even the manual URL can fail. The portal points all DNS at the AP (a
+* `web.enabled: false` -- nothing is listening at all; set it `true` and restart.
+* `web.host` set to a **concrete address** (e.g. the LAN IP) instead of
+  `0.0.0.0` -- then the interface listens on that ONE address and is refused over
+  the AP, whose address is a different one. Keep `web.host: 0.0.0.0`: it serves
+  every interface and copes with interfaces coming and going, which is exactly
+  what an AP does. (A concrete address that is not up *yet* is not an error: the
+  daemon binds it whenever it appears and says so in the journal. The station
+  itself never waits for the network -- copying works with no network at all, and
+  the service is deliberately not ordered after `network-online.target` so boot
+  stays fast.)
+
+The daemon warns for both cases and prints the reachable URL at startup -- but
+only when the bind actually covers the AP address (`journalctl -u copystation`).
+Quick checks on the device: `sudo ss -ltnp | grep 8080` (uvicorn listening on
+`0.0.0.0:8080`?) and `nmcli connection show --active` / `ip -4 addr` (is
+`10.42.0.1/24` on the Wi-Fi interface?).
+
+**Captive portal (on by default).** `wifi_ap.captive_portal: true` makes a device
+that joins **auto-open the web UI** (the OS "Sign in to network" prompt) and stay
+on the AP. Without it, phones detect "no internet" on the AP and route to mobile
+data, so even the manual URL can fail -- which is why the shipped configs enable
+it: it removes the most common "I joined the WLAN but the page will not open".
+Set it to `false` if port 80 is needed for something else. The portal points all DNS at the AP (a
 NetworkManager `dnsmasq-shared.d` drop-in) and runs a small redirect server on
-**port 80** that sends every request to `http://10.42.0.1:8080/`. It needs
+**port 80 of the AP address** that sends every request to
+`http://10.42.0.1:8080/`. Binding the AP address only keeps port 80 free on the
+LAN side and never bounces a LAN request to an address only AP clients can reach;
+the redirect server therefore starts and stops **with the AP**. It needs
 `web.enabled: true` and a free port 80; AP clients then get **no general internet**
 through the station (expected for a field AP that only serves this UI). Disabling
 it again removes the DNS drop-in on the next start.
@@ -787,8 +875,23 @@ The installer:
 * **detects the board** and writes `/etc/copystation/config.yaml` from the
   matching example (Cubie / Raspberry Pi / generic) -- so it already contains
   suggested GPIO pins instead of empty placeholders,
-* **asks whether to enable the web interface** (default: yes), and
-* enables and starts the `copystation` systemd service.
+* **asks whether to enable the web interface** (default: yes),
+* enables and starts the `copystation` systemd service, and
+* **prints how to reach the station** at the end -- the web URL, the WLAN SSID
+  and how to switch the access point on. Example:
+
+  ```
+  >> Web interface:  http://<device-ip>:8080/
+  >>   no login required (set web.auth.enabled: true to add one)
+  >> WiFi AP:        SSID 'Copy_Station' / 'copystation' (off until switched on)
+  >>   over the AP:  http://10.42.0.1:8080/  (opens by itself when you join)
+  >>   switch it:    from the web interface, a user button, or the shell:
+  >>                 sudo /opt/copystation/venv/bin/python -m copystation.daemon \
+  >>                      --config /etc/copystation/config.yaml wifi-ap on|off
+  ```
+
+  A password you chose yourself is **not** echoed (it would end up in the install
+  log); only the shipped default is shown, which is public knowledge anyway.
 
 The config file is created only if it does not exist yet; re-running the
 installer never overwrites your settings without asking.

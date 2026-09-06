@@ -54,6 +54,20 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .badge.error { background: var(--error); color: #2a0a05; }
 .badge.success { background: var(--ready); color: #06210f; }
 
+/* The AP switch replaces the read-only AP badge when the station can control the
+   access point: lit while it is up, muted (but always visible) while it is down,
+   so the AP can be turned off from here without a hardware button. */
+.badge.ap-toggle {
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  background: #2a2f3a;
+  color: var(--muted);
+}
+.badge.ap-toggle.on { background: var(--copying); color: #042036; }
+.badge.ap-toggle:hover { border-color: var(--muted); }
+.badge.ap-toggle:disabled { cursor: progress; opacity: 0.6; }
+
 .card {
   background: var(--card);
   border-radius: 12px;

@@ -299,3 +299,255 @@ def test_check_ap_web_reachability_quiet_when_web_enabled(caplog):
     with caplog.at_level("WARNING"):
         _check_ap_web_reachability(cfg, web_up=True)
     assert not any("web.enabled is false" in r.message for r in caplog.records)
+
+
+# ----- web.host vs the AP address --------------------------------------------
+
+
+def test_web_bind_covers_wildcard_and_exact_address():
+    from copystation.daemon import web_bind_covers
+
+    for wildcard in ("0.0.0.0", "", "::", "*"):
+        assert web_bind_covers(wildcard, "10.42.0.1") is True
+    assert web_bind_covers("10.42.0.1", "10.42.0.1") is True
+    assert web_bind_covers("192.168.1.50", "10.42.0.1") is False
+
+
+def test_check_ap_web_reachability_warns_about_concrete_web_host(caplog):
+    from copystation.config import Config
+    from copystation.daemon import _check_ap_web_reachability
+
+    cfg = Config()
+    cfg.data["wifi_ap"]["enabled"] = True
+    cfg.data["web"]["enabled"] = True
+    cfg.data["web"]["host"] = "192.168.1.50"  # LAN address only -> refused over the AP
+    with caplog.at_level("INFO"):
+        _check_ap_web_reachability(cfg, web_up=True)
+    assert any("web.host" in r.message and "refused over the AP" in r.message
+               for r in caplog.records)
+    # ... and the reachable-URL line must NOT claim an address nobody can reach.
+    assert not any("Web interface over the AP" in r.message for r in caplog.records)
+
+
+def test_check_ap_web_reachability_logs_url_when_bind_covers_the_ap(caplog):
+    from copystation.config import Config
+    from copystation.daemon import _check_ap_web_reachability
+
+    cfg = Config()
+    cfg.data["wifi_ap"]["enabled"] = True
+    cfg.data["web"]["enabled"] = True
+    with caplog.at_level("INFO"):
+        _check_ap_web_reachability(cfg, web_up=True)
+    assert any("Web interface over the AP: http://10.42.0.1:8080/" in r.message
+               for r in caplog.records)
+
+
+# ----- AP subnet vs the networks the station is already on --------------------
+
+
+IP_ADDR_OUTPUT = (
+    "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+    "2: eth0    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eth0\\"
+    "       valid_lft 42sec\n"
+)
+
+
+def test_parse_addr_show():
+    assert ap.parse_addr_show(IP_ADDR_OUTPUT) == [
+        ("lo", "127.0.0.1/8"),
+        ("eth0", "192.168.1.50/24"),
+    ]
+    assert ap.parse_addr_show("") == []
+    assert ap.parse_addr_show("garbage line without inet") == []
+
+
+def test_address_conflicts_none_for_a_separate_subnet():
+    assert ap.address_conflicts("10.42.0.1/24", ap.parse_addr_show(IP_ADDR_OUTPUT)) == []
+
+
+def test_address_conflicts_flags_overlapping_lan_subnet():
+    # The classic breakage: the AP subnet is the LAN subnet, so the station gets
+    # a second route into it and answers LAN hosts over Wi-Fi.
+    messages = ap.address_conflicts("192.168.1.1/24", ap.parse_addr_show(IP_ADDR_OUTPUT))
+    assert len(messages) == 1
+    assert "eth0" in messages[0] and "OVERLAPS" in messages[0]
+
+
+def test_address_conflicts_flags_duplicate_address():
+    messages = ap.address_conflicts("192.168.1.50/24", ap.parse_addr_show(IP_ADDR_OUTPUT))
+    assert len(messages) == 1 and "DUPLICATE" in messages[0]
+
+
+def test_address_conflicts_ignores_loopback_and_the_ap_interface():
+    existing = [("lo", "127.0.0.1/8"), ("wlan0", "10.42.0.1/24")]
+    assert ap.address_conflicts("127.0.0.1/8", existing) == []      # lo never counts
+    assert ap.address_conflicts("10.42.0.1/24", existing, skip=("wlan0",)) == []
+    # Without the skip the AP's own leftover address would look like a duplicate.
+    assert ap.address_conflicts("10.42.0.1/24", existing) != []
+
+
+def test_start_ap_warns_about_a_conflicting_subnet(monkeypatch, caplog):
+    def fake_run(cmd, check=True):
+        class R:
+            stdout = IP_ADDR_OUTPUT if cmd[0] == "ip" else ""
+
+        return R()
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    cfg = dict(FULL, ipv4_address="192.168.1.1/24", ifname="")
+    with caplog.at_level("WARNING"):
+        assert ap.start_ap(cfg) is True  # advisory only -- the AP still comes up
+    assert any("address conflict" in r.message for r in caplog.records)
+
+
+NMCLI_DEVICE_OUTPUT = """end0:ethernet:connected:Wired connection 1
+lo:loopback:connected (externally):lo
+wlan0:wifi:disconnected:
+p2p-dev-wlan0:wifi-p2p:disconnected:
+"""
+
+
+def test_parse_wifi_ifnames_picks_only_wifi_devices():
+    # wifi-p2p is a different type and must not be mistaken for the AP device.
+    assert ap.parse_wifi_ifnames(NMCLI_DEVICE_OUTPUT) == ["wlan0"]
+    assert ap.parse_wifi_ifnames("") == []
+
+
+def test_ap_ifnames_prefers_the_configured_interface(monkeypatch):
+    def fail(cmd, check=True):  # pragma: no cover - must not be reached
+        raise AssertionError("nmcli must not be asked when ifname is configured")
+
+    monkeypatch.setattr(ap, "_run", fail)
+    assert ap.ap_ifnames({"ifname": "wlan1"}) == ["wlan1"]
+
+
+def test_ap_ifnames_falls_back_to_the_wifi_devices(monkeypatch):
+    monkeypatch.setattr(ap, "_run", lambda cmd, check=True: type(
+        "R", (), {"stdout": NMCLI_DEVICE_OUTPUT})())
+    assert ap.ap_ifnames({"ifname": ""}) == ["wlan0"]
+
+
+def test_ap_ifnames_survives_a_missing_nmcli(monkeypatch):
+    def boom(cmd, check=True):
+        raise OSError("no nmcli")
+
+    monkeypatch.setattr(ap, "_run", boom)
+    assert ap.ap_ifnames({"ifname": ""}) == []
+
+
+def test_no_conflict_warning_when_the_ap_is_already_up(monkeypatch, caplog):
+    """Re-raising a running AP must not report its own address as a duplicate.
+
+    NetworkManager drops the old address asynchronously, so at the moment of the
+    check the AP address is still on wlan0 -- which used to produce a scary
+    "SSH will break" warning on every daemon restart with the AP enabled.
+    """
+    already_up = IP_ADDR_OUTPUT + """3: wlan0    inet 10.42.0.1/24 scope global wlan0
+"""
+
+    def fake_run(cmd, check=True):
+        stdout = already_up if cmd[0] == "ip" else NMCLI_DEVICE_OUTPUT
+        return type("R", (), {"stdout": stdout})()
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    # ifname empty, exactly as the shipped configs have it.
+    cfg = dict(FULL, ipv4_address="10.42.0.1/24", ifname="")
+    with caplog.at_level("WARNING"):
+        assert ap.log_address_conflicts(cfg) == []
+    assert not any("address conflict" in r.message for r in caplog.records)
+
+
+def test_a_real_lan_clash_is_still_reported_with_an_empty_ifname(monkeypatch, caplog):
+    """The skip must not swallow the case the check exists for."""
+    def fake_run(cmd, check=True):
+        stdout = IP_ADDR_OUTPUT if cmd[0] == "ip" else NMCLI_DEVICE_OUTPUT
+        return type("R", (), {"stdout": stdout})()
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    cfg = dict(FULL, ipv4_address="192.168.1.1/24", ifname="")
+    with caplog.at_level("WARNING"):
+        conflicts = ap.log_address_conflicts(cfg)
+    assert conflicts and "eth0" in conflicts[0]
+
+
+# ----- the shared runtime controller (button / web / CLI) --------------------
+
+
+def test_ap_controller_applies_persists_and_syncs_the_portal(monkeypatch, tmp_path):
+    from copystation.config import Config
+
+    class _Portal:
+        def __init__(self):
+            self.states = []
+
+        def sync(self, active):
+            self.states.append(active)
+
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: desired)
+    hub, store, portal = _ApHub(), _ap_section(tmp_path), _Portal()
+    control = ap.ApController(config=Config(), hub=hub, settings=store, portal=portal)
+
+    assert control.apply(True) is True
+    assert hub.state.ap_active is True and store.get("enabled") is True
+    assert portal.states == [True]
+
+    assert control.flip() is False  # flips the last known state
+    assert hub.state.ap_active is False and store.get("enabled") is False
+    assert portal.states == [True, False]
+
+
+def test_ap_controller_reconciles_a_failed_bringup(monkeypatch, tmp_path):
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: False)
+    hub, store = _ApHub(), _ap_section(tmp_path)
+    control = ap.ApController(hub=hub, settings=store)
+    assert control.apply(True) is False
+    assert hub.state.ap_active is False and store.get("enabled") is False
+
+
+def test_ap_controller_without_hub_asks_nmcli_for_the_direction(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(ap, "toggle", lambda cfg: seen.append(cfg) or True)
+    store = _ap_section(tmp_path)
+    assert ap.ApController(settings=store).flip() is True
+    assert seen == [{}] and store.get("enabled") is True
+
+
+def test_daemon_ap_controller_only_when_the_ap_can_come_up():
+    from copystation.config import Config
+    from copystation.daemon import _build_ap_controller
+
+    cfg = Config()
+    assert _build_ap_controller(cfg) is None  # no password -> AP can never be up
+    cfg.data["wifi_ap"]["password"] = "supersecret"
+    assert _build_ap_controller(cfg) is not None
+
+
+def test_cli_wifi_ap_switches_and_persists(monkeypatch, tmp_path, capsys):
+    from copystation.config import Config
+    from copystation.daemon import run_wifi_ap
+    from copystation.settings_store import SettingsStore
+
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: desired)
+    cfg = Config()
+    cfg.data["user_settings_file"] = str(tmp_path / "user-settings.json")
+    cfg.data["wifi_ap"]["password"] = "supersecret"
+
+    assert run_wifi_ap(cfg, "on") == 0
+    assert "up" in capsys.readouterr().out
+    store = SettingsStore(str(tmp_path / "user-settings.json")).section("wifi_ap")
+    assert store.get("enabled") is True  # survives a restart
+
+    assert run_wifi_ap(cfg, "off") == 0
+    store = SettingsStore(str(tmp_path / "user-settings.json")).section("wifi_ap")
+    assert store.get("enabled") is False
+
+
+def test_cli_wifi_ap_on_reports_a_failed_bringup(monkeypatch, tmp_path):
+    from copystation.config import Config
+    from copystation.daemon import run_wifi_ap
+
+    monkeypatch.setattr(ap, "set_active", lambda cfg, desired: False)
+    cfg = Config()
+    cfg.data["user_settings_file"] = str(tmp_path / "user-settings.json")
+    assert run_wifi_ap(cfg, "on") == 1   # non-zero: the caller sees it failed
+    assert run_wifi_ap(cfg, "off") == 0  # "off" that stays off is a success
