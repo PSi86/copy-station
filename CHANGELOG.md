@@ -26,7 +26,9 @@ for, and a warm-reboot bug that the current kernel has fixed.
   is already down -- so a persisted "off" holds *during* the boot, not just
   after it. Nothing is lost by deleting: every bring-up rebuilds the profile
   from the config anyway. `autoconnect` keeps its remaining job, holding a
-  *running* AP up across an interface flap.
+  *running* AP up across an interface flap. Switching off is idempotent with it:
+  with no profile left `nmcli connection down` exits 10 ("does not exist"), which
+  is the state being asked for and no longer surfaces as a warning.
 - **`scripts/install.sh` did not recognise the Radxa Cubie A7S.**
   `/proc/device-tree/model` reads `sun60iw2` -- the Allwinner sunxi SoC name, not
   a marketing name -- which matched none of the installer's

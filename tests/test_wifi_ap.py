@@ -141,6 +141,27 @@ def test_down_deletes_the_profile_even_when_the_down_fails(monkeypatch):
     assert calls[-1] == ["nmcli", "connection", "delete", "copystation-ap"]
 
 
+def test_down_is_idempotent_when_there_is_no_profile(monkeypatch, caplog):
+    """Switching off an AP that is already off is not a failure.
+
+    Because switching off deletes the profile, a second 'off' -- or the startup
+    reconcile on a station that was already down -- finds nothing to bring down.
+    nmcli calls that exit 10 ("does not exist"), which must not surface as a
+    warning: it is the state we are asking for.
+    """
+    import logging
+    import subprocess
+
+    def fake_run(cmd, check=True):
+        if cmd[2] == "down":
+            raise subprocess.CalledProcessError(ap._NMCLI_NOT_FOUND, cmd)
+
+    monkeypatch.setattr(ap, "_run", fake_run)
+    with caplog.at_level(logging.WARNING, logger="copystation.wifi_ap"):
+        assert ap.down(FULL) is True
+    assert caplog.records == []
+
+
 def test_set_active_up_and_down(monkeypatch):
     seen = {}
     monkeypatch.setattr(ap, "start_ap", lambda cfg: True)
