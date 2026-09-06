@@ -2,6 +2,12 @@
 Description=Copy_Station - automatic camera-to-SD copy station
 # Start only once the system userspace is ready.
 After=multi-user.target
+# Deliberately NOT ordered after network-online.target: copying cards is the job
+# of this station and must not wait for a network it does not need (pulling in
+# network-online.target costs every boot the wait-online delay -- up to its
+# timeout with a cable but no DHCP server). The daemon treats the network as
+# something that ARRIVES instead: the web interface binds as soon as its address
+# exists, the WiFi AP is raised independently.
 
 [Service]
 Type=simple

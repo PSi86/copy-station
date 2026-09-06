@@ -4,6 +4,7 @@ Endpoints:
 * ``GET /``                   -- the static single-page frontend
 * ``GET /api/status``         -- a JSON snapshot of the current StationState
 * ``GET /api/settings``       -- capabilities of this build (files/transcode on?)
+* ``POST /api/wifi_ap``       -- switch the WLAN access point on/off
 * ``GET /api/volumes``        -- attached USB volumes (file browser; never the OS)
 * ``GET /api/files``          -- directory listing of one attached volume
 * ``GET /api/files/download`` -- stream one file from an attached volume
@@ -63,6 +64,12 @@ class TranscodeSettingsRequest(BaseModel):
     default_preset: Optional[str] = None
     auto_transcode: Optional[bool] = None
     output_location: Optional[str] = None
+
+
+class WifiApRequest(BaseModel):
+    """POST /api/wifi_ap body: the desired access-point state."""
+
+    enabled: bool
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -126,6 +133,7 @@ def create_app(
     browse: Any = None,
     transcode: Any = None,
     preview: Any = None,
+    wifi_ap: Any = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -134,6 +142,9 @@ def create_app(
     :class:`copystation.transcode.TranscodeManager` and ``preview`` a
     :class:`copystation.preview.PreviewManager`; any may be ``None`` when the
     corresponding feature is disabled or its dependencies are missing.
+    ``wifi_ap`` is a :class:`copystation.wifi_ap.ApController` -- when given, the
+    interface offers an access-point switch (the only way to turn the AP off
+    without a user button).
     """
     auth = _build_auth_dependency(config)
     app = FastAPI(
@@ -146,6 +157,7 @@ def create_app(
     files_enabled = browse is not None
     transcode_enabled = transcode is not None
     preview_enabled = preview is not None and bool(getattr(preview, "available", False))
+    wifi_ap_enabled = wifi_ap is not None
 
     @app.get("/api/status")
     def get_status() -> JSONResponse:
@@ -164,9 +176,28 @@ def create_app(
                     "delete": files_enabled and bool(getattr(browse, "allow_delete", False)),
                     "download": files_enabled and bool(getattr(browse, "allow_download", False)),
                     "preview": preview_enabled,
+                    "wifi_ap": wifi_ap_enabled,
                 },
             }
         )
+
+    if wifi_ap is not None:
+
+        @app.post("/api/wifi_ap")
+        def post_wifi_ap(req: WifiApRequest) -> JSONResponse:
+            # Switching the AP is several seconds of nmcli; a sync endpoint runs
+            # in the threadpool, so the status polling of other clients keeps
+            # working meanwhile. Switching it OFF while connected over the AP
+            # deliberately drops the caller's own network -- that is the point.
+            active = wifi_ap.apply(req.enabled)
+            if req.enabled and not active:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The access point could not be raised -- check "
+                           "wifi_ap.password (>= 8 characters), NetworkManager "
+                           "and the service log.",
+                )
+            return JSONResponse({"enabled": active})
 
     if browse is not None:
 

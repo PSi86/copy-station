@@ -180,12 +180,19 @@ def perform_transfer(
     return dest
 
 
-def _maybe_start_web(hub: StatusHub, config: Config, features=None) -> bool:
+def _maybe_start_web(hub: StatusHub, config: Config, features=None,
+                     ap_control=None) -> bool:
     """Start the web interface if enabled. Returns True if it was started.
 
     ``features`` is an optional prebuilt ``(browse, transcode, preview)`` tuple so
     the daemon can share the transcode manager with the device watcher (for
     auto-transcode); when omitted the features are built here (simulation path).
+    ``ap_control`` is the WiFi-AP controller backing the interface's AP switch
+    (``None`` -> the frontend hides it).
+
+    True also covers "started, but still waiting for its address to appear" --
+    that wait happens in the web server's own thread, so the daemon walks straight
+    on to the device watcher and the station copies regardless of the network.
     """
     web_cfg = config.get("web", {})
     if not web_cfg.get("enabled"):
@@ -203,11 +210,32 @@ def _maybe_start_web(hub: StatusHub, config: Config, features=None) -> bool:
             browse=browse,
             transcode=transcode,
             preview=preview,
+            wifi_ap=ap_control,
         )
         return True
     except Exception as exc:
         _LOG.warning("Web interface could not be started: %s", exc)
         return False
+
+
+def _build_ap_controller(config: Config, hub: StatusHub = None,
+                         ap_settings=None, portal=None):
+    """The runtime AP switch shared by the web interface and the user button.
+
+    ``None`` when the AP is not configured at all (no password -> it can never
+    come up), so the web interface hides the switch instead of offering a control
+    that cannot work.
+    """
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    if not str(ap_cfg.get("password", "") or ""):
+        return None
+    try:
+        from .wifi_ap import ApController
+
+        return ApController(config=config, hub=hub, settings=ap_settings, portal=portal)
+    except Exception as exc:  # pragma: no cover - defensive
+        _LOG.warning("WiFi AP control unavailable: %s", exc)
+        return None
 
 
 def _user_settings_file(config: Config) -> str:
@@ -352,13 +380,16 @@ def _apply_wifi_ap_state(config: Config, want_up: bool) -> bool:
     return False
 
 
-def _maybe_start_captive_portal(config: Config):
+def _maybe_prepare_captive_portal(config: Config):
     """Set up the optional captive portal (DNS hijack + port-80 redirect).
 
-    Returns the running :class:`CaptivePortal` or ``None``. The DNS drop-in is
-    written before the AP is raised (so NetworkManager's shared dnsmasq reads it),
-    and is removed again when the feature is disabled so stale config never
-    lingers. Best-effort: any failure is logged and the AP still works.
+    Returns a *not yet listening* :class:`CaptivePortal` or ``None``. The DNS
+    drop-in is written here -- before the AP is raised, so NetworkManager's shared
+    dnsmasq reads it -- and is removed again when the feature is disabled so stale
+    config never lingers. The redirect server itself binds the AP address, which
+    only exists once the AP is up, so it is started later via ``portal.sync()``
+    and follows every AP on/off from then on. Best-effort: any failure is logged
+    and the AP still works, just without the auto-redirect.
     """
     ap_cfg = config.get("wifi_ap", {}) or {}
     try:
@@ -373,19 +404,21 @@ def _maybe_start_captive_portal(config: Config):
 
     web_cfg = config.get("web", {}) or {}
     if not web_cfg.get("enabled"):
-        _LOG.warning("captive_portal is set but web.enabled is false -- no page to redirect to.")
+        # Only a problem if the AP can actually be raised and joined: the portal
+        # ships enabled, so for a station running without the web interface this
+        # is a note, not a misconfiguration to shout about on every start.
+        log = _LOG.warning if _ap_usable(config) else _LOG.info
+        log("captive_portal is set but web.enabled is false -- no page to redirect to.")
         remove_dnsmasq_hijack()
         return None
 
     try:
         ip = str(ap_cfg.get("ipv4_address", "10.42.0.1/24")).split("/")[0]
         write_dnsmasq_hijack(ip)
-        portal = CaptivePortal(ip, int(web_cfg.get("port", 8080)),
-                               int(ap_cfg.get("captive_portal_port", 80)))
-        portal.start()
-        return portal
+        return CaptivePortal(ip, int(web_cfg.get("port", 8080)),
+                             int(ap_cfg.get("captive_portal_port", 80)))
     except Exception as exc:
-        _LOG.warning("Captive portal could not be started: %s", exc)
+        _LOG.warning("Captive portal could not be prepared: %s", exc)
         return None
 
 
@@ -400,46 +433,85 @@ def _wifi_ap_bound_to_button(config: Config) -> bool:
     return False
 
 
+def _ap_usable(config: Config, ap_enabled: bool = False) -> bool:
+    """Whether anything could actually raise the AP: config, overlay or a button.
+
+    ``ap_enabled`` is the effective startup state (config + persisted overlay).
+    Used to decide whether an AP-related misconfiguration is worth a warning: on a
+    station that never raises an access point it is just noise.
+    """
+    return bool(ap_enabled
+                or (config.get("wifi_ap", {}) or {}).get("enabled")
+                or _wifi_ap_bound_to_button(config))
+
+
+def web_bind_covers(host: str, address: str) -> bool:
+    """Whether a server bound to ``host`` also answers on ``address``.
+
+    A wildcard bind (the default ``0.0.0.0``) covers every interface, including
+    ones that come and go; a concrete address covers only itself.
+    """
+    host = str(host or "").strip()
+    return host in ("", "0.0.0.0", "::", "*") or host == str(address).strip()
+
+
 def _check_ap_web_reachability(config: Config, web_up: bool,
                                ap_enabled: bool = False) -> None:
-    """Warn about the classic 'AP up but web UI refused' misconfiguration.
+    """Warn about the classic 'AP up but web UI refused' misconfigurations.
 
-    The AP only serves the web interface if the web interface is actually
-    enabled: without it, ``http://<ap-ip>:<port>/`` is refused (nothing listens).
-    The AP and web are independent flags, so a common setup mistake is enabling
-    the AP (or binding it to a button) while leaving ``web.enabled`` off. Also log
-    the exact URL when both are up, so it is easy to find in the journal.
+    Two independent ways to end up with an access point nobody can use:
+
+    * ``web.enabled`` is off -- nothing listens at all, so ``http://<ap-ip>:<port>/``
+      is refused. The AP and web are independent flags, so enabling the AP (or
+      binding it to a button) while leaving the web interface off is a common
+      setup mistake.
+    * ``web.host`` is a concrete address (typically the LAN IP) instead of
+      ``0.0.0.0`` -- then the interface listens on that ONE address and is refused
+      over the AP, whose address is a different one.
+
+    The reachable URL is only logged when the bind actually covers the AP address,
+    so the journal never advertises a URL that is refused.
     """
-    ap_usable = (ap_enabled
-                 or bool((config.get("wifi_ap", {}) or {}).get("enabled"))
-                 or _wifi_ap_bound_to_button(config))
+    ap_usable = _ap_usable(config, ap_enabled)
     web_cfg = config.get("web", {}) or {}
+    port = web_cfg.get("port", 8080)
+    ap_ip = str((config.get("wifi_ap", {}) or {}).get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+    host = str(web_cfg.get("host", "0.0.0.0"))
+    covers_ap = web_bind_covers(host, ap_ip)
+
     if ap_usable and not web_cfg.get("enabled"):
         _LOG.warning(
             "WiFi AP is configured but web.enabled is false -- the AP has no web UI "
             "to serve, so http://<ap-ip>:%s/ will be refused. Set web.enabled: true "
             "to reach the interface over the access point.",
-            web_cfg.get("port", 8080),
+            port,
         )
-    if web_up:
-        ip = str((config.get("wifi_ap", {}) or {}).get("ipv4_address", "10.42.0.1/24")).split("/")[0]
-        _LOG.info("Web interface over the AP: http://%s:%s/", ip, web_cfg.get("port", 8080))
+    elif ap_usable and not covers_ap:
+        _LOG.warning(
+            "WiFi AP is configured but web.host is %r -- the web interface listens "
+            "on that address ONLY, so http://%s:%s/ will be refused over the AP. "
+            "Set web.host: 0.0.0.0 to serve every interface.",
+            host, ap_ip, port,
+        )
+    if web_up and covers_ap:
+        _LOG.info("Web interface over the AP: http://%s:%s/", ap_ip, port)
 
 
 def _maybe_start_buttons(config: Config, hub: StatusHub, transcode=None,
-                         ap_settings=None) -> list:
+                         ap_settings=None, portal=None) -> list:
     """Start the optional GPIO user buttons. Returns them (possibly empty).
 
     ``hub`` is passed through so a ``wifi_ap`` / ``auto_transcode`` button action
     can update the display status and fire its WS2812 blink code; ``transcode`` is
     the manager the ``auto_transcode`` action toggles; ``ap_settings`` is the store
-    the ``wifi_ap`` action persists the AP on/off state to.
+    the ``wifi_ap`` action persists the AP on/off state to and ``portal`` the
+    captive portal that follows the AP up and down.
     """
     try:
         from .buttons import build_buttons
 
         buttons = build_buttons(config, hub=hub, transcode=transcode,
-                                ap_settings=ap_settings)
+                                ap_settings=ap_settings, portal=portal)
         for button in buttons:
             button.start()
             _LOG.info("User button %s active", button.name)
@@ -477,21 +549,27 @@ def run_daemon(config: Config) -> int:
     # SAME transcode manager backs both the web UI and the device watcher's
     # auto-transcode (which needs it even when the web UI is off).
     browse, transcode, preview = _build_web_features(hub, config, user_settings)
+    # The captive-portal DNS drop-in is written BEFORE the AP is raised, so
+    # NetworkManager's dnsmasq reads it; the redirect server binds the AP address
+    # and is therefore started later, when the AP is actually up.
+    ap_settings = user_settings.section("wifi_ap")
+    portal = _maybe_prepare_captive_portal(config)
+    # One controller for every runtime AP switch (web interface, user button,
+    # `wifi-ap` CLI): same feedback, same persisted state, portal kept in step.
+    ap_control = _build_ap_controller(config, hub, ap_settings, portal)
     # Start the web server first so it is already listening (on 0.0.0.0, all
-    # interfaces) before the slower AP bring-up. The captive-portal DNS drop-in is
-    # written before the AP is raised, so NetworkManager's dnsmasq reads it. Then
-    # raise the AP.
-    web_up = _maybe_start_web(hub, config, (browse, transcode, preview))
-    portal = _maybe_start_captive_portal(config)
+    # interfaces) before the slower AP bring-up.
+    web_up = _maybe_start_web(hub, config, (browse, transcode, preview), ap_control)
     # WiFi AP: the persisted overlay state (from a web/button toggle) wins over
     # wifi_ap.enabled in config.yaml, so a runtime toggle survives a restart. Apply
     # it (bringing a stale-up AP down when it should be off) and reflect the badge.
-    ap_settings = user_settings.section("wifi_ap")
     ap_enabled = _effective_ap_enabled(config, ap_settings)
     ap_up = _apply_wifi_ap_state(config, ap_enabled)
     hub.set_ap_active(ap_up)
+    if portal is not None:
+        portal.sync(ap_up)
     _check_ap_web_reachability(config, web_up, ap_enabled)
-    buttons = _maybe_start_buttons(config, hub, transcode, ap_settings)
+    buttons = _maybe_start_buttons(config, hub, transcode, ap_settings, portal)
 
     watcher = DeviceWatcher(
         config=config, hub=hub, transfer=perform_transfer, transcode=transcode
@@ -530,6 +608,10 @@ def main(argv: list[str] | None = None) -> int:
         "leds-off",
         help="Switch the status LEDs off and exit (used by the systemd ExecStopPost)",
     )
+    ap_parser = sub.add_parser(
+        "wifi-ap", help="Switch the WLAN access point on/off from the shell"
+    )
+    ap_parser.add_argument("action", choices=["on", "off", "toggle", "status"])
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -539,7 +621,42 @@ def main(argv: list[str] | None = None) -> int:
         return run_simulation(args, config)
     if args.mode == "leds-off":
         return run_leds_off(config)
+    if args.mode == "wifi-ap":
+        return run_wifi_ap(config, args.action)
     return run_daemon(config)
+
+
+def run_wifi_ap(config: Config, action: str) -> int:
+    """Switch the WLAN access point from the shell and exit.
+
+    The rescue path for a station with no user button: it needs neither a running
+    daemon nor a reachable web interface, only nmcli. The chosen state is written
+    to the same user-settings overlay the button and the web switch use, so it
+    survives a restart (the overlay wins over ``wifi_ap.enabled``).
+
+    Note: with the daemon running this changes the AP behind its back -- the
+    display badge and the captive portal only catch up on the next restart. Use
+    the web switch or the button when either is available.
+    """
+    from .wifi_ap import ApController, is_active
+
+    ap_cfg = config.get("wifi_ap", {}) or {}
+    ap_settings = SettingsStore(_user_settings_file(config)).section("wifi_ap")
+
+    if action == "status":
+        active = is_active(ap_cfg)
+        persisted = ap_settings.get("enabled") if ap_settings.has("enabled") else None
+        print(f"WiFi AP: {'up' if active else 'down'} "
+              f"(connection {ap_cfg.get('con_name', 'copystation-ap')!r}, "
+              f"persisted state: {persisted if persisted is not None else 'from config'})")
+        return 0
+
+    control = ApController(config=config, settings=ap_settings)
+    actual = control.flip() if action == "toggle" else control.apply(action == "on")
+    print(f"WiFi AP is now {'up' if actual else 'down'}")
+    # `on` that did not come up is a failure the caller should see (bad password,
+    # no NetworkManager, no Wi-Fi device) -- the reason is in the log above.
+    return 0 if (actual or action != "on") else 1
 
 
 def run_leds_off(config: Config) -> int:

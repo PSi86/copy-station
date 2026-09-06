@@ -85,14 +85,16 @@ status:
 
 web:
   enabled: true
-  host: 0.0.0.0
+  host: 0.0.0.0        # keep the wildcard: serves every interface, AP included
   port: 8080
   # Optional HTTP Basic auth for the whole interface (off by default). See
   # config.example.yaml for details. Sensible once files are reachable over the AP.
+  # The password is pre-filled (same as the WLAN one) so enabling auth is a
+  # one-word change -- it is public knowledge, so change both when it matters.
   auth:
     enabled: false
     username: admin
-    password: ""
+    password: "copystation"
   # Read-only browsing + download of the ATTACHED USB storage (never the OS card).
   files:
     enabled: true
@@ -105,11 +107,15 @@ web:
 wifi_ap:
   enabled: false
   ssid: Copy_Station
-  password: ""            # >= 8 chars for WPA2; empty -> AP stays down
+  # Ready-made (same as web.auth.password) so the AP just works; public
+  # knowledge -- change it for anything but a closed circle.
+  password: "copystation"  # >= 8 chars for WPA2; empty -> AP stays down
   band: bg
   channel: 6
+  # Must not overlap a network this station is already on (duplicate/
+  # overlapping subnets break Ethernet+SSH while the AP is up).
   ipv4_address: 10.42.0.1/24
-  captive_portal: false   # true -> auto-open the web UI on join (needs port 80)
+  captive_portal: true    # a joining device auto-opens the web UI (needs port 80)
 
 # Optional video transcoding via ffmpeg (writes to <output_dirname>/ on the
 # chosen target volume, also downloadable). Needs ffmpeg (installed by

@@ -98,6 +98,12 @@ if [[ ${CONFIG_ONLY} -eq 0 ]]; then
   python3 -m venv --system-site-packages "${VENV_DIR}"
   "${VENV_DIR}/bin/pip" install --upgrade pip
   "${VENV_DIR}/bin/pip" install "fastapi>=0.100" "uvicorn>=0.20"
+  # Make `copystation` importable for the venv interpreter itself. The systemd
+  # unit sets PYTHONPATH, but a shell does not -- and the CLI we point people at
+  # (`venv/bin/python -m copystation.daemon ... wifi-ap on`) is run from a shell,
+  # where it would otherwise fail with ModuleNotFoundError.
+  PURELIB="$("${VENV_DIR}/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  echo "${INSTALL_DIR}" > "${PURELIB}/copystation.pth"
 fi
 
 echo ">> Configuration in ${CONFIG_DIR} ..."
@@ -206,6 +212,16 @@ fi
 if python3 -c "import sys, yaml; c = yaml.safe_load(open(sys.argv[1])) or {}; sys.exit(0 if (c.get('wifi_ap') or {}).get('enabled') else 1)" "${TARGET}" 2>/dev/null; then
   if command -v nmcli >/dev/null 2>&1; then
     echo "   -> wifi_ap enabled; NetworkManager present -- the daemon raises the AP on start."
+    # Two network stacks fighting over the same interface is the classic reason
+    # "the LAN/SSH dies when the AP comes up" -- name it here, before it happens.
+    for other in dhcpcd systemd-networkd; do
+      if systemctl is-active --quiet "${other}" 2>/dev/null; then
+        echo "   -> WARNING: ${other} is running alongside NetworkManager. Both manage" >&2
+        echo "               the same interfaces; raising the AP can then knock out the" >&2
+        echo "               wired connection (SSH included). See the README section" >&2
+        echo "               'Running the AP while the station is on a LAN'." >&2
+      fi
+    done
   else
     echo "   -> NOTE: wifi_ap is enabled but 'nmcli' (NetworkManager) was not found." >&2
     echo "            Install NetworkManager to use the access point (see README)." >&2
@@ -228,6 +244,50 @@ elif [[ ${CONFIG_INSTALLED} -eq 1 ]]; then
     echo ">> copystation.service not installed yet -- run the full install to set it up."
   fi
 fi
+
+# How to actually reach the station -- the values one would otherwise have to dig
+# out of the YAML on first setup. The WLAN password is only echoed while it is
+# still the shipped default (which is public anyway); a password the user chose
+# stays out of the terminal scrollback and the install log.
+python3 - "${TARGET}" "${VENV_DIR}/bin/python" <<'PY' || true
+import sys
+
+import yaml
+
+SHIPPED_PASSWORD = "copystation"  # the default in the example configs
+
+config_path, python_bin = sys.argv[1], sys.argv[2]
+cfg = yaml.safe_load(open(config_path, encoding="utf-8")) or {}
+ap = cfg.get("wifi_ap") or {}
+web = cfg.get("web") or {}
+auth = web.get("auth") or {}
+port = web.get("port", 8080)
+
+
+def shown(value):
+    """Echo the shipped default; keep a self-chosen password to yourself."""
+    return repr(value) if value == SHIPPED_PASSWORD else "<as configured in the config file>"
+
+
+if web.get("enabled"):
+    print(f">> Web interface:  http://<device-ip>:{port}/")
+    if auth.get("enabled"):
+        print(f">>   login:        {auth.get('username', 'admin')} / {shown(auth.get('password', ''))}")
+    else:
+        print(">>   no login required (set web.auth.enabled: true to add one)")
+
+password = str(ap.get("password") or "")
+if password:
+    ip = str(ap.get("ipv4_address", "10.42.0.1/24")).split("/")[0]
+    state = "raised on start" if ap.get("enabled") else "off until switched on"
+    print(f">> WiFi AP:        SSID {ap.get('ssid', 'Copy_Station')!r} / {shown(password)} ({state})")
+    if web.get("enabled"):
+        print(f">>   over the AP:  http://{ip}:{port}/"
+              + ("  (opens by itself when you join)" if ap.get("captive_portal") else ""))
+    print(">>   switch it:    from the web interface, a user button, or the shell:")
+    print(f">>                 sudo {python_bin} -m copystation.daemon "
+          f"--config {config_path} wifi-ap on|off")
+PY
 
 echo ">> Done. Status:  systemctl status copystation"
 echo ">> Logs:          journalctl -u copystation -f"

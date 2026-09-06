@@ -54,6 +54,36 @@ h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
 .badge.error { background: var(--error); color: #2a0a05; }
 .badge.success { background: var(--ready); color: #06210f; }
 
+/* The AP switch replaces the read-only AP badge when the station can control the
+   access point: lit while it is up, muted (but always visible) while it is down,
+   so the AP can be turned off from here without a hardware button. */
+.badge.ap-toggle {
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  background: #2a2f3a;
+  color: var(--muted);
+}
+.badge.ap-toggle.on { background: var(--copying); color: #042036; }
+.badge.ap-toggle:hover { border-color: var(--muted); }
+.badge.ap-toggle:disabled { cursor: progress; opacity: 0.6; }
+
+/* Project link: GitHub mark + repository name, on its own line below the
+   connection status. The name is never hidden -- on a phone joined to the
+   station's AP there is no internet to follow the link with, so the name is the
+   only part that is of any use there. */
+.repo-footer { display: flex; justify-content: center; margin-top: 0.75rem; }
+.repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+.repo:hover { color: var(--fg); }
+.repo-icon { flex: none; }
+
 .card {
   background: var(--card);
   border-radius: 12px;

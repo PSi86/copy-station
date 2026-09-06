@@ -6,6 +6,103 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-06
+
+Access-point release from field feedback on a Raspberry Pi 4 that lost its
+Ethernet/SSH connection whenever the AP was up: the setups that break an existing
+LAN are now named at startup, the captive portal no longer occupies the LAN side,
+and an AP without a hardware button can finally be switched off again.
+
+### Added
+- **WiFi AP switch in the web interface.** The header carries a `WiFi AP on/off`
+  button whenever the AP is configured (i.e. it has a password), so a station with
+  no user button attached is no longer stuck with `wifi_ap.enabled` until someone
+  edits the config. It gives the same feedback as the button press (display badge,
+  WS2812 blink code) and persists the same state; switching it off asks first,
+  because it drops the caller's own connection when the page is open over the AP.
+  New endpoint `POST /api/wifi_ap` (`{"enabled": true|false}`).
+- **`wifi-ap` CLI subcommand** (`python -m copystation.daemon ... wifi-ap
+  on|off|toggle|status`) as the rescue path when neither a button nor a reachable
+  web interface exists. Writes the same persisted state, so it survives a restart.
+- **AP address conflict check.** Before the AP is raised, its subnet is compared
+  against the addresses already configured on the machine and a clash is warned
+  about with both sides named (`... eth0 is on 192.168.1.0/24 which OVERLAPS the AP
+  subnet 192.168.1.0/24`). An overlapping subnet -- or an AP address the station
+  already carries -- routes LAN replies out over Wi-Fi and kills every established
+  Ethernet/SSH connection the moment the AP comes up.
+- README section **"Running the AP while the station is on a LAN"**: subnet choice,
+  the NetworkManager-vs-`dhcpcd` clash, and the commands to tell them apart.
+- **The installer warns about a second network stack.** With the AP enabled, an
+  active `dhcpcd` or `systemd-networkd` alongside NetworkManager is reported at
+  install time: both manage the same interfaces, and the first `nmcli` call -- the
+  AP bring-up -- is what makes them collide, taking the wired connection (SSH
+  included) with it.
+- **A link to the project** at the bottom of the web interface -- the GitHub mark
+  plus the repository name, on its own line below the connection status. Both the
+  spelled-out name and the inline SVG follow from the same fact: a phone reading
+  this page is usually joined to the station's access point and has no internet,
+  so it cannot follow the link there and then (the name is what it takes away) and
+  an icon from a CDN would not load at all.
+- The **installer prints how to reach the station** when it is done: the web URL,
+  whether a login is required, the WLAN SSID/password, the URL over the AP and how
+  to switch the AP on -- instead of leaving the values to be dug out of the YAML. A
+  self-chosen password is *not* echoed (it would land in the install log); only the
+  shipped default is, which is public anyway.
+
+### Security
+- The shipped configs now carry a **default password `copystation`** for both the
+  WLAN access point and the (still disabled) web auth -- see *Changed* below. It is
+  published in this repository and therefore **not a secret**: anyone in radio range
+  can join the AP and reach the file browser, including delete. Set your own
+  `wifi_ap.password` (and consider `web.auth.enabled: true`) for any station whose
+  cards should stay private.
+
+### Changed
+- Runtime AP switching (button, web, CLI) now goes through **one controller**
+  (`wifi_ap.ApController`), so every trigger gives the same feedback, persists the
+  same state and keeps the captive portal in step.
+- The **captive portal** binds the **AP address only** instead of `0.0.0.0`, and is
+  started/stopped together with the AP. A wildcard bind occupied port 80 on the LAN
+  side too and answered LAN requests with a redirect to an address only AP clients
+  can reach. The DNS drop-in is still written before the AP comes up (NetworkManager's
+  dnsmasq reads it at activation).
+- **The shipped configs are set up to just work** (`config.example.yaml` and both
+  board configs): the **captive portal is on**, and the **WiFi AP and web auth carry
+  a ready-made password** (`copystation`, the same string for both, so there is one
+  credential to remember and enabling auth is a one-word change). `web.auth.enabled`
+  stays **false** -- the password is only pre-filled, not activated. Rationale: an AP
+  without a password never comes up, and an AP without the captive portal is the
+  classic "joined the WLAN, page will not open". Read the *Security* note above
+  before deploying as-is.
+- `config.example.yaml` (the fallback config for boards the installer does not
+  recognise) now has **`web.enabled: true`**, like both board configs -- the
+  installer's prompt defaults to enabling it anyway, and the captive portal it now
+  ships with exists precisely to serve that interface.
+- A captive portal configured **without** the web interface is now only a *warning*
+  when the AP can actually be raised (config, persisted state or a button); otherwise
+  it is an informational line. The portal ships enabled, so a station deliberately
+  running without a web interface should not be scolded on every start.
+- **The network is treated as something that arrives, not as a precondition.** The
+  service is deliberately *not* ordered after `network-online.target`: copying cards
+  is this station's job and must not wait for a network it does not need (that
+  ordering would cost every boot the `wait-online` delay -- up to its timeout with a
+  cable but no DHCP server). The daemon handles it at runtime instead.
+
+### Fixed
+- **`web.host` set to a concrete address is now reported.** With the AP configured,
+  a non-wildcard `web.host` makes the interface listen on that one address, so it is
+  refused over the AP -- the daemon warns and, more importantly, no longer prints the
+  `Web interface over the AP: http://<ap-ip>:<port>/` line for a bind that does not
+  cover that address.
+- **Boot race on a concrete `web.host`.** The service could start before DHCP had
+  assigned the address; the bind then failed for good and left no web interface at
+  all until the next restart. A host address that is not there *yet* is no longer
+  treated as an error: the server thread waits for it in the background (1 s, backing
+  off to 10 s, with a note in the journal) and binds the moment it appears, while the
+  daemon carries straight on -- the copy functionality is available immediately and
+  independently of the network. A genuine bind failure (port taken, no permission)
+  still raises at startup as before.
+
 ## [1.1.1] - 2026-07-25
 
 Diagnostics release from field feedback on a Raspberry Pi 4: two startup failures
@@ -289,7 +386,8 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/PSi86/copy-station/releases/tag/v1.2.0
 [1.1.1]: https://github.com/PSi86/copy-station/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PSi86/copy-station/releases/tag/v1.1.0
 [1.0.1]: https://github.com/PSi86/copy-station/releases/tag/v1.0.1

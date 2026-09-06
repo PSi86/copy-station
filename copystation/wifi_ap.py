@@ -11,19 +11,28 @@ The command *builders* are pure functions returning an argument list (no shell),
 so they are unit-testable without NetworkManager; the thin runners below execute
 them with ``subprocess``. Everything is best-effort: a failure is logged and the
 rest of the daemon keeps running.
+
+:class:`ApController` is the one place that switches the AP at runtime, whatever
+triggered it (user button, web interface, ``wifi-ap`` CLI): it gives the same
+feedback, persists the same state and keeps the captive portal in step.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import subprocess
-from typing import Any, List
+import threading
+from typing import Any, Iterable, List, Sequence, Tuple
 
 _LOG = logging.getLogger("copystation.wifi_ap")
 
 # WPA2-PSK needs at least 8 characters; a shorter/empty password is rejected by
 # NetworkManager, so we refuse to raise the AP and say why instead.
 MIN_PSK_LEN = 8
+
+# Interfaces that never conflict with the AP subnet (loopback is its own world).
+_IGNORED_IFACES = ("lo",)
 
 
 def _cfg(cfg: Any, key: str, default: Any = None) -> Any:
@@ -84,6 +93,96 @@ def active_cmd() -> List[str]:
     return ["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"]
 
 
+def addr_show_cmd() -> List[str]:
+    """List the IPv4 addresses of every interface (one line each)."""
+    return ["ip", "-4", "-o", "addr", "show"]
+
+
+def device_status_cmd() -> List[str]:
+    """List every NetworkManager device with its type (one line each)."""
+    return ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"]
+
+
+# ----- address conflict detection --------------------------------------------
+#
+# The AP subnet is served by NetworkManager's `ipv4.method shared`. If it clashes
+# with a network the station is ALREADY on (typically the LAN behind eth0), the
+# box ends up with two routes into the same subnet and answers LAN hosts over
+# Wi-Fi -- an established SSH session over Ethernet dies the moment the AP comes
+# up. That is a config mistake we cannot fix, but we can name it precisely
+# instead of letting the user hunt a "the network breaks randomly" ghost.
+
+
+def parse_addr_show(output: str) -> List[Tuple[str, str]]:
+    """Parse ``ip -4 -o addr show`` into ``(ifname, cidr)`` pairs.
+
+    Each line looks like ``2: eth0    inet 192.168.1.50/24 brd ... scope global``;
+    anything unparseable is skipped rather than raising -- this only feeds a
+    warning.
+    """
+    found: List[Tuple[str, str]] = []
+    for line in (output or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4 or "inet" not in parts:
+            continue
+        at = parts.index("inet")
+        if at < 2 or at + 1 >= len(parts):
+            continue
+        cidr, ifname = parts[at + 1], parts[1].rstrip(":")
+        if "/" in cidr and ifname:
+            found.append((ifname, cidr))
+    return found
+
+
+def parse_wifi_ifnames(output: str) -> List[str]:
+    """Pick the Wi-Fi device names out of ``nmcli -t -f DEVICE,TYPE device status``."""
+    names: List[str] = []
+    for line in (output or "").splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1].strip() == "wifi" and parts[0].strip():
+            names.append(parts[0].strip())
+    return names
+
+
+def address_conflicts(
+    ap_cidr: str,
+    existing: Iterable[Tuple[str, str]],
+    skip: Sequence[str] = (),
+) -> List[str]:
+    """Describe every existing address that collides with the AP subnet.
+
+    Two kinds of collision, both fatal for the existing network:
+
+    * the exact same address is already configured elsewhere (duplicate IP), or
+    * the subnets overlap, so the routing table gets a second path into them.
+
+    Returns one human-readable line per conflict (empty = all clear).
+    """
+    try:
+        ap_iface = ipaddress.ip_interface(str(ap_cidr).strip())
+    except ValueError:
+        return []
+    skipped = set(_IGNORED_IFACES) | {s for s in skip if s}
+    messages: List[str] = []
+    for ifname, cidr in existing:
+        if ifname in skipped:
+            continue
+        try:
+            other = ipaddress.ip_interface(cidr)
+        except ValueError:
+            continue
+        if other.ip == ap_iface.ip:
+            messages.append(
+                f"{ifname} already carries {other.ip} -- the AP would be a DUPLICATE address"
+            )
+        elif other.network.overlaps(ap_iface.network):
+            messages.append(
+                f"{ifname} is on {other.network} which OVERLAPS the AP subnet "
+                f"{ap_iface.network}"
+            )
+    return messages
+
+
 # ----- runners ---------------------------------------------------------------
 
 
@@ -102,6 +201,56 @@ def _valid_psk(cfg: Any) -> bool:
         )
         return False
     return True
+
+
+def local_addresses() -> List[Tuple[str, str]]:
+    """Current ``(ifname, cidr)`` pairs of this machine (empty if ``ip`` fails)."""
+    try:
+        return parse_addr_show(_run(addr_show_cmd(), check=True).stdout)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+
+def ap_ifnames(cfg: Any) -> List[str]:
+    """The interfaces the AP may occupy itself -- never a conflict worth warning about.
+
+    The configured ``ifname`` when there is one, otherwise every Wi-Fi device,
+    because that is what NetworkManager picks the AP interface from. Raising the
+    AP takes that device over regardless, so an address already sitting on it is
+    either our own AP from a moment ago or a client connection that ends anyway
+    -- neither is the LAN-breaking clash this check exists for.
+    """
+    configured = str(_cfg(cfg, "ifname", "") or "").strip()
+    if configured:
+        return [configured]
+    try:
+        return parse_wifi_ifnames(_run(device_status_cmd(), check=True).stdout)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+
+def log_address_conflicts(cfg: Any) -> List[str]:
+    """Warn if the AP subnet collides with a network this station is already on.
+
+    Called just before the AP is raised. The AP's own interface is skipped: the
+    profile has just been deleted and re-created, but NetworkManager drops the
+    old address asynchronously, so re-raising an AP that is already up would
+    otherwise report its own address as a duplicate on every daemon restart.
+    Purely advisory: the AP is still brought up (the user may know exactly what
+    they are doing), but the journal now names both sides.
+    """
+    ap_cidr = str(_cfg(cfg, "ipv4_address", "") or "")
+    if not ap_cidr:
+        return []
+    conflicts = address_conflicts(ap_cidr, local_addresses(), skip=ap_ifnames(cfg))
+    for message in conflicts:
+        _LOG.warning(
+            "WiFi AP address conflict: %s. Existing connections over that "
+            "interface (SSH included) will break while the AP is up -- pick a "
+            "wifi_ap.ipv4_address in a subnet you do not otherwise use.",
+            message,
+        )
+    return conflicts
 
 
 def ensure_profile(cfg: Any) -> bool:
@@ -147,6 +296,7 @@ def start_ap(cfg: Any) -> bool:
         return False
     if not ensure_profile(cfg):
         return False
+    log_address_conflicts(cfg)  # advisory: names an AP subnet that breaks the LAN
     ok = up(cfg)
     if ok:
         _LOG.info(
@@ -181,3 +331,90 @@ def toggle(cfg: Any) -> bool:
     indication. Bound to a user button via the ``wifi_ap`` action keyword.
     """
     return set_active(cfg, not is_active(cfg))
+
+
+class ApController:
+    """Switch the AP at runtime -- one behaviour for every trigger.
+
+    A user button, the web interface and the ``wifi-ap`` CLI all go through here,
+    so each of them gives the same feedback, writes the same persisted state and
+    keeps the captive portal in step. Without a controller the "no button
+    attached" case is a dead end: the AP can then only be changed by editing the
+    config and restarting.
+
+    The indication is updated *first*, before the (slow, several-second) nmcli
+    call, so the display badge and the WS2812 blink code react the instant the
+    press/click is recognised; if the bring-up then fails, display and persisted
+    state are corrected. ``settings`` is the ``wifi_ap`` section of the shared
+    user-settings overlay (the persisted state wins over ``wifi_ap.enabled`` on
+    the next start), ``portal`` an optional :class:`~copystation.captive_portal.
+    CaptivePortal` that follows the AP up and down.
+    """
+
+    def __init__(self, config: Any = None, hub: Any = None,
+                 settings: Any = None, portal: Any = None) -> None:
+        self._config = config
+        self._hub = hub
+        self._settings = settings
+        self._portal = portal
+        # Triggers live on different threads (button poll loop, web threadpool):
+        # serialise them so two switches never interleave their nmcli calls.
+        self._lock = threading.Lock()
+
+    @property
+    def cfg(self) -> Any:
+        return (self._config.get("wifi_ap") if self._config is not None else None) or {}
+
+    def known_active(self) -> bool:
+        """Last known AP state -- from memory when possible, else ask nmcli."""
+        if self._hub is not None:
+            return bool(self._hub.state.ap_active)
+        return is_active(self.cfg)
+
+    def apply(self, active: bool) -> bool:
+        """Bring the AP to ``active``; return whether it is up afterwards."""
+        active = bool(active)
+        with self._lock:
+            if self._hub is None:
+                actual = set_active(self.cfg, active)
+                self._persist(actual)
+                self._sync_portal(actual)
+                return actual
+
+            from .status import Event
+
+            # Instant feedback (display + LED) + persist before the slow network op.
+            self._hub.set_ap_active(active)
+            self._hub.signal(Event.AP_ENABLED if active else Event.AP_DISABLED)
+            self._persist(active)
+            actual = set_active(self.cfg, active)
+            if actual != active:
+                # The bring-up failed (e.g. no valid password): correct the display
+                # and the persisted state.
+                self._hub.set_ap_active(actual)
+                self._persist(actual)
+            self._sync_portal(actual)
+            return actual
+
+    def flip(self) -> bool:
+        """Toggle the AP; return whether it is up afterwards."""
+        if self._hub is None:
+            # No cached state to flip -- let nmcli decide the direction.
+            with self._lock:
+                actual = toggle(self.cfg)
+                self._persist(actual)
+                self._sync_portal(actual)
+                return actual
+        return self.apply(not self.known_active())
+
+    def _persist(self, active: bool) -> None:
+        if self._settings is not None:
+            self._settings.update(enabled=bool(active))
+
+    def _sync_portal(self, active: bool) -> None:
+        if self._portal is None:
+            return
+        try:
+            self._portal.sync(active)
+        except Exception as exc:  # pragma: no cover - best effort
+            _LOG.warning("Captive portal could not follow the AP state: %s", exc)

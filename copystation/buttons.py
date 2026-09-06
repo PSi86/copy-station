@@ -245,43 +245,24 @@ def command_action(command: str) -> Action:
     return _run
 
 
-def wifi_ap_toggle_action(config=None, hub=None, ap_settings=None) -> Action:
+def wifi_ap_toggle_action(config=None, hub=None, ap_settings=None,
+                          portal=None) -> Action:
     """Action that toggles the WLAN access point (see :mod:`copystation.wifi_ap`).
 
-    The indication is updated *first*, before the (slow, several-second) nmcli
-    call: the target state is chosen by flipping the last known ``ap_active``
-    (in-memory, no nmcli), so the display badge and the WS2812 blink code react
-    the instant the press is recognised. The AP is then actually brought up/down,
-    and the state is reconciled if a requested bring-up did not succeed.
+    A thin binding around :class:`~copystation.wifi_ap.ApController`, which the
+    web interface and the ``wifi-ap`` CLI share -- so every trigger gives the same
+    feedback (display badge + WS2812 blink code *before* the slow nmcli call),
+    persists the same state and keeps the captive portal in step.
 
     ``ap_settings`` is the :class:`~copystation.settings_store.SettingsStore` that
     persists the AP on/off state, so a toggle survives a restart independent of
-    ``wifi_ap.enabled`` in the config.
+    ``wifi_ap.enabled`` in the config; ``portal`` is the optional captive portal.
     """
 
-    def _persist(active: bool) -> None:
-        if ap_settings is not None:
-            ap_settings.update(enabled=active)
-
     def _run() -> None:
-        from . import wifi_ap
-        from .status import Event
+        from .wifi_ap import ApController
 
-        ap_cfg = (config.get("wifi_ap") if config is not None else None) or {}
-        if hub is None:
-            _persist(wifi_ap.toggle(ap_cfg))
-            return
-        desired = not bool(hub.state.ap_active)
-        # Instant feedback (display + LED) + persist before the slow network op.
-        hub.set_ap_active(desired)
-        hub.signal(Event.AP_ENABLED if desired else Event.AP_DISABLED)
-        _persist(desired)
-        actual = wifi_ap.set_active(ap_cfg, desired)
-        if actual != desired:
-            # The bring-up failed (e.g. no valid password): correct the display
-            # and the persisted state.
-            hub.set_ap_active(actual)
-            _persist(actual)
+        ApController(config=config, hub=hub, settings=ap_settings, portal=portal).flip()
 
     return _run
 
@@ -318,13 +299,13 @@ def auto_transcode_toggle_action(transcode=None, hub=None) -> Action:
 
 
 def _resolve_action(button: str, key: str, raw, config=None, hub=None,
-                    transcode=None, ap_settings=None) -> Optional[Action]:
+                    transcode=None, ap_settings=None, portal=None) -> Optional[Action]:
     if raw is None or raw == "none":
         return None
     if raw in ("poweroff", "reboot"):
         return systemctl_action(raw)
     if raw == "wifi_ap":
-        return wifi_ap_toggle_action(config, hub, ap_settings)
+        return wifi_ap_toggle_action(config, hub, ap_settings, portal)
     if raw == "auto_transcode":
         return auto_transcode_toggle_action(transcode, hub)
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
@@ -334,7 +315,7 @@ def _resolve_action(button: str, key: str, raw, config=None, hub=None,
 
 
 def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None,
-                  hub=None, transcode=None, ap_settings=None) -> list:
+                  hub=None, transcode=None, ap_settings=None, portal=None) -> list:
     """Build all configured user buttons; disabled/misconfigured ones are skipped.
 
     ``action_overrides`` is an injection point for tests: a ready-made
@@ -344,7 +325,8 @@ def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None,
     blink codes. ``transcode`` is the :class:`~copystation.transcode.TranscodeManager`
     (or ``None``), needed by the ``auto_transcode`` action. ``ap_settings`` is the
     :class:`~copystation.settings_store.SettingsStore` the ``wifi_ap`` action
-    persists the AP on/off state to.
+    persists the AP on/off state to and ``portal`` the optional captive portal
+    that follows the AP up and down.
     """
     if (config.get("power") or {}).get("shutdown_button"):
         _LOG.warning(
@@ -370,7 +352,7 @@ def build_buttons(config, action_overrides: Optional[Dict[str, Action]] = None,
             actions = {}
             for event, key in EVENT_CONFIG_KEYS.items():
                 action = _resolve_action(name, key, raw.get(key), config, hub,
-                                         transcode, ap_settings)
+                                         transcode, ap_settings, portal)
                 if action is not None:
                     actions[event] = action
         if not actions:

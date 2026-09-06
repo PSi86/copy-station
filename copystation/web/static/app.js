@@ -119,13 +119,63 @@ function renderMainTranscode(tr) {
     q.count ? `job ${q.index}/${q.count}${q.pending ? ` · ${q.pending} pending` : ""}` : "";
 }
 
+// WiFi AP: a plain badge (visible only while the AP is up) unless this station
+// can switch it -- then a permanently visible on/off button, so an AP with no
+// hardware button is not a one-way street. `apPending` keeps the optimistic
+// state during the several-second nmcli call, which the status poll would
+// otherwise overwrite with the not-yet-updated value.
+let apControllable = false;
+let apPending = null;
+
+function renderAp(active) {
+  const badge = document.getElementById("ap");
+  const toggle = document.getElementById("ap-toggle");
+  if (!apControllable) {
+    badge.hidden = !active;
+    return;
+  }
+  badge.hidden = true;
+  toggle.hidden = false;
+  const shown = apPending === null ? active : apPending;
+  toggle.classList.toggle("on", shown);
+  toggle.textContent = shown ? "WiFi AP on" : "WiFi AP off";
+}
+
+async function setAp(enabled) {
+  const toggle = document.getElementById("ap-toggle");
+  if (!enabled && !confirm(
+    "Switch the WiFi access point off? If this page is open over the access " +
+    "point, it becomes unreachable."
+  )) return;
+  apPending = enabled;
+  toggle.disabled = true;
+  renderAp(enabled);
+  try {
+    const res = await fetch("/api/wifi_ap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      alert(detail.detail || "The access point could not be switched.");
+    }
+  } catch (e) {
+    // Expected when switching OFF over the AP itself: the answer never arrives
+    // because the network we were talking over is gone.
+  } finally {
+    apPending = null;
+    toggle.disabled = false;
+  }
+}
+
 function apply(data) {
   const phase = (data.phase || "").toLowerCase();
   const badge = document.getElementById("phase");
   badge.textContent = phase || "--";
   badge.className = "badge " + phase;
 
-  document.getElementById("ap").hidden = !data.wifi_ap;
+  renderAp(!!data.wifi_ap);
 
   // The top bar is shared between a copy and a transcode (like the e-paper): a
   // running transcode drives it with the whole-queue progress + total remaining
@@ -943,6 +993,14 @@ async function initFeatures() {
   deleteAvailable = !!features.delete;
   downloadAvailable = !!features.download;
   previewAvailable = !!features.preview;
+  apControllable = !!features.wifi_ap;
+
+  if (apControllable) {
+    // Left hidden until the next status poll (<= POLL_MS) fills in on/off, so it
+    // never appears in a state it does not have yet.
+    const toggle = document.getElementById("ap-toggle");
+    toggle.addEventListener("click", () => setAp(!toggle.classList.contains("on")));
+  }
 
   if (features.files) {
     document.getElementById("files-card").hidden = false;

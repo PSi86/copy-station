@@ -32,18 +32,18 @@ def test_target_url():
 def test_daemon_captive_disabled_removes_dropin(monkeypatch):
     import copystation.captive_portal as cp
     from copystation.config import Config
-    from copystation.daemon import _maybe_start_captive_portal
+    from copystation.daemon import _maybe_prepare_captive_portal
 
     removed = []
     monkeypatch.setattr(cp, "remove_dnsmasq_hijack", lambda *a, **k: removed.append(True))
-    assert _maybe_start_captive_portal(Config()) is None  # default: off
+    assert _maybe_prepare_captive_portal(Config()) is None  # default: off
     assert removed  # stale drop-in cleaned up
 
 
-def test_daemon_captive_enabled_writes_hijack_and_starts(monkeypatch):
+def test_daemon_captive_enabled_writes_hijack_but_does_not_bind_yet(monkeypatch):
     import copystation.captive_portal as cp
     from copystation.config import Config
-    from copystation.daemon import _maybe_start_captive_portal
+    from copystation.daemon import _maybe_prepare_captive_portal
 
     wrote, started = [], []
 
@@ -63,24 +63,73 @@ def test_daemon_captive_enabled_writes_hijack_and_starts(monkeypatch):
     cfg = Config()
     cfg.data["wifi_ap"]["captive_portal"] = True
     cfg.data["web"]["enabled"] = True
-    portal = _maybe_start_captive_portal(cfg)
+    portal = _maybe_prepare_captive_portal(cfg)
     assert isinstance(portal, _FakePortal)
+    assert portal.args == ("10.42.0.1", 8080, 80)
+    # The DNS drop-in must exist BEFORE the AP is raised (NM's dnsmasq reads it),
+    # but the redirect server binds the AP address, which does not exist yet.
     assert wrote == ["10.42.0.1"]
-    assert started == [("10.42.0.1", 8080, 80)]
+    assert started == []
 
 
-def test_daemon_captive_without_web_warns(monkeypatch, caplog):
+def _captive_without_web(monkeypatch, ap_enabled):
     import copystation.captive_portal as cp
     from copystation.config import Config
-    from copystation.daemon import _maybe_start_captive_portal
+    from copystation.daemon import _maybe_prepare_captive_portal
 
     monkeypatch.setattr(cp, "remove_dnsmasq_hijack", lambda *a, **k: None)
     cfg = Config()
     cfg.data["wifi_ap"]["captive_portal"] = True
+    cfg.data["wifi_ap"]["enabled"] = ap_enabled
     cfg.data["web"]["enabled"] = False
-    with caplog.at_level("WARNING"):
-        assert _maybe_start_captive_portal(cfg) is None
+    assert _maybe_prepare_captive_portal(cfg) is None
+
+
+def test_daemon_captive_without_web_warns_when_the_ap_is_usable(monkeypatch, caplog):
+    with caplog.at_level("INFO"):
+        _captive_without_web(monkeypatch, ap_enabled=True)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("no page to redirect" in r.message for r in warnings)
+
+
+def test_daemon_captive_without_web_is_only_a_note_without_an_ap(monkeypatch, caplog):
+    # The portal ships enabled, so a station that never raises an AP must not be
+    # warned about it on every single start -- that would be noise, not guidance.
+    with caplog.at_level("INFO"):
+        _captive_without_web(monkeypatch, ap_enabled=False)
     assert any("no page to redirect" in r.message for r in caplog.records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_portal_binds_the_ap_address_by_default():
+    # Not 0.0.0.0: a wildcard bind would occupy port 80 on the LAN side too and
+    # bounce LAN requests to an address only AP clients can reach.
+    portal = CaptivePortal("10.42.0.1", 8080)
+    assert portal._host == "10.42.0.1"
+
+
+def test_portal_sync_starts_and_stops_with_the_ap():
+    portal = CaptivePortal("127.0.0.1", 8080, listen_port=0, host="127.0.0.1")
+    try:
+        portal.sync(True)
+        assert portal.running
+        port = portal.port
+        portal.sync(True)  # idempotent: no second bind, same port
+        assert portal.port == port
+        portal.sync(False)
+        assert not portal.running
+    finally:
+        portal.stop()
+
+
+def test_portal_sync_survives_a_missing_ap_address(caplog):
+    # The AP address is not on this machine -> the bind can never succeed. That
+    # must be a logged warning, never an exception that takes the daemon down.
+    portal = CaptivePortal("10.255.255.1", 8080, listen_port=0, bind_timeout=0)
+    with caplog.at_level("WARNING"):
+        portal.sync(True)
+    assert not portal.running
+    assert any("could not bind" in r.message for r in caplog.records)
 
 
 def test_redirect_server_302s_to_web_ui():
