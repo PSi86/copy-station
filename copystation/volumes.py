@@ -57,16 +57,40 @@ def root_source_device() -> Optional[str]:
     return strip_partition(name)
 
 
+def kernel_partitions(device) -> list[str]:
+    """Names of the partitions the kernel created on a whole-disk ``device``.
+
+    The kernel marks each partition it created with a ``partition`` attribute in
+    the disk's sysfs directory (``.../block/sda/sda1/partition``); no other
+    subdirectory of a disk carries one. Empty when there are none, or when the
+    device has no sysfs path to look at.
+    """
+    sys_path = getattr(device, "sys_path", None)
+    if not sys_path:
+        return []
+    try:
+        return sorted(entry.parent.name for entry in Path(sys_path).glob("*/partition"))
+    except OSError:  # pragma: no cover - defensive (device vanished mid-scan)
+        return []
+
+
 def is_usb_volume(device, root_dev: Optional[str]) -> bool:
     """True if ``device`` is a mountable USB volume (and not the root device).
 
     Accepts two shapes:
     * a USB *partition* (``sda1``, ``sdc1`` ...), and
-    * a USB *whole disk* that carries a filesystem directly, with no partition
-      table (``sdc`` with no ``sdc1``). The DJI O4 Air Unit exposes its storage
-      this way ("superfloppy"), so without this it would never be detected.
-      Disks that DO have a partition table are skipped here -- their partitions
-      are handled individually.
+    * a USB *whole disk* that carries a filesystem directly and has no
+      partitions (``sdc`` with no ``sdc1``). DJI O4 and Walksnail air units
+      expose their storage this way ("superfloppy"), so without this they would
+      never be detected. Disks the kernel split into partitions are skipped
+      here -- their partitions are handled individually.
+
+    Whether a disk is partitioned is decided by the partitions the kernel
+    actually created, not by udev's ``ID_PART_TABLE_TYPE``: libblkid before 2.39
+    (Debian 12 / Raspberry Pi OS Bookworm) takes the 55AA signature of an exFAT
+    boot sector for an empty DOS partition table and reports ``dos`` for exactly
+    these superfloppies. The kernel creates no partition for them, so the whole
+    disk is the only node there is to mount.
     """
     if device.get("ID_BUS") != "usb":
         return False
@@ -74,10 +98,17 @@ def is_usb_volume(device, root_dev: Optional[str]) -> bool:
     if devtype == "partition":
         pass
     elif devtype == "disk":
-        if device.get("ID_PART_TABLE_TYPE"):
-            return False  # partitioned -> its partitions are the candidates
         if not device.get("ID_FS_TYPE"):
             return False  # no directly-mountable filesystem
+        if kernel_partitions(device):
+            return False  # partitioned -> its partitions are the candidates
+        if device.get("ID_PART_TABLE_TYPE"):
+            _LOG.debug(
+                "%s: udev reports a %r partition table but the kernel created no "
+                "partition -- using the whole disk (%s)",
+                device.sys_name, device.get("ID_PART_TABLE_TYPE"),
+                device.get("ID_FS_TYPE"),
+            )
     else:
         return False
     base = strip_partition(device.sys_name)

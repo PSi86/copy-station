@@ -1031,7 +1031,14 @@ they are inserted at the same time**. A candidate is any USB *volume* -- either 
 partition (`sdb1`) or a whole disk that carries a filesystem directly with no
 partition table (`sdc`, as the O4 Air Unit presents it). The board's own OS card
 is excluded, and volumes smaller than `identify.min_partition_gb` (default 6 GB)
-are ignored. Once two eligible volumes are present:
+are ignored.
+
+Whether a disk is partitioned is decided by the partitions the **kernel** created
+(`sdc1`, ...), not by what udev reports: the libblkid in Raspberry Pi OS Bookworm
+(util-linux 2.38) mistakes an exFAT boot sector for an empty DOS partition table
+and reports `ID_PART_TABLE_TYPE=dos` for exactly these whole-disk devices. The
+kernel creates no partition for them, so the disk itself is what gets mounted.
+Once two eligible volumes are present:
 
 * **Source** = the smallest volume that contains a `DCIM` folder (and, if
   configured, matches the USB VID/PID allowlist).

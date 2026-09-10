@@ -17,6 +17,7 @@ from copystation.devices import (
     select_roles,
 )
 from copystation.status import Event
+from copystation.volumes import kernel_partitions
 
 GB = 1024**3
 MIN_BYTES = 6 * GB
@@ -282,10 +283,11 @@ def test_detected_devices_emit_one_signal_each():
 
 
 class _FakeDevice:
-    """Minimal stand-in for a pyudev device (.get / .sys_name / .find_parent)."""
+    """Minimal stand-in for a pyudev device (.get / .sys_name / .sys_path / .find_parent)."""
 
-    def __init__(self, sys_name, parent=None, **props):
+    def __init__(self, sys_name, parent=None, sys_path=None, **props):
         self.sys_name = sys_name
+        self.sys_path = sys_path
         self._props = props
         self._parent = parent
 
@@ -316,12 +318,59 @@ def test_candidate_accepts_partitionless_usb_disk():
     assert w._is_candidate(dev) is True
 
 
-def test_candidate_rejects_partitioned_disk_node():
-    # A disk that carries a partition table is handled via its partitions, not
-    # the whole-disk node.
+def _sysfs_disk(tmp_path, name, partitions=()):
+    """A disk's sysfs directory, with a ``partition`` attribute per kernel partition.
+
+    The kernel marks every partition it created with that attribute; the other
+    subdirectories of a disk (queue, holders, ...) never carry it.
+    """
+    disk = tmp_path / name
+    (disk / "queue").mkdir(parents=True)
+    for part in partitions:
+        (disk / part).mkdir()
+        (disk / part / "partition").write_text("1\n")
+    return str(disk)
+
+
+def test_kernel_partitions_lists_only_nodes_the_kernel_marked(tmp_path):
+    # Mirrors a Raspberry Pi's SD card: mmcblk0p1/p2 carry the attribute, the
+    # disk's other subdirectories (queue here) do not.
+    dev = _FakeDevice("mmcblk0",
+                      sys_path=_sysfs_disk(tmp_path, "mmcblk0", ["mmcblk0p2", "mmcblk0p1"]))
+    assert kernel_partitions(dev) == ["mmcblk0p1", "mmcblk0p2"]
+    assert kernel_partitions(_FakeDevice("sda", sys_path=_sysfs_disk(tmp_path, "sda"))) == []
+    assert kernel_partitions(_FakeDevice("sdz")) == []  # no sysfs path to look at
+
+
+def test_candidate_rejects_partitioned_disk_node(tmp_path):
+    # A disk the kernel split into partitions is handled via those partitions,
+    # not the whole-disk node.
     w = _watcher()
-    dev = _FakeDevice("sdb", DEVTYPE="disk", ID_BUS="usb", ID_PART_TABLE_TYPE="dos")
+    dev = _FakeDevice("sdb", sys_path=_sysfs_disk(tmp_path, "sdb", ["sdb1"]),
+                      DEVTYPE="disk", ID_BUS="usb", ID_PART_TABLE_TYPE="dos")
     assert w._is_candidate(dev) is False
+
+
+def test_candidate_rejects_disk_with_kernel_partitions_even_with_a_filesystem(tmp_path):
+    # The kernel's partitions decide, whatever udev reports for the disk itself:
+    # counting the disk as well would present the same data twice.
+    w = _watcher()
+    dev = _FakeDevice("sdb", sys_path=_sysfs_disk(tmp_path, "sdb", ["sdb1"]),
+                      DEVTYPE="disk", ID_BUS="usb", ID_FS_TYPE="vfat")
+    assert w._is_candidate(dev) is False
+
+
+def test_candidate_accepts_exfat_superfloppy_that_libblkid_calls_partitioned(tmp_path):
+    # Field report, Raspberry Pi 4 on Debian 12 (Bookworm): a DJI O4 Lite and a
+    # Walksnail air unit both came up with exactly these udev properties, and
+    # the kernel created no sda1. libblkid before 2.39 takes the 55AA signature
+    # of an exFAT boot sector for an (empty) DOS partition table. The whole disk
+    # is the only mountable node, so it has to be the candidate.
+    w = _watcher(root_dev="mmcblk0")
+    dev = _FakeDevice("sda", sys_path=_sysfs_disk(tmp_path, "sda"),
+                      DEVTYPE="disk", ID_BUS="usb", ID_FS_TYPE="exfat",
+                      ID_PART_TABLE_TYPE="dos")
+    assert w._is_candidate(dev) is True
 
 
 def test_candidate_rejects_disk_without_filesystem():
