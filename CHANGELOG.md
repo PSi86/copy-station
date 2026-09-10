@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-10
+
+Detection fix from a field report on a Raspberry Pi 4 running Raspberry Pi OS
+Bookworm: a DJI O4 Lite that the Pi enumerated fine as USB storage never showed
+up in Copy_Station.
+
+### Fixed
+- **Whole-disk devices such as the DJI O4 are detected on Raspberry Pi OS
+  Bookworm.** udev reported `ID_FS_TYPE=exfat` together with
+  `ID_PART_TABLE_TYPE=dos` for the whole disk, while the kernel created no
+  partition on it. Copy_Station skipped every disk that carries a partition
+  table, on the assumption that its partitions are the candidates -- here there
+  were none, so the unit was missing from the station and from the file browser
+  alike. The `dos` comes from libblkid: up to util-linux 2.38 its DOS partition
+  prober excludes FAT and NTFS boot sectors but not exFAT, whose boot sector
+  carries the same `55AA` signature as an MBR. 2.39 added the exFAT check;
+  Bookworm ships 2.38.1, Debian 13 Trixie 2.41 -- which is why the Trixie boards
+  this was developed on never showed it. Whether a disk is partitioned is now
+  decided by the partitions the kernel actually created (the `partition`
+  attribute in sysfs), not by udev's guess. A disk the kernel did split up is
+  still handled via its partitions, now also when udev reports a filesystem on
+  the disk itself.
+- A **Walksnail air unit** showed the same symptom on the same Pi and is now
+  listed too. It cannot be a copy source yet: it records to the root of its
+  storage, not to a `DCIM` folder.
+
 ## [1.2.1] - 2026-09-06
 
 A re-image of the A733 station turned up two silent failures and dated one
@@ -447,7 +473,9 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/PSi86/copy-station/releases/tag/v1.2.2
+[1.2.1]: https://github.com/PSi86/copy-station/releases/tag/v1.2.1
 [1.2.0]: https://github.com/PSi86/copy-station/releases/tag/v1.2.0
 [1.1.1]: https://github.com/PSi86/copy-station/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PSi86/copy-station/releases/tag/v1.1.0
