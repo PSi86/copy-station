@@ -6,6 +6,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-10
+
+Walksnail support: air units that record to the root of their storage instead of
+into a `DCIM` folder are now used as a source -- and only their recordings are
+copied and cleared, never the unit's own files.
+
+### Added
+- **Sources that record to the root of their storage**
+  (`identify.root_media_sources`). The Walksnail air unit writes its recordings
+  (`VID0001.mp4`) straight into the root, next to files of its own. For such a
+  device a recording is every video file at the root plus every file named after
+  it, whatever its extension (`VID0001.osd`, `VID0001.srt`, ...); exactly that
+  set is copied, verified and then deleted file by file. The unit's own files
+  (`Avatar_version.txt`), folders, hidden files and sidecars whose video is gone
+  stay where they are, and no folder is ever removed. Sidecar types never have
+  to be listed, so a firmware that adds a new one keeps working.
+- Because this deletes from the root, a device only counts as such a source when
+  **every** criterion of an entry matches: `vid`, `pid` and the USB descriptor
+  strings `manufacturer` / `product`. The Walksnail reports the generic
+  Linux-gadget ID `1d6b:0104`, so the entry also requires its manufacturer string
+  `Artosyn`. It is the built-in default -- existing configs inherit it without an
+  edit; `root_media_sources: []` switches it off. Videos at the root of any other
+  volume remain plain data and never make it a source.
+- The web interface marks such a device with "recordings in root" instead of
+  "DCIM".
+
+### Changed
+- The list of video extensions moved from `copystation.transcode` to the new
+  `copystation.media`, shared by the device watcher and transcoding.
+  `copystation.transcode` still exports `VIDEO_EXTS` and `is_video_file`.
+- The activity log reads "Source empty -- nothing to copy" instead of "Source
+  DCIM empty -- nothing to copy", as it now covers both kinds of source.
+
 ## [1.2.2] - 2026-09-10
 
 Detection fix from a field report on a Raspberry Pi 4 running Raspberry Pi OS
@@ -473,7 +506,8 @@ existing status-only deployments are unaffected.
   (before the slow `nmcli` call), and a startup diagnostic warns when the AP is
   configured but the web interface is disabled.
 
-[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/PSi86/copy-station/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/PSi86/copy-station/releases/tag/v1.3.0
 [1.2.2]: https://github.com/PSi86/copy-station/releases/tag/v1.2.2
 [1.2.1]: https://github.com/PSi86/copy-station/releases/tag/v1.2.1
 [1.2.0]: https://github.com/PSi86/copy-station/releases/tag/v1.2.0
