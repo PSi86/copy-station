@@ -38,6 +38,11 @@ identify:
   # Friendly web-UI names by USB VID/PID. 2ca3:0020 = DJI O4 Lite (confirmed).
   device_labels:
     - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
+  # Sources that record to the root of their storage (no DCIM folder): only
+  # their videos and the files named after them are copied and deleted. See
+  # config.example.yaml for details.
+  root_media_sources:
+    - { vid: "1d6b", pid: "0104", manufacturer: "Artosyn", name: "Walksnail" }
 
 cleanup:
   keep_dcim_folder: true

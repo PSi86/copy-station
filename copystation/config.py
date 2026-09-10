@@ -54,6 +54,16 @@ DEFAULTS: dict[str, Any] = {
         "device_labels": [
             {"vid": "2ca3", "pid": "0020", "name": "O4 Lite"},
         ],
+        # Sources that record to the ROOT of their storage instead of into
+        # media_dirname. Their recordings are the video files there plus every
+        # file named after one (VID0001.mp4 -> VID0001.osd, any extension); only
+        # those are copied and then deleted, the rest of the root stays. Every
+        # criterion an entry names must match. The Walksnail reports the generic
+        # Linux-gadget ID 1d6b:0104, so the USB manufacturer string is what
+        # actually identifies it.
+        "root_media_sources": [
+            {"vid": "1d6b", "pid": "0104", "manufacturer": "Artosyn", "name": "Walksnail"},
+        ],
     },
     # Cleanup behaviour.
     "cleanup": {

@@ -4,7 +4,8 @@ The actual transfer is done preferably via ``rsync`` (proven, resumable). If
 ``rsync`` is not available -- e.g. on the Windows dev machine during
 simulation/tests -- it transparently falls back to a pure Python copy
 (``shutil``). Both paths produce the same result: the CONTENTS of the source
-folder end up in the target folder.
+folder end up in the target folder -- or, when a list of ``files`` is given
+(a source whose recordings are individual files at its root), exactly those.
 
 Verification is intentionally kept fast: it compares file count and file sizes
 (no checksums). Only on successful verification may the caller clear the source.
@@ -17,10 +18,12 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Iterator, Optional, Sequence
 
 _LOG = logging.getLogger("copystation.transfer")
 
@@ -119,14 +122,22 @@ class SourceVanishedError(TransferError):
     """The source disappeared during the transfer."""
 
 
-def dir_signature(root: Path) -> dict[str, int]:
+def dir_signature(root: Path, files: Optional[Sequence[str]] = None) -> dict[str, int]:
     """Snapshot of a directory tree as ``{relative_path: size}``.
 
     Basis for both the space calculation and the verification. Paths are
-    normalised with ``/`` so the comparison is platform independent.
+    normalised with ``/`` so the comparison is platform independent. With
+    ``files`` (paths relative to ``root``) only those are taken; one that is no
+    longer there is left out, which then shows up as a verification mismatch.
     """
     root = Path(root)
     signature: dict[str, int] = {}
+    if files is not None:
+        for rel in files:
+            path = root / rel
+            if path.is_file() and not path.is_symlink():
+                signature[Path(rel).as_posix()] = path.stat().st_size
+        return signature
     for path in root.rglob("*"):
         if path.is_file() and not path.is_symlink():
             rel = path.relative_to(root).as_posix()
@@ -134,9 +145,9 @@ def dir_signature(root: Path) -> dict[str, int]:
     return signature
 
 
-def total_size(root: Path) -> int:
-    """Total size of all files below ``root`` in bytes."""
-    return sum(dir_signature(root).values())
+def total_size(root: Path, files: Optional[Sequence[str]] = None) -> int:
+    """Total size of all files below ``root`` -- or of just ``files`` -- in bytes."""
+    return sum(dir_signature(root, files).values())
 
 
 def check_free_space(target_root: Path, required_bytes: int, margin: float = 1.02) -> None:
@@ -178,6 +189,7 @@ def copy_tree(
     dst: Path,
     on_progress: Optional[ProgressCallback] = None,
     abort_check: Optional[AbortCheck] = None,
+    files: Optional[Sequence[str]] = None,
 ) -> None:
     """Copy the contents of ``src`` into ``dst`` (target folder is created).
 
@@ -185,6 +197,8 @@ def copy_tree(
     ``on_progress`` is given it is called with the cumulative byte count as the
     copy proceeds. If ``abort_check`` is given it is polled during the copy and,
     when it returns True, the copy is stopped promptly with ``SourceVanishedError``.
+    With ``files`` (paths relative to ``src``) only those are copied; a listed
+    file that is gone fails the copy, like any other file that cannot be read.
     """
     src = Path(src)
     dst = Path(dst)
@@ -194,9 +208,31 @@ def copy_tree(
     dst.mkdir(parents=True, exist_ok=True)
 
     if _rsync_available():
-        _copy_with_rsync(src, dst, on_progress, abort_check)
+        if files is None:
+            _copy_with_rsync(src, dst, on_progress, abort_check)
+        else:
+            with _rsync_file_list(files) as list_path:
+                _copy_with_rsync(src, dst, on_progress, abort_check, files_from=list_path)
     else:
-        _copy_with_shutil(src, dst, on_progress, abort_check)
+        _copy_with_shutil(src, dst, on_progress, abort_check, files=files)
+
+
+@contextmanager
+def _rsync_file_list(files: Sequence[str]) -> Iterator[str]:
+    """A temporary NUL-separated list for ``rsync --from0 --files-from``.
+
+    NUL separation keeps any file name intact, whatever characters it holds.
+    """
+    handle = tempfile.NamedTemporaryFile("wb", suffix=".files", delete=False)
+    try:
+        with handle:
+            handle.write(b"".join(os.fsencode(name) + b"\0" for name in files))
+        yield handle.name
+    finally:
+        try:
+            os.unlink(handle.name)
+        except OSError:  # pragma: no cover - best effort
+            pass
 
 
 # Used when we know a device dropped out but not which side (e.g. an rsync I/O
@@ -225,6 +261,7 @@ def _copy_with_rsync(
     dst: Path,
     on_progress: Optional[ProgressCallback],
     abort_check: Optional[AbortCheck] = None,
+    files_from: Optional[str] = None,
 ) -> None:
     # Trailing slash on the source => the CONTENTS of src end up in dst.
     src_arg = str(src).rstrip("/\\") + "/"
@@ -235,9 +272,12 @@ def _copy_with_rsync(
         "--no-owner",
         "--no-group",
         "--info=progress2",
-        src_arg,
-        str(dst),
     ]
+    if files_from is not None:
+        # Exactly the listed files (paths relative to src_arg). -a does not
+        # imply recursion together with --files-from, so nothing else comes along.
+        cmd += ["--from0", f"--files-from={files_from}"]
+    cmd += [src_arg, str(dst)]
     # LC_ALL=C so the byte count uses commas as the thousands separator,
     # matching the parser above regardless of the system locale.
     env = {"LC_ALL": "C"}
@@ -334,15 +374,21 @@ def _copy_with_shutil(
     dst: Path,
     on_progress: Optional[ProgressCallback],
     abort_check: Optional[AbortCheck] = None,
+    files: Optional[Sequence[str]] = None,
 ) -> None:
     done = 0
-    for path in sorted(src.rglob("*")):
+    paths = sorted(src.rglob("*")) if files is None else [src / rel for rel in files]
+    for path in paths:
         if abort_check is not None:
             reason = abort_check()
             if reason:
                 raise SourceVanishedError(_abort_message(reason))
         rel = path.relative_to(src)
         target = dst / rel
+        if files is not None and not path.is_file():
+            # A listed file that is gone (or not a file): like rsync, fail the
+            # copy rather than skip it, so nothing is deleted afterwards.
+            raise SourceVanishedError("Source files vanished. Nothing was deleted.")
         if path.is_dir():
             target.mkdir(parents=True, exist_ok=True)
         elif path.is_file():
@@ -353,12 +399,14 @@ def _copy_with_shutil(
                 on_progress(done)
 
 
-def verify(src: Path, dst: Path) -> None:
+def verify(src: Path, dst: Path, files: Optional[Sequence[str]] = None) -> None:
     """Fast verification: same files (relative path) and same sizes.
 
-    Raises ``VerificationError`` with a descriptive message on any mismatch.
+    ``dst`` is compared as a whole against ``src`` -- or against just ``files``
+    of ``src``, the set that was copied. Raises ``VerificationError`` with a
+    descriptive message on any mismatch.
     """
-    src_sig = dir_signature(src)
+    src_sig = dir_signature(src, files)
     dst_sig = dir_signature(dst)
 
     if src_sig == dst_sig:
@@ -403,3 +451,28 @@ def cleanup_source(media_dir: Path, keep_folder: bool = True) -> None:
                 entry.unlink()
     else:
         shutil.rmtree(media_dir)
+
+
+def delete_files(root: Path, files: Iterable[str]) -> None:
+    """Delete exactly ``files`` (relative to ``root``) -- never format, never a folder.
+
+    The counterpart of :func:`cleanup_source` for a source whose recordings are
+    individual files at its root (see :func:`copystation.media.recording_files`):
+    pass the very list that was copied and verified. Only regular files inside
+    ``root`` are removed; a listed name that is a folder, a symlink, missing, or
+    pointing outside ``root`` is skipped. Everything not listed stays.
+    """
+    root = Path(root)
+    base = root.resolve()
+    for rel in files:
+        path = root / rel
+        try:
+            resolved = path.resolve()
+        except OSError:  # pragma: no cover - defensive
+            continue
+        if resolved == base or not resolved.is_relative_to(base):
+            _LOG.warning("Not deleting %s: outside the source", rel)
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        path.unlink()

@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from .config import Config, load_config
+from .media import recording_files
 from .naming import next_transfer_dir
 from .settings_store import SettingsStore
 from .state import StationState, StatusHub, StorageInfo
@@ -32,6 +33,7 @@ from .transfer import (
     check_free_space,
     cleanup_source,
     copy_tree,
+    delete_files,
     total_size,
     verify,
     volume_alive,
@@ -96,12 +98,19 @@ def perform_transfer(
     target_name: str | None = None,
     on_devices_refresh=None,
     required: int | None = None,
+    root_media: bool = False,
 ) -> Path:
     """Perform a complete transfer.
 
     The order is safety critical: copy -> verify -> ONLY THEN clear the source.
     Any error before successful verification leaves the source untouched.
     Returns the created target folder.
+
+    ``root_media`` marks a source that records to the root of its storage (see
+    ``identify.root_media_sources``) instead of into ``media_dirname``. Its
+    recordings are individual files there (:func:`~copystation.media.recording_files`),
+    and that one list is copied, verified and then deleted -- everything else on
+    the source stays, and no folder is ever removed.
 
     ``source_device`` / ``target_device`` (e.g. ``/dev/sdc``) let the copy abort
     promptly if either is unplugged mid-transfer, rather than waiting for the I/O
@@ -114,17 +123,23 @@ def perform_transfer(
     """
     source_root = Path(source_root)
     target_root = Path(target_root)
-    media_dir = source_root / config.media_dirname
-
-    if not media_dir.is_dir():
-        raise TransferError(f"No {config.media_dirname} folder on the source.")
+    if root_media:
+        media_dir = source_root
+        files = recording_files(source_root)
+        if not files:
+            raise TransferError("No recordings on the source.")
+    else:
+        media_dir = source_root / config.media_dirname
+        files = None
+        if not media_dir.is_dir():
+            raise TransferError(f"No {config.media_dirname} folder on the source.")
 
     src_label = source_name or "source"
     tgt_label = target_name or "target"
     hub.set_storage(storage_info(source_root, src_label), storage_info(target_root, tgt_label))
 
     if required is None:
-        required = total_size(media_dir)
+        required = total_size(media_dir, files)
     check_free_space(target_root, required)
 
     dest = next_transfer_dir(target_root, source_name)
@@ -149,7 +164,8 @@ def perform_transfer(
                 last_refresh[0] = now
                 on_devices_refresh()
 
-    copy_tree(media_dir, dest, on_progress=_on_progress, abort_check=abort_check)
+    copy_tree(media_dir, dest, on_progress=_on_progress, abort_check=abort_check,
+              files=files)
     # Safety net: if the target vanished during the copy but rsync still
     # "finished" (writes buffered in the page cache, never flushed to a gone
     # device), do NOT verify/clear -- the data never reached the target.
@@ -163,12 +179,16 @@ def perform_transfer(
 
     _LOG.info("Verifying transfer ...")
     hub.log_event("Verifying ...")
-    verify(media_dir, dest)
+    verify(media_dir, dest, files=files)
 
-    keep = config.get("cleanup", {}).get("keep_dcim_folder", True)
-    _LOG.info("Verification ok -- clearing source (keep_folder=%s)", keep)
     hub.log_event("Clearing source ...")
-    cleanup_source(media_dir, keep_folder=keep)
+    if files is None:
+        keep = config.get("cleanup", {}).get("keep_dcim_folder", True)
+        _LOG.info("Verification ok -- clearing source (keep_folder=%s)", keep)
+        cleanup_source(media_dir, keep_folder=keep)
+    else:
+        _LOG.info("Verification ok -- deleting the %d copied recording file(s)", len(files))
+        delete_files(media_dir, files)
     if on_devices_refresh is not None:
         on_devices_refresh()  # source DCIM now empty -> "empty" flag + freed space
 

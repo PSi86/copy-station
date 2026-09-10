@@ -61,7 +61,8 @@ function renderDevices(el, devices) {
     .map((d) => {
       const name = d.name || d.node || "device";
       const role = roleLabel[d.role] || d.role || "";
-      const dcim = d.has_dcim ? " · DCIM" : "";
+      // Where this device's media live: a DCIM folder, or (Walksnail) its root.
+      const dcim = d.root_media ? " · recordings in root" : d.has_dcim ? " · DCIM" : "";
       const used =
         d.capacity != null && d.free != null ? d.capacity - d.free : null;
       const size =

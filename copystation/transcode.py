@@ -43,6 +43,9 @@ from .encoders import (
     select_encoders,
     with_decode_offload,
 )
+# The video definition lives in .media (shared with the device watcher); both
+# names stay importable from here.
+from .media import VIDEO_EXTS, is_video_file  # noqa: F401
 from .mounts import BrowseError, NotFound, safe_resolve
 from .settings_store import DEFAULT_USER_SETTINGS_FILE, SettingsStore
 from .status import State
@@ -76,21 +79,10 @@ _SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 OUTPUT_LOCATIONS = ("central", "same")
 DEFAULT_OUTPUT_LOCATION = "same"
 
-# Extensions treated as transcodable video when a whole folder is submitted. The
-# GStreamer hardware path only takes a subset (see ``encoders._GST_DEMUX``); the
-# rest still transcode on the CPU. Non-video files (photos, sidecars) are skipped.
-VIDEO_EXTS = frozenset({
-    "mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "ts",
-    "mpg", "mpeg", "wmv", "flv", "3gp", "3g2", "mxf", "insv",
-})
-# Deliberately NOT here: ``.lrv`` (DJI/Insta360 low-resolution preview proxies) --
-# they are not worth transcoding and share a stem with the real clip, so they
-# would only collide on the output name (e.g. DJI_0001.LRV vs DJI_0001.MP4).
-
-
-def is_video_file(name: str) -> bool:
-    """Whether ``name`` has a known video extension (for folder submission)."""
-    return Path(str(name)).suffix.lower().lstrip(".") in VIDEO_EXTS
+# Folder submission transcodes the files ``is_video_file`` accepts (see .media).
+# The GStreamer hardware path only takes a subset (see ``encoders._GST_DEMUX``);
+# the rest still transcode on the CPU. Non-video files (photos, sidecars) are
+# skipped.
 
 
 class TranscodeError(Exception):
