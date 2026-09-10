@@ -15,7 +15,9 @@ from copystation.transfer import (
     check_free_space,
     cleanup_source,
     copy_tree,
+    delete_files,
     dir_signature,
+    total_size,
     verify,
 )
 
@@ -341,3 +343,104 @@ def test_perform_transfer_second_run_increments(tmp_path):
 
     assert d1.name == "transfer_0001_Cam"
     assert d2.name == "transfer_0002_Cam"
+
+
+# ----- sources that record to the root of their storage (Walksnail) -----------
+
+def _make_walksnail(root):
+    """A Walksnail-like volume: recordings at the root, next to the unit's own
+    files, an orphaned sidecar and filesystem bookkeeping."""
+    files = {
+        "VID0001.mp4": b"video-one",
+        "VID0001.osd": b"osd-one",
+        "VID0002.mp4": b"video-two!",
+        "Avatar_version.txt": b"fw 1.0",
+        "VID0009.osd": b"orphan",
+        "System Volume Information/WPSettings.dat": b"sys",
+    }
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return root
+
+
+def _names(root):
+    return sorted(p.name for p in root.iterdir())
+
+
+RECORDINGS = ["VID0001.mp4", "VID0001.osd", "VID0002.mp4"]
+LEFT_ON_THE_UNIT = ["Avatar_version.txt", "System Volume Information", "VID0009.osd"]
+
+
+def test_copy_verify_and_delete_touch_only_the_listed_files(tmp_path):
+    src = _make_walksnail(tmp_path / "walk")
+    dst = tmp_path / "dst"
+    assert total_size(src, RECORDINGS) == len(b"video-one") + len(b"osd-one") + len(b"video-two!")
+
+    copy_tree(src, dst, files=RECORDINGS)
+    assert _names(dst) == RECORDINGS
+    verify(src, dst, files=RECORDINGS)  # must not raise
+
+    delete_files(src, RECORDINGS)
+    assert _names(src) == LEFT_ON_THE_UNIT
+    assert (src / "System Volume Information" / "WPSettings.dat").is_file()
+
+
+def test_verify_with_files_detects_a_missing_copy(tmp_path):
+    src = _make_walksnail(tmp_path / "walk")
+    dst = tmp_path / "dst"
+    copy_tree(src, dst, files=RECORDINGS)
+    (dst / "VID0001.osd").unlink()
+    with pytest.raises(VerificationError):
+        verify(src, dst, files=RECORDINGS)
+
+
+def test_delete_files_never_removes_a_folder_or_leaves_the_root(tmp_path):
+    src = tmp_path / "walk"
+    (src / "VID0001.mp4").mkdir(parents=True)  # a folder named like a recording
+    (src / "VID0001.mp4" / "keep.txt").write_bytes(b"k")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"not on the unit")
+    delete_files(src, ["VID0001.mp4", "../outside.txt", "missing.osd"])
+    assert (src / "VID0001.mp4" / "keep.txt").is_file()
+    assert outside.is_file()
+
+
+def test_perform_transfer_root_media_full_cycle(tmp_path):
+    src = _make_walksnail(tmp_path / "walk")
+    target = tmp_path / "sd"
+    target.mkdir()
+
+    dest = perform_transfer(src, target, "Walksnail", _hub(), _config(), root_media=True)
+
+    assert dest.name == "transfer_0001_Walksnail"
+    assert _names(dest) == RECORDINGS
+    assert (dest / "VID0002.mp4").read_bytes() == b"video-two!"
+    # Only what was copied and verified left the unit; its own files stayed.
+    assert _names(src) == LEFT_ON_THE_UNIT
+
+
+def test_perform_transfer_root_media_without_recordings_keeps_everything(tmp_path):
+    src = tmp_path / "walk"
+    src.mkdir()
+    (src / "Avatar_version.txt").write_bytes(b"fw 1.0")
+    (src / "VID0009.osd").write_bytes(b"orphan")
+    target = tmp_path / "sd"
+    target.mkdir()
+    with pytest.raises(TransferError):
+        perform_transfer(src, target, "Walksnail", _hub(), _config(), root_media=True)
+    assert _names(src) == ["Avatar_version.txt", "VID0009.osd"]
+    assert _names(target) == []
+
+
+def test_perform_transfer_root_media_ignores_a_dcim_folder(tmp_path):
+    # A root-media source is copied from its root; a DCIM folder on it is not
+    # its media location and is left alone.
+    src = _make_walksnail(tmp_path / "walk")
+    _make_dcim(src, {"100MEDIA/other.mp4": b"not a root recording"})
+    target = tmp_path / "sd"
+    target.mkdir()
+    dest = perform_transfer(src, target, "Walksnail", _hub(), _config(), root_media=True)
+    assert _names(dest) == RECORDINGS
+    assert (src / "DCIM" / "100MEDIA" / "other.mp4").is_file()

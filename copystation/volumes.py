@@ -128,16 +128,69 @@ def usb_ids(device) -> tuple[str, str]:
     pid = (device.get("ID_MODEL_ID") or "").lower()
     if vid and pid:
         return vid, pid
-    find_parent = getattr(device, "find_parent", None)
-    if callable(find_parent):
-        try:
-            parent = find_parent("usb", "usb_device")
-        except Exception:  # pragma: no cover - defensive
-            parent = None
-        if parent is not None:
-            vid = vid or (parent.get("ID_VENDOR_ID") or "").lower()
-            pid = pid or (parent.get("ID_MODEL_ID") or "").lower()
+    parent = _usb_parent(device)
+    if parent is not None:
+        vid = vid or (parent.get("ID_VENDOR_ID") or "").lower()
+        pid = pid or (parent.get("ID_MODEL_ID") or "").lower()
     return vid, pid
+
+
+def _usb_parent(device):
+    """The USB device node a block device hangs off, or None."""
+    find_parent = getattr(device, "find_parent", None)
+    if not callable(find_parent):
+        return None
+    try:
+        return find_parent("usb", "usb_device")
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def _read_sysfs(sys_path: str, attribute: str) -> str:
+    try:
+        return (Path(sys_path) / attribute).read_text(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def usb_strings(device) -> tuple[str, str]:
+    """(manufacturer, product) descriptor strings of the USB device behind ``device``.
+
+    What the kernel logs as ``Manufacturer:``/``Product:`` on connect, read from
+    the USB device's sysfs. The block node's own ``ID_VENDOR``/``ID_MODEL`` are
+    no substitute: for USB mass storage they come from the SCSI inquiry, which
+    reads ``Linux`` / ``File-Stor Gadget`` for any device built on the Linux
+    gadget framework. ``("", "")`` if unknown.
+    """
+    parent = _usb_parent(device)
+    sys_path = getattr(parent, "sys_path", None) if parent is not None else None
+    if not sys_path:
+        return "", ""
+    return _read_sysfs(sys_path, "manufacturer"), _read_sysfs(sys_path, "product")
+
+
+def root_media_profile(device, config) -> Optional[dict]:
+    """The ``identify.root_media_sources`` entry ``device`` matches, or None.
+
+    Such a device records to the root of its storage instead of into a DCIM
+    folder (the Walksnail air unit), so a match decides that its recordings are
+    copied from -- and afterwards deleted from -- the root. Every criterion an
+    entry names (``vid``, ``pid``, ``manufacturer``, ``product``) must match;
+    strings compare case-insensitively. An entry that names none matches
+    nothing, so a half-filled entry can never turn every device into one.
+    """
+    entries = (config.get("identify", {}) or {}).get("root_media_sources") or []
+    if not entries:
+        return None
+    vid, pid = usb_ids(device)
+    manufacturer, product = usb_strings(device)
+    actual = {"vid": vid, "pid": pid,
+              "manufacturer": manufacturer.lower(), "product": product.lower()}
+    for entry in entries:
+        wanted = {key: str(entry[key]).strip().lower() for key in actual if entry.get(key)}
+        if wanted and all(actual[key] == value for key, value in wanted.items()):
+            return entry
+    return None
 
 
 def configured_label(device, config) -> Optional[str]:
@@ -166,13 +219,18 @@ def volume_name(device, config) -> str:
     1. a user-configured name matched by USB VID/PID (``identify.device_labels``)
        -- this is how an O4 becomes "O4 Lite"/"O4 Pro" without hardcoding, since
        the USB product string is only a serial,
-    2. the filesystem label (e.g. a card the user named),
-    3. the USB model / vendor string,
-    4. a generic fallback.
+    2. the name of a matched ``identify.root_media_sources`` entry (a Walksnail
+       only reports the generic ``Linux`` / ``File-Stor Gadget``),
+    3. the filesystem label (e.g. a card the user named),
+    4. the USB model / vendor string,
+    5. a generic fallback.
     """
     configured = configured_label(device, config)
     if configured:
         return configured
+    profile = root_media_profile(device, config)
+    if profile and profile.get("name"):
+        return str(profile["name"])
     for key in ("ID_FS_LABEL", "ID_MODEL", "ID_VENDOR"):
         value = device.get(key)
         if value:

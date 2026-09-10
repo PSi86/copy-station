@@ -1,8 +1,9 @@
 """Device detection, mounting and role identification (Linux/Cubie only).
 
 Task: from the mass-storage devices attached to the USB hub, determine the
-SOURCE (camera, recognised by its DCIM folder) and the TARGET (SD card), mount
-both, trigger the transfer and then unmount cleanly.
+SOURCE (camera, recognised by its DCIM folder -- or, for a device matched by
+``identify.root_media_sources``, by the recordings at its root) and the TARGET
+(SD card), mount both, trigger the transfer and then unmount cleanly.
 
 Important safety rules:
 * The Cubie's own boot/root device (the microSD inside the Cubie) is strictly
@@ -24,10 +25,10 @@ from typing import Callable, Optional
 
 from . import volumes
 from .config import Config
+from .media import is_video_file, recording_files
 from .state import StatusHub, StorageInfo
 from .status import Event, State
 from .status.effects import FILL_GAUGE_SECONDS
-from .transcode import is_video_file
 from .transfer import TransferError, total_size, volume_alive
 
 _LOG = logging.getLogger("copystation.devices")
@@ -37,7 +38,7 @@ TransferFn = Callable[..., Path]
 
 
 class NoSourceError(TransferError):
-    """No eligible partition carries a DCIM folder."""
+    """No eligible partition carries media to copy."""
 
 
 class NoTargetError(TransferError):
@@ -67,7 +68,17 @@ class Probe:
     has_media: bool = True   # media folder holds at least one real file
     is_empty: bool = False   # effectively blank: no real file anywhere on the medium
     no_media: bool = False   # nothing to copy, but the medium carries other data
-    has_label: bool = False  # a user-configured label (identify.device_labels) matched
+    has_label: bool = False  # a configured name (device_labels / root_media_sources) matched
+    root_media: bool = False  # records to its root (identify.root_media_sources matched)
+
+    @property
+    def source_shaped(self) -> bool:
+        """Has a place to copy media from: a DCIM folder, or recordings at its root.
+
+        Whether it actually holds media is ``has_media``; whether it may be used
+        at all is ``matched_source``.
+        """
+        return self.has_dcim or self.root_media
 
 
 def select_roles(
@@ -79,9 +90,10 @@ def select_roles(
 
     Policy:
     * Partitions below ``min_bytes`` are ignored entirely.
-    * Source = the smallest partition that has a NON-EMPTY DCIM folder (and
-      matches the optional USB VID/PID allowlist). A device whose DCIM folder is
-      empty is never a source -- there is nothing to copy.
+    * Source = the smallest partition that has media to copy -- a NON-EMPTY DCIM
+      folder, or recordings at the root of a root-media source -- and matches
+      the optional USB VID/PID allowlist. A device with nothing to copy is never
+      a source.
     * Target = the largest of the remaining partitions.
     * Unless disabled, the source must be strictly smaller than the target, so
       the larger device is never used as source even if it also carries DCIM.
@@ -91,10 +103,10 @@ def select_roles(
     eligible = [p for p in probes if p.capacity >= min_bytes]
 
     source_candidates = [
-        p for p in eligible if p.has_dcim and p.matched_source and p.has_media
+        p for p in eligible if p.source_shaped and p.matched_source and p.has_media
     ]
     if not source_candidates:
-        raise NoSourceError("No source (non-empty DCIM) found among eligible partitions")
+        raise NoSourceError("No source with media found among eligible partitions")
     source = min(source_candidates, key=lambda p: p.capacity)
 
     target_candidates = [p for p in eligible if p is not source]
@@ -120,18 +132,18 @@ def has_source(eligible: list[Probe]) -> bool:
     plugged in. Two blank cards (no DCIM at all) land here too, so they wait
     quietly instead of raising ``NoSourceError``.
     """
-    return any(p.has_dcim and p.matched_source and p.has_media for p in eligible)
+    return any(p.source_shaped and p.matched_source and p.has_media for p in eligible)
 
 
 def has_empty_source(eligible: list[Probe]) -> bool:
     """True when a source is connected but there is nothing to copy.
 
-    That is: at least one eligible volume is source-shaped (carries a DCIM folder
-    and matches the optional VID/PID allowlist), and *every* such volume has an
-    empty DCIM. Used both to decide the "empty source" status signal and to skip
-    starting a transfer.
+    That is: at least one eligible volume is source-shaped (a DCIM folder or a
+    root-media source, passing the optional VID/PID allowlist), and *every* such
+    volume has nothing to copy. Used both to decide the "empty source" status
+    signal and to skip starting a transfer.
     """
-    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    source_shaped = [p for p in eligible if p.source_shaped and p.matched_source]
     return bool(source_shaped) and not any(p.has_media for p in source_shaped)
 
 
@@ -152,7 +164,7 @@ def fill_fraction_for_display(eligible: list[Probe]) -> Optional[float]:
     """
     if not eligible:
         return None
-    source_shaped = [p for p in eligible if p.has_dcim and p.matched_source]
+    source_shaped = [p for p in eligible if p.source_shaped and p.matched_source]
     pool = source_shaped or eligible
     return max(_used_fraction(p) for p in pool)
 
@@ -163,10 +175,11 @@ def _display_rank(p: Probe, min_bytes: int) -> int:
     The panel shows only the top few device rows (the rest collapse into
     "+N more"), so the most promising volumes must come first:
 
-    * 0 -- a user-configured label matched (``identify.device_labels``): an
-      explicitly recognised device, the strongest signal of interest.
-    * 1 -- looks like a real source: a non-empty media folder that passes the
-      optional VID/PID allowlist.
+    * 0 -- a configured name matched (``identify.device_labels`` or
+      ``identify.root_media_sources``): an explicitly recognised device, the
+      strongest signal of interest.
+    * 1 -- looks like a real source: media to copy that passes the optional
+      VID/PID allowlist.
     * 2 -- any other eligible volume.
     * 3 -- ignored (below ``min_bytes``): least interesting, shown last.
     """
@@ -174,7 +187,7 @@ def _display_rank(p: Probe, min_bytes: int) -> int:
         return 3
     if p.has_label:
         return 0
-    if p.has_dcim and p.matched_source and p.has_media:
+    if p.source_shaped and p.matched_source and p.has_media:
         return 1
     return 2
 
@@ -246,6 +259,7 @@ def device_views(
                 "capacity": p.capacity,
                 "free": p.free,
                 "has_dcim": p.has_dcim,
+                "root_media": p.root_media,
                 "eligible": eligible,
                 "role": role,
             }
@@ -288,10 +302,15 @@ def _has_real_file(root: Path) -> bool:
     return False
 
 
-def _content_flags(mountpoint: Path, media_dir: Path, has_dcim: bool) -> tuple[bool, bool, bool]:
+def _content_flags(mountpoint: Path, media_dir: Path, has_dcim: bool,
+                   root_media: bool = False) -> tuple[bool, bool, bool]:
     """``(has_media, is_empty, no_media)`` for a mounted volume.
 
-    * ``has_media`` -- the media folder holds at least one real file: a source.
+    * ``has_media`` -- there is something to copy: the media folder holds at
+      least one real file, or -- for a root-media source only -- its root holds
+      a recording (:func:`~copystation.media.recording_files`). Videos at the
+      root of any OTHER volume do not count: they are just data on it, and a
+      volume whose media gets deleted after the copy must be recognised as such.
     * ``is_empty`` -- nothing to copy AND the whole medium is effectively blank
       (no real file anywhere; junk and bare folders ignored).
     * ``no_media`` -- nothing to copy, but the medium DOES carry real data
@@ -302,7 +321,10 @@ def _content_flags(mountpoint: Path, media_dir: Path, has_dcim: bool) -> tuple[b
     Exactly one of ``is_empty``/``no_media`` is set when there is nothing to
     copy; both are False for a volume with media.
     """
-    has_media = has_dcim and _has_real_file(media_dir)
+    if root_media:
+        has_media = bool(recording_files(mountpoint))
+    else:
+        has_media = has_dcim and _has_real_file(media_dir)
     has_content = has_media or _has_real_file(mountpoint)
     return has_media, not has_content, (not has_media and has_content)
 
@@ -532,7 +554,7 @@ class DeviceWatcher:
                 self._hub.set_phase(State.DETECTING)
                 if added:
                     if has_empty_source(eligible):
-                        self._hub.log_event("Source DCIM empty -- nothing to copy")
+                        self._hub.log_event("Source empty -- nothing to copy")
                     else:
                         self._hub.log_event("No source detected -- waiting")
                 _LOG.info("No usable source present -- waiting.")
@@ -571,8 +593,7 @@ class DeviceWatcher:
             # appears promptly when the gauge time is up, not after an extra pause.
             self._hub.set_fill(fill, sticky=True)
             self._hub.set_phase(State.DETECTING)
-            media_dir = source.mountpoint / self._config.media_dirname
-            required = self._hold_before_copy(source, target, media_dir)
+            required = self._hold_before_copy(source, target)
             if required is None:
                 self._armed = True
                 self._hub.log_event("Device removed before copy")
@@ -596,6 +617,7 @@ class DeviceWatcher:
                 config=self._config,
                 on_devices_refresh=_refresh_devices,
                 required=required,  # measured during the hold -> no re-scan delay
+                root_media=source.root_media,
             )
             self._hub.log_event("Ready to remove devices")
             # Auto-transcode: queue the just-copied video files (which now live on
@@ -663,7 +685,7 @@ class DeviceWatcher:
             _LOG.warning("Auto-transcode could not be queued: %s", exc)
             self._hub.log_event(f"Auto-transcode skipped: {exc}", level="error")
 
-    def _hold_before_copy(self, source: Probe, target: Probe, media_dir: Path):
+    def _hold_before_copy(self, source: Probe, target: Probe):
         """Stay in DETECTING for the fill-gauge duration before copying.
 
         The render thread shows the source's fill gauge during this hold, so the
@@ -676,7 +698,7 @@ class DeviceWatcher:
         """
         deadline = time.monotonic() + FILL_GAUGE_SECONDS
         try:
-            required = total_size(media_dir)
+            required = self._media_size(source)
         except OSError:
             return None
         while time.monotonic() < deadline:
@@ -684,6 +706,12 @@ class DeviceWatcher:
                 return None
             time.sleep(0.1)
         return required if self._both_present(source, target) else None
+
+    def _media_size(self, source: Probe) -> int:
+        """Bytes the copy of ``source`` moves: its DCIM folder, or its root recordings."""
+        if source.root_media:
+            return total_size(source.mountpoint, recording_files(source.mountpoint))
+        return total_size(source.mountpoint / self._config.media_dirname)
 
     @staticmethod
     def _both_present(source: Probe, target: Probe) -> bool:
@@ -736,7 +764,9 @@ class DeviceWatcher:
 
         media_dir = mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
-        has_media, is_empty, no_media = _content_flags(mountpoint, media_dir, has_dcim)
+        root_media = volumes.root_media_profile(dev, self._config) is not None
+        has_media, is_empty, no_media = _content_flags(mountpoint, media_dir, has_dcim,
+                                                       root_media)
         return Probe(
             sys_name=dev.sys_name,
             device_node=dev.device_node,
@@ -749,15 +779,16 @@ class DeviceWatcher:
             has_media=has_media,
             is_empty=is_empty,
             no_media=no_media,
-            has_label=self._configured_label(dev) is not None,
+            has_label=root_media or self._configured_label(dev) is not None,
+            root_media=root_media,
         )
 
     def _restat(self, probe: Probe) -> Probe:
-        """Re-measure a mounted probe (free space + DCIM contents) in place.
+        """Re-measure a mounted probe (free space + media contents) in place.
 
         Used to refresh the web view live during/after a copy: the target fills
-        up, and once the source DCIM has been cleared it becomes empty. Returns
-        the probe unchanged if the mount is gone.
+        up, and once the source's media has been cleared it becomes empty.
+        Returns the probe unchanged if the mount is gone.
         """
         try:
             stat = os.statvfs(probe.mountpoint)
@@ -765,7 +796,8 @@ class DeviceWatcher:
             return probe
         media_dir = probe.mountpoint / self._config.media_dirname
         has_dcim = media_dir.is_dir()
-        has_media, is_empty, no_media = _content_flags(probe.mountpoint, media_dir, has_dcim)
+        has_media, is_empty, no_media = _content_flags(probe.mountpoint, media_dir, has_dcim,
+                                                       probe.root_media)
         return replace(
             probe,
             capacity=stat.f_frsize * stat.f_blocks,

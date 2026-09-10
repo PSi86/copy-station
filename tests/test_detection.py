@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,20 +17,28 @@ from copystation.devices import (
     order_for_display,
     select_roles,
 )
+from copystation.config import Config
+from copystation.devices import _content_flags
 from copystation.status import Event
-from copystation.volumes import kernel_partitions
+from copystation.volumes import (
+    kernel_partitions,
+    root_media_profile,
+    usb_strings,
+    volume_name,
+)
 
 GB = 1024**3
 MIN_BYTES = 6 * GB
 
 
 def _probe(name, capacity, has_dcim, matched_source=True, free=None,
-           has_media=True, is_empty=None, no_media=False, has_label=False):
+           has_media=True, is_empty=None, no_media=False, has_label=False,
+           root_media=False):
     # Mirror the production rule for the common fixtures: a camera card whose
     # media folder is empty and that carries nothing else is effectively blank
     # -> empty. Sticks with unrelated data pass no_media=True explicitly.
     if is_empty is None:
-        is_empty = (not has_media) and has_dcim and not no_media
+        is_empty = (not has_media) and (has_dcim or root_media) and not no_media
     return Probe(
         sys_name=name,
         device_node=f"/dev/{name}",
@@ -43,6 +52,7 @@ def _probe(name, capacity, has_dcim, matched_source=True, free=None,
         is_empty=is_empty,
         no_media=no_media,
         has_label=has_label,
+        root_media=root_media,
     )
 
 
@@ -226,12 +236,26 @@ def test_hold_before_copy_returns_source_size_when_present(tmp_path, monkeypatch
     monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 0.05)  # keep the test quick
     src = tmp_path / "sdc"; src.write_bytes(b"")
     tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
-    media = tmp_path / "DCIM"; media.mkdir()
+    media = tmp_path / "DCIM"; media.mkdir()     # DCIM on the source's mountpoint
     (media / "clip.mp4").write_bytes(b"x" * 16)  # the size scanned during the hold
     w = _watcher()
-    assert w._hold_before_copy(
-        _probe_with_node("cam", src), _probe_with_node("sd", tgt), media
-    ) == 16
+    w._config = Config()
+    assert w._hold_before_copy(_probe_with_node("cam", src), _probe_with_node("sd", tgt)) == 16
+
+
+def test_hold_before_copy_sizes_only_the_recordings_of_a_root_media_source(tmp_path, monkeypatch):
+    import copystation.devices as dev
+
+    monkeypatch.setattr(dev, "FILL_GAUGE_SECONDS", 0.05)
+    src = tmp_path / "sdc"; src.write_bytes(b"")   # the node file itself sits at the root
+    tgt = tmp_path / "sdd"; tgt.write_bytes(b"")
+    (tmp_path / "VID0001.mp4").write_bytes(b"v" * 10)
+    (tmp_path / "VID0001.osd").write_bytes(b"o" * 3)
+    (tmp_path / "Avatar_version.txt").write_bytes(b"f" * 100)  # not a recording
+    w = _watcher()
+    w._config = Config()
+    walk = replace(_probe_with_node("walk", src), has_dcim=False, root_media=True)
+    assert w._hold_before_copy(walk, _probe_with_node("sd", tgt)) == 13
 
 
 def test_hold_before_copy_bails_when_a_device_is_gone(tmp_path, monkeypatch):
@@ -243,8 +267,9 @@ def test_hold_before_copy_bails_when_a_device_is_gone(tmp_path, monkeypatch):
     media = tmp_path / "DCIM"; media.mkdir()
     (media / "clip.mp4").write_bytes(b"x")
     w = _watcher()
+    w._config = Config()
     assert w._hold_before_copy(
-        _probe_with_node("cam", missing), _probe_with_node("sd", tgt), media
+        _probe_with_node("cam", missing), _probe_with_node("sd", tgt)
     ) is None
 
 
@@ -744,6 +769,43 @@ def test_detecting_after_success_clears_stale_role_storage(monkeypatch):
     assert [d["name"] for d in snap["devices"]] == ["sd"]
 
 
+def test_a_root_media_source_reaches_the_transfer_as_one(monkeypatch):
+    # The wiring the tests of the single pieces cannot see: a source chosen for
+    # the recordings at its root must reach perform_transfer with
+    # root_media=True -- otherwise the copy goes looking for a DCIM folder.
+    import copystation.devices as dev
+    from copystation.config import Config
+    from copystation.state import StationState, StatusHub
+    from copystation.status import StatusIndicator
+
+    w = _watcher()
+    w._hub = StatusHub(StationState(), StatusIndicator())
+    w._config = Config()
+    w._transcode = None
+    w._armed, w._errored = True, False
+    w._prev_nodes, w._node_names = set(), {}
+
+    walk = _probe("walk", 28 * GB, has_dcim=False, root_media=True, has_label=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    probed = iter([walk, sd])
+    monkeypatch.setattr(DeviceWatcher, "_current_partitions", lambda self: [object(), object()])
+    monkeypatch.setattr(DeviceWatcher, "_probe_device", lambda self, d, base: next(probed))
+    monkeypatch.setattr(DeviceWatcher, "_hold_before_copy", lambda self, s, t: 13)
+    monkeypatch.setattr(DeviceWatcher, "_umount", staticmethod(lambda mountpoint: None))
+    monkeypatch.setattr(dev.subprocess, "run", lambda *a, **k: None)  # the final `sync`
+
+    calls = []
+    w._transfer = lambda **kwargs: calls.append(kwargs) or Path("/sd/transfer_0001_walk")
+
+    w._evaluate()
+
+    assert len(calls) == 1
+    assert calls[0]["source_root"] == walk.mountpoint
+    assert calls[0]["target_root"] == sd.mountpoint
+    assert calls[0]["root_media"] is True
+    assert calls[0]["required"] == 13
+
+
 # --------------------------------------------------------------------------- #
 # Auto-transcode trigger after a successful copy
 # --------------------------------------------------------------------------- #
@@ -831,3 +893,105 @@ def test_auto_transcode_noop_when_no_videos(tmp_path):
     _auto_watcher(tc)._maybe_queue_auto_transcode(
         _target_probe(tmp_path), tmp_path / "transfer_0002_CAM")
     assert tc.calls == []
+
+
+# ----- sources that record to the root of their storage (Walksnail) -----------
+
+WALKSNAIL = {"vid": "1d6b", "pid": "0104", "manufacturer": "Artosyn", "name": "Walksnail"}
+
+
+def _usb_parent(path, manufacturer, product):
+    """A USB device node whose sysfs carries the descriptor strings."""
+    path.mkdir(parents=True)
+    (path / "manufacturer").write_text(manufacturer + "\n")
+    (path / "product").write_text(product + "\n")
+    return _FakeDevice(path.name, sys_path=str(path))
+
+
+def _root_media_config(entries):
+    cfg = Config()
+    cfg.data["identify"]["root_media_sources"] = entries
+    return cfg
+
+
+def test_usb_strings_come_from_the_usb_parent(tmp_path):
+    dev = _FakeDevice("sda", parent=_usb_parent(tmp_path / "1-1.1", "Artosyn", "Sirius"))
+    assert usb_strings(dev) == ("Artosyn", "Sirius")
+    assert usb_strings(_FakeDevice("sdb")) == ("", "")  # no USB parent to read
+
+
+def test_root_media_needs_the_manufacturer_not_just_the_generic_ids(tmp_path):
+    # 1d6b:0104 is the Linux Foundation's generic composite-gadget ID: any
+    # device built on the Linux gadget framework may report it. Only the
+    # Artosyn descriptor string makes it a Walksnail.
+    cfg = _root_media_config([WALKSNAIL])
+    walksnail = _FakeDevice("sda", parent=_usb_parent(tmp_path / "a", "Artosyn", "Sirius"),
+                            ID_VENDOR_ID="1d6b", ID_MODEL_ID="0104")
+    other_gadget = _FakeDevice("sdb", parent=_usb_parent(tmp_path / "b", "Linux", "Gadget"),
+                               ID_VENDOR_ID="1d6b", ID_MODEL_ID="0104")
+    assert root_media_profile(walksnail, cfg)["name"] == "Walksnail"
+    assert root_media_profile(other_gadget, cfg) is None
+
+
+def test_root_media_is_off_for_devices_without_a_profile(tmp_path):
+    cfg = _root_media_config([WALKSNAIL])
+    o4 = _FakeDevice("sda", parent=_usb_parent(tmp_path / "o4", "DJI", "O4-9BTKNBE00101SS"),
+                     ID_VENDOR_ID="2ca3", ID_MODEL_ID="0020")
+    assert root_media_profile(o4, cfg) is None
+
+
+def test_a_profile_entry_without_criteria_matches_nothing(tmp_path):
+    cfg = _root_media_config([{"name": "catch-all"}])
+    dev = _FakeDevice("sda", parent=_usb_parent(tmp_path / "x", "Artosyn", "Sirius"),
+                      ID_VENDOR_ID="1d6b", ID_MODEL_ID="0104")
+    assert root_media_profile(dev, cfg) is None
+
+
+def test_the_walksnail_profile_ships_by_default(tmp_path):
+    entries = Config().get("identify")["root_media_sources"]
+    assert {"vid": "1d6b", "pid": "0104", "manufacturer": "Artosyn"}.items() <= entries[0].items()
+
+
+def test_a_root_media_source_is_named_after_its_profile(tmp_path):
+    cfg = _root_media_config([WALKSNAIL])
+    dev = _FakeDevice("sda", parent=_usb_parent(tmp_path / "w", "Artosyn", "Sirius"),
+                      ID_VENDOR_ID="1d6b", ID_MODEL_ID="0104", ID_MODEL="File-Stor_Gadget")
+    assert volume_name(dev, cfg) == "Walksnail"
+
+
+def test_videos_in_the_root_count_only_for_a_root_media_source(tmp_path):
+    # The guard against clearing an arbitrary stick: videos at its root are
+    # "other data" unless the device matched a root-media profile.
+    (tmp_path / "VID0001.mp4").write_bytes(b"video")
+    (tmp_path / "Avatar_version.txt").write_bytes(b"v")
+    media_dir = tmp_path / "DCIM"
+    assert _content_flags(tmp_path, media_dir, has_dcim=False) == (False, False, True)
+    assert _content_flags(tmp_path, media_dir, has_dcim=False, root_media=True) == (True, False, False)
+
+
+def test_a_root_media_source_without_recordings_reads_empty_or_no_media(tmp_path):
+    (tmp_path / "Avatar_version.txt").write_bytes(b"v")
+    media_dir = tmp_path / "DCIM"
+    # Carries the unit's own file but nothing to copy -> no_media, not a source.
+    assert _content_flags(tmp_path, media_dir, has_dcim=False, root_media=True) == (False, False, True)
+
+
+def test_a_root_media_source_with_recordings_is_chosen():
+    walk = _probe("walk", 28 * GB, has_dcim=False, root_media=True)
+    sd = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    assert has_source([walk, sd])
+    source, target = select_roles([walk, sd], MIN_BYTES)
+    assert source is walk and target is sd
+
+
+def test_a_root_media_source_without_recordings_waits_as_empty():
+    walk = _probe("walk", 28 * GB, has_dcim=False, root_media=True, has_media=False)
+    sd = _probe("sd", 256 * GB, has_dcim=False, has_media=False, is_empty=True)
+    assert not has_source([walk, sd])
+    assert has_empty_source([walk, sd])
+
+
+def test_a_root_media_source_ranks_like_a_labelled_device():
+    walk = _probe("walk", 28 * GB, has_dcim=False, root_media=True, has_label=True)
+    big = _probe("big", 512 * GB, has_dcim=False, has_media=False, no_media=True)
+    assert [p.name for p in order_for_display([big, walk], MIN_BYTES)] == ["walk", "big"]

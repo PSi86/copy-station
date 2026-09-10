@@ -37,6 +37,17 @@ identify:
   device_labels:
     - { vid: "2ca3", pid: "0020", name: "O4 Lite" }
   #   - { vid: "2ca3", pid: "0021", name: "O4 Pro" }   # add once the PID is known
+  # Sources that record to the ROOT of their storage instead of into a DCIM
+  # folder. Their recordings are the video files there plus every file named
+  # after one (VID0001.mp4 -> VID0001.osd, any extension); exactly those are
+  # copied, verified and then deleted -- the rest of the root is never touched.
+  # Because files get deleted, a device only counts as one when EVERY criterion
+  # of an entry matches (vid, pid, manufacturer, product; the last two are the
+  # USB descriptor strings the kernel logs on connect). The Walksnail reports
+  # the generic Linux-gadget ID 1d6b:0104, so its manufacturer string is what
+  # identifies it. This entry is also the built-in default.
+  root_media_sources:
+    - { vid: "1d6b", pid: "0104", manufacturer: "Artosyn", name: "Walksnail" }
 
 cleanup:
   # true: delete DCIM contents, keep the DCIM folder.

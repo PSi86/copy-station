@@ -46,7 +46,9 @@ Ready ──device detected──► Detecting ──source+target ok──► C
   overwritten. The running number is persisted on the SD card.
 * **Verification:** fast comparison of file count and file sizes.
 * **Cleanup:** only on success; only the `DCIM` contents are deleted, never
-  formatted.
+  formatted. A source that records to the root of its storage (the Walksnail
+  air unit) loses exactly the recordings that were copied and verified -- the
+  rest of its root stays.
 * **Resilience:** if the source or target is unplugged mid-copy the copy aborts
   and reports which side dropped out -- promptly (~1 s) when the whole USB device
   is removed, or once the kernel hits the I/O error when only a card is pulled
@@ -1040,8 +1042,9 @@ and reports `ID_PART_TABLE_TYPE=dos` for exactly these whole-disk devices. The
 kernel creates no partition for them, so the disk itself is what gets mounted.
 Once two eligible volumes are present:
 
-* **Source** = the smallest volume that contains a `DCIM` folder (and, if
-  configured, matches the USB VID/PID allowlist).
+* **Source** = the smallest volume with media to copy -- a non-empty `DCIM`
+  folder, or recordings at the root of a root-media source (see below) -- that,
+  if configured, matches the USB VID/PID allowlist.
 * **Target** = the largest of the remaining volumes.
 * By default the source must be **smaller** than the target, so the larger
   device is never used as source even if it also carries a `DCIM` folder
@@ -1058,6 +1061,26 @@ because every `DCIM` folder is empty, or none of the cards carries one at all
 alarm and nothing to reset: plug in a card with media and the copy starts on
 its own.
 
+**Sources that record to the root (Walksnail):** some air units write their
+recordings straight into the root of their storage instead of into a `DCIM`
+folder. For a device listed under `identify.root_media_sources`, a recording is
+every video file at the root (`VID0001.mp4`) together with every file named after
+it, whatever its extension (`VID0001.osd`, `VID0001.srt`, ...). Exactly that set
+is copied, verified and then deleted from the unit; everything else at its root
+-- the unit's own files such as `Avatar_version.txt`, folders, hidden files, a
+sidecar whose video is gone -- is left alone, and no folder is ever removed.
+Sidecar types never have to be listed, so a firmware that adds a new one keeps
+working.
+
+Because this deletes files from the root, a device only counts as such a source
+when **every** criterion of an entry matches: `vid`, `pid`, and the USB
+descriptor strings `manufacturer` / `product` that the kernel logs on connect
+(`journalctl -k | grep -i manufacturer`). The Walksnail reports the generic
+Linux-gadget ID `1d6b:0104`, which any device built on the Linux gadget
+framework may use -- its manufacturer string `Artosyn` is what identifies it.
+That entry is built in; set `root_media_sources: []` to switch it off. Videos
+at the root of any other volume are just data on it and never make it a source.
+
 **Friendly names:** volumes are labelled in the web UI by their filesystem label
 or USB model. Because the O4's USB product string is only a serial, you can map a
 readable name by USB VID/PID via `identify.device_labels`
@@ -1065,9 +1088,9 @@ readable name by USB VID/PID via `identify.device_labels`
 
 **Display order:** when several volumes are attached the most promising appear
 first (the e-paper panel only shows a few rows before collapsing the rest into
-`+N more`). Volumes with a configured `device_labels` name rank highest, then
-volumes that look like a real source (a non-empty media folder), then everything
-else by descending size.
+`+N more`). Volumes with a configured name (`device_labels` or
+`root_media_sources`) rank highest, then volumes that look like a real source
+(media to copy), then everything else by descending size.
 
 **Detection speed:** after a USB event the station waits only until the bus is
 quiet for `settle_quiet_seconds` (default 1 s) before mounting, capped by
